@@ -490,7 +490,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Offline-only bounded canary lifecycle simulator")
     parser.add_argument("--stage", choices=("gpu-smoke", "metric-path"), required=True)
     parser.add_argument("--reserve", type=Decimal, default=Decimal("1.00"))
-    parser.add_argument("--budget-category", choices=("gpu-smoke-retry",))
+    parser.add_argument("--budget-category", choices=("gpu-smoke-retry", "gpu-smoke-distinct-machine"))
     parser.add_argument("--require-zero-instances", action="store_true")
     parser.add_argument("--fixture", action="store_true", help="run only an in-memory fixture")
     parser.add_argument("--live", action="store_true", help="dispatch only through explicit gate artifacts and an injected integration factory")

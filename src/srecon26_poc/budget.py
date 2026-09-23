@@ -18,6 +18,9 @@ CATEGORY_CAPS = {
     # One durable retry entitlement while exactly one original smoke invoice
     # remains pending.  It cannot be split across multiple retry reservations.
     "gpu-smoke-retry": Decimal("0.90"),
+    # One final, independently reviewed smoke attempt on a mechanically
+    # verified distinct machine after the first retry has settled.
+    "gpu-smoke-distinct-machine": Decimal("0.25"),
     "canary": Decimal("1.00"),
     "paired-comparison": Decimal("3.00"),
 }
@@ -218,6 +221,12 @@ class ExposureLedger:
                 pending_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == "gpu-smoke" and entry.get("actual") is None and entry.get("absence_proof") is None]
                 if retries or len(pending_smokes) != 1:
                     raise BudgetExceeded("smoke retry requires exactly one pending original invoice and one unused retry entitlement")
+            if category == "gpu-smoke-distinct-machine":
+                recoveries = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
+                pending_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == "gpu-smoke" and entry.get("actual") is None and entry.get("absence_proof") is None]
+                settled_retries = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == "gpu-smoke-retry" and entry.get("actual") is not None and entry.get("absence_proof") is not None]
+                if recoveries or len(pending_smokes) != 1 or len(settled_retries) != 1:
+                    raise BudgetExceeded("distinct-machine smoke requires one pending original, one settled retry, and one unused entitlement")
             category_total = self._category_exposure(data, category)
             if category_total + amount > CATEGORY_CAPS[category] or self._exposure(data) + amount > MAX_EXPOSURE:
                 raise BudgetExceeded("reservation would exceed approved exposure")
@@ -228,6 +237,23 @@ class ExposureLedger:
     def headroom(self) -> Decimal:
         with self._lock():
             return MAX_EXPOSURE - self._exposure(self._read())
+
+    def smoke_run_ids(self) -> tuple[str, ...]:
+        """Return validated paid-smoke reservation IDs for history binding."""
+
+        with self._lock():
+            data = self._read()
+            reservations = data["reservations"]
+            assert isinstance(reservations, Mapping)
+            return tuple(
+                sorted(
+                    run_id
+                    for run_id, entry in reservations.items()
+                    if isinstance(run_id, str)
+                    and isinstance(entry, Mapping)
+                    and str(entry.get("category", "")).startswith("gpu-smoke")
+                )
+            )
 
     def commit_actual(self, run_id: str, actual: Decimal, absence_proof: Mapping[str, object] | None) -> None:
         if not absence_proof or absence_proof.get("reads") != 3:

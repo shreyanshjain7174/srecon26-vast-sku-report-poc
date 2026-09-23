@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from .budget import ExposureLedger
+from .budget import BudgetWriteFailure, ExposureLedger
 from .canary import VLLM_IMAGE_DIGEST, CanarySnapshot, KvmFacts, evaluate_canary_readiness, evaluate_kvm_capabilities
 from .contracts import InstanceContract, OfferContract, ProbeOutcome, classify_fault
 from .guard import Guard, GuardAttestation, validate_attestation
@@ -44,6 +44,16 @@ APPROVED_GPU_PROFILES = frozenset(
         ("RTX 4000Ada", 20475, "8.9"),
     }
 )
+# Signed-source pins for the one-time distinct-machine recovery attempt.  The
+# ledger must name exactly these paid smoke runs, and each manifest must still
+# hash to the independently submitted guard root.  This avoids trusting a
+# mutable, self-consistent local checksum bundle as machine history.
+AUDITED_HISTORICAL_SMOKE_ANCHORS: Mapping[str, tuple[str, int]] = {
+    "gpu-smoke-smoke20260923060249": ("1a5615c7a1f7df8d8a99e7920de8289a23bde233aa9e4f3cc6f4c79886f5cf3f", 99239),
+    "gpu-smoke-smoke320260923063827": ("cc16a1ea8f4687fc19726c03727375071d1fbea29495c779f3dd060053e39d9f", 17545),
+    "gpu-smoke-smoke420260923065604": ("c4acaadbd36097d806a087a687fb110d856c401ab572d9720a342191d96bb7df", 150513),
+    "gpu-smoke-smoke520260923072321": ("5344f5a8d6a61a504516d66b360062bf02b815e97670a98b8795300d9518d8bc", 150513),
+}
 FROZEN_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 FROZEN_MODEL_REVISION = "989aa7980e4cf806f80c7fef2b1adb7bc71aa306"
 
@@ -212,8 +222,8 @@ class LiveCanaryRequest:
         failures: list[str] = []
         if self.stage not in {"gpu-smoke", "metric-path"}:
             failures.append("stage must be gpu-smoke or metric-path")
-        if not self.run_id:
-            failures.append("run id is required")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", self.run_id):
+            failures.append("run id must be 8-128 URL-safe characters")
         if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", self.nonce):
             failures.append("nonce must be 8-128 URL-safe characters")
         if not self.label.endswith(f"--nonce-{self.nonce}") or self.label.count("--nonce-") != 1:
@@ -221,10 +231,12 @@ class LiveCanaryRequest:
         if not isinstance(self.reserve, Decimal) or not self.reserve.is_finite() or not Decimal("0") < self.reserve <= MAX_STAGE_RESERVE:
             failures.append("reserve must be a positive Decimal no greater than 1.00")
         if self.budget_category is not None:
-            if self.stage != "gpu-smoke" or self.budget_category != "gpu-smoke-retry":
-                failures.append("budget category override is restricted to the audited gpu-smoke retry")
-            elif self.reserve > Decimal("0.90"):
+            if self.stage != "gpu-smoke" or self.budget_category not in {"gpu-smoke-retry", "gpu-smoke-distinct-machine"}:
+                failures.append("budget category override is restricted to an audited gpu-smoke entitlement")
+            elif self.budget_category == "gpu-smoke-retry" and self.reserve > Decimal("0.90"):
                 failures.append("audited gpu-smoke retry reserve must be no greater than 0.90")
+            elif self.budget_category == "gpu-smoke-distinct-machine" and self.reserve > Decimal("0.25"):
+                failures.append("audited distinct-machine smoke reserve must be no greater than 0.25")
         if self.hard_deadline.tzinfo is None or self.hard_deadline.astimezone(UTC) <= now:
             failures.append("hard deadline must be a future timezone-aware timestamp")
         elif self.hard_deadline.astimezone(UTC) - now > MAX_STAGE_RUNTIME:
@@ -453,6 +465,71 @@ def _seal_bundle(run_directory: Path, declared: tuple[Path, ...], *, sums_relati
     return digest
 
 
+def _historical_smoke_machine_ids(
+    output_root: Path,
+    run_ids: tuple[str, ...],
+    *,
+    expected_anchors: Mapping[str, tuple[str, int]] = AUDITED_HISTORICAL_SMOKE_ANCHORS,
+) -> frozenset[int]:
+    """Read machine IDs only from independently pinned manifest roots."""
+
+    if set(run_ids) != set(expected_anchors):
+        raise LiveDispatchError("ledger smoke history differs from signed-source anchor pins")
+    root = Path(output_root).resolve()
+    machines: set[int] = set()
+    for run_id in run_ids:
+        if not run_id or Path(run_id).name != run_id:
+            raise LiveDispatchError("ledger smoke run id is not a safe directory name")
+        directory = root / run_id
+        if directory.is_symlink() or directory.resolve().parent != root:
+            raise LiveDispatchError(f"historical smoke directory is not an exact child: {run_id}")
+        anchor_path = directory / "guard-anchor.json"
+        if anchor_path.is_symlink() or not anchor_path.is_file():
+            raise LiveDispatchError(f"historical smoke bundle is incomplete: {run_id}")
+        anchor = _json(anchor_path)
+        pinned_root, pinned_machine = expected_anchors[run_id]
+        if anchor.get("root_hash") != pinned_root or anchor.get("acknowledged") != pinned_root:
+            raise LiveDispatchError(f"historical smoke guard anchor differs from signed-source pin: {run_id}")
+
+        pre_anchor_manifest = anchor.get("pre_anchor_manifest")
+        pre_anchor_sums = anchor.get("pre_anchor_sums")
+        if pre_anchor_manifest is None and pre_anchor_sums is None:
+            manifest_path = directory / "run-manifest.json"
+            sums_path = directory / "SHA256SUMS"
+            root_path = directory / "ROOT-HASH.txt"
+        elif pre_anchor_manifest == "pre-anchor/run-manifest.json" and pre_anchor_sums == "pre-anchor/SHA256SUMS":
+            manifest_path = directory / pre_anchor_manifest
+            sums_path = directory / pre_anchor_sums
+            root_path = directory / "pre-anchor/ROOT-HASH.txt"
+        else:
+            raise LiveDispatchError(f"historical smoke guard anchor paths are invalid: {run_id}")
+        if manifest_path.parent.is_symlink() or any(path.is_symlink() or not path.is_file() or directory not in path.resolve().parents for path in (manifest_path, sums_path, root_path)):
+            raise LiveDispatchError(f"historical smoke anchored bundle is incomplete: {run_id}")
+        sums = sums_path.read_bytes()
+        root_hash = root_path.read_text(encoding="utf-8").strip()
+        if root_hash != pinned_root or hashlib.sha256(sums).hexdigest() != pinned_root:
+            raise LiveDispatchError(f"historical smoke root is invalid: {run_id}")
+        entries: dict[str, str] = {}
+        for line in sums.decode("utf-8").splitlines():
+            digest, separator, relative = line.partition("  ")
+            if not separator or not re.fullmatch(r"[0-9a-f]{64}", digest) or relative in entries:
+                raise LiveDispatchError(f"historical smoke checksum list is invalid: {run_id}")
+            entries[relative] = digest
+        relative_manifest = str(manifest_path.relative_to(directory))
+        expected = entries.get(relative_manifest)
+        if expected is None or hashlib.sha256(manifest_path.read_bytes()).hexdigest() != expected:
+            raise LiveDispatchError(f"historical smoke manifest is not root-bound: {run_id}")
+        manifest = _json(manifest_path)
+        offer = manifest.get("offer_contract")
+        if manifest.get("run_id") != run_id or manifest.get("stage") != "gpu-smoke" or manifest.get("provider_create_calls") != 1 or not isinstance(offer, Mapping):
+            raise LiveDispatchError(f"historical smoke manifest identity is invalid: {run_id}")
+        machine_id = _to_int(offer.get("machine_id"), "historical machine id")
+        if machine_id != pinned_machine:
+            raise LiveDispatchError(f"historical smoke machine differs from signed-source pin: {run_id}")
+        machines.add(machine_id)
+    return frozenset(machines)
+
+
 class LiveCanaryDispatcher:
     """Exactly-once paid dispatcher with injected guard, report, and workload."""
 
@@ -559,6 +636,13 @@ class LiveCanaryDispatcher:
             return self._blocked(request, f"current exact offer cannot be frozen: {error}", gate_hashes=gate_hashes)
         if current_offer != frozen_offer:
             return self._blocked(request, "current offer differs from frozen vms_enabled contract", gate_hashes=gate_hashes)
+        if request.budget_category == "gpu-smoke-distinct-machine":
+            try:
+                historical_machines = _historical_smoke_machine_ids(self.output_root, self.ledger.smoke_run_ids())
+            except (BudgetWriteFailure, LiveDispatchError, OSError, UnicodeError) as error:
+                return self._blocked(request, f"cannot verify historical smoke machines: {error}", gate_hashes=gate_hashes)
+            if current_offer.machine_id in historical_machines:
+                return self._blocked(request, "distinct-machine smoke offer reuses a historical paid-smoke machine", gate_hashes=gate_hashes)
 
         run_directory = self.output_root / request.run_id
         identity = RunIdentity(request.run_id, request.label, now)
@@ -581,7 +665,7 @@ class LiveCanaryDispatcher:
             self._append(journal, RunState.OFFLINE_VALIDATED, "gates.passed", {"gate_hashes": dict(gate_hashes)})
             self.ledger.reserve(request.run_id, request.reserve, request.budget_category or ("gpu-smoke" if request.stage == "gpu-smoke" else "canary"))
             self._append(journal, RunState.BUDGET_RESERVED, "budget.reserved", {"reserve": str(request.reserve), "project_cap": str(PROJECT_CAP)})
-            self._append(journal, RunState.OFFER_PINNED, "offer.pinned", {"offer_id": current_offer.offer_id, "label": current_offer.label, "vms_enabled": True})
+            self._append(journal, RunState.OFFER_PINNED, "offer.pinned", {"offer_id": current_offer.offer_id, "machine_id": current_offer.machine_id, "dph_total": str(current_offer.dph_total), "label": current_offer.label, "vms_enabled": True})
             if self.report_gate is None:
                 raise LiveDispatchError("exact-target report adapter is unavailable")
             self._append(journal, RunState.REPORT_ADAPTER_READY, "report.adapter_ready", {"fixture_gate": gate_hashes.get("report")})
@@ -610,25 +694,35 @@ class LiveCanaryDispatcher:
             if observed.label != request.label:
                 raise LiveDispatchError("provider create did not return exact nonce-bound label")
             instance = observed
-            self._append(journal, RunState.CREATED_VERIFYING, "provider.create_observed", {"instance_id": instance.instance_id})
+            self._append(
+                journal,
+                RunState.CREATED_VERIFYING,
+                "provider.create_observed",
+                {"instance_id": instance.instance_id, "machine_id": instance.machine_id},
+            )
 
             def heartbeat() -> None:
                 self.guard.record_heartbeat(identity, self.clock.monotonic_ns())
 
-            heartbeat()
-            self._append(journal, RunState.RUNNING_CANARY, "canary.started", {"instance_id": instance.instance_id})
-            evidence = self.workload.run(stage=request.stage, workload=request.workload, instance=instance, run_directory=run_directory, hard_deadline=request.hard_deadline, heartbeat=heartbeat)
-            evidence_files = evidence.evidence_files
-            completed, evidence_blockers = evidence.complete_for(request.stage, now=self.clock.now(), workload=request.workload)
-            automatic_fault = classify_fault(current_offer, instance, evidence.probe_outcome) is FaultClass.PROVIDER_FAULT_CONFIRMED
-            remote_fault = evidence.provider_fault is not None and evidence.provider_fault.valid()
-            confirmed_fault = automatic_fault or remote_fault
-            if confirmed_fault:
-                self._append(journal, RunState.CAPTURING_FAULT, "provider.fault_confirmed", {"automatic_contract_mismatch": automatic_fault, "remote_category": evidence.provider_fault.category if remote_fault and evidence.provider_fault else None})
+            immediate_contract_fault = classify_fault(current_offer, instance, ProbeOutcome.PASS) is FaultClass.PROVIDER_FAULT_CONFIRMED
+            if immediate_contract_fault:
+                self._append(
+                    journal,
+                    RunState.CAPTURING_FAULT,
+                    "provider.fault_confirmed",
+                    {
+                        "automatic_contract_mismatch": True,
+                        "expected_machine_id": current_offer.machine_id,
+                        "observed_machine_id": instance.machine_id,
+                    },
+                )
                 if self.clock.now() < request.report_start_by:
                     self._append(journal, RunState.REPORTING_FAULT, "provider.report_started", {"report_start_by": _stamp(request.report_start_by)})
                     try:
-                        receipt: ReportReceipt = self.report_gate.handle(FaultRecord(instance.instance_id, instance.label, request.nonce, evidence.provider_fault.description if remote_fault and evidence.provider_fault else "confirmed provider contract mismatch"), request.report_start_by)
+                        receipt = self.report_gate.handle(
+                            FaultRecord(instance.instance_id, instance.label, request.nonce, "confirmed provider contract mismatch immediately after create"),
+                            request.report_start_by,
+                        )
                         report_data = {"attempted": True, "confirmed": receipt.confirmed, "before": str(receipt.before_path), "after": str(receipt.after_path) if receipt.after_path else None}
                     except (TimeoutError, ValueError) as error:
                         report_data = {"attempted": True, "confirmed": False, "error": str(error)}
@@ -636,12 +730,32 @@ class LiveCanaryDispatcher:
                 else:
                     limitation = "confirmed provider fault reached report cutoff; report skipped for teardown margin"
                 status = "FAILED_SAFE" if report_data.get("confirmed") else "REPORT_UNCONFIRMED"
-            elif not completed:
-                limitation = "; ".join(evidence_blockers)
-                status = "FAILED_SAFE"
             else:
-                self._append(journal, RunState.COLLECTING, "canary.evidence_complete", {"stage": request.stage})
-                status = "COMPLETED"
+                heartbeat()
+                self._append(journal, RunState.RUNNING_CANARY, "canary.started", {"instance_id": instance.instance_id})
+                evidence = self.workload.run(stage=request.stage, workload=request.workload, instance=instance, run_directory=run_directory, hard_deadline=request.hard_deadline, heartbeat=heartbeat)
+                evidence_files = evidence.evidence_files
+                completed, evidence_blockers = evidence.complete_for(request.stage, now=self.clock.now(), workload=request.workload)
+                remote_fault = evidence.provider_fault is not None and evidence.provider_fault.valid()
+                if remote_fault:
+                    self._append(journal, RunState.CAPTURING_FAULT, "provider.fault_confirmed", {"automatic_contract_mismatch": False, "remote_category": evidence.provider_fault.category if evidence.provider_fault else None})
+                    if self.clock.now() < request.report_start_by:
+                        self._append(journal, RunState.REPORTING_FAULT, "provider.report_started", {"report_start_by": _stamp(request.report_start_by)})
+                        try:
+                            receipt = self.report_gate.handle(FaultRecord(instance.instance_id, instance.label, request.nonce, evidence.provider_fault.description if evidence.provider_fault else "confirmed provider fault"), request.report_start_by)
+                            report_data = {"attempted": True, "confirmed": receipt.confirmed, "before": str(receipt.before_path), "after": str(receipt.after_path) if receipt.after_path else None}
+                        except (TimeoutError, ValueError) as error:
+                            report_data = {"attempted": True, "confirmed": False, "error": str(error)}
+                            limitation = "confirmed provider fault report did not finish before teardown"
+                    else:
+                        limitation = "confirmed provider fault reached report cutoff; report skipped for teardown margin"
+                    status = "FAILED_SAFE" if report_data.get("confirmed") else "REPORT_UNCONFIRMED"
+                elif not completed:
+                    limitation = "; ".join(evidence_blockers)
+                    status = "FAILED_SAFE"
+                else:
+                    self._append(journal, RunState.COLLECTING, "canary.evidence_complete", {"stage": request.stage})
+                    status = "COMPLETED"
         except Exception as error:
             limitation = str(error)
             status = "FAILED_SAFE"

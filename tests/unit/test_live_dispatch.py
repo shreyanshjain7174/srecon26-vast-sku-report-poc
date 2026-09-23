@@ -7,6 +7,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
+import srecon26_poc.live_dispatch as live_dispatch_module
 from srecon26_poc.budget import ExposureLedger
 from srecon26_poc.canary import CanarySnapshot, KvmFacts, MetricSample, VLLM_IMAGE_DIGEST
 from srecon26_poc.contracts import InstanceContract, OfferContract, ProbeOutcome
@@ -14,6 +17,7 @@ from srecon26_poc.guard import GuardAttestation
 from srecon26_poc.live_dispatch import (
     GateArtifactPaths,
     LiveCanaryDispatcher,
+    LiveDispatchError,
     LiveCanaryRequest,
     LiveEvidence,
     ProviderFaultEvidence,
@@ -21,6 +25,7 @@ from srecon26_poc.live_dispatch import (
     WorkloadContract,
     FROZEN_MODEL_ID,
     FROZEN_MODEL_REVISION,
+    _historical_smoke_machine_ids,
 )
 from srecon26_poc.provider import AmbiguousCreate
 from srecon26_poc.reporting import FaultRecord, ReportGate, ReportReceipt
@@ -41,9 +46,9 @@ class Clock:
 
 
 class Provider:
-    def __init__(self, offer: OfferContract, events: list[str], *, ambiguous: bool = False, mismatch: bool = False, external_absence: bool = False) -> None:
+    def __init__(self, offer: OfferContract, events: list[str], *, ambiguous: bool = False, mismatch: bool = False, machine_mismatch: bool = False, external_absence: bool = False) -> None:
         self.offer, self.events = offer, events
-        self.ambiguous, self.mismatch, self.external_absence = ambiguous, mismatch, external_absence
+        self.ambiguous, self.mismatch, self.machine_mismatch, self.external_absence = ambiguous, mismatch, machine_mismatch, external_absence
         self.instances: list[InstanceContract] = []
         self.create_calls = 0
 
@@ -58,7 +63,7 @@ class Provider:
         assert self.create_calls == 1
         assert request_key
         assert launch.disk_gib == 130 and launch.ubuntu_template_hash == OFFICIAL_UBUNTU_2204_TEMPLATE_HASH
-        instance = InstanceContract(417, "wrong GPU" if self.mismatch else contract.gpu_name, contract.num_gpus, contract.gpu_ram_mib, contract.compute_capability, contract.machine_id, contract.dph_total, contract.label)
+        instance = InstanceContract(417, "wrong GPU" if self.mismatch else contract.gpu_name, contract.num_gpus, contract.gpu_ram_mib, contract.compute_capability, 147086 if self.machine_mismatch else contract.machine_id, contract.dph_total, contract.label)
         self.instances = [instance]
         if self.ambiguous:
             raise AmbiguousCreate("timeout after create")
@@ -188,9 +193,9 @@ def _request(tmp_path: Path, now: datetime, *, bad_semgrep: bool = False) -> tup
     )
 
 
-def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, remote_fault: bool = False, anchor_error: bool = False, external_absence: bool = False):
+def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, machine_mismatch: bool = False, remote_fault: bool = False, anchor_error: bool = False, external_absence: bool = False):
     events: list[str] = []
-    provider = Provider(offer, events, ambiguous=ambiguous, mismatch=mismatch, external_absence=external_absence)
+    provider = Provider(offer, events, ambiguous=ambiguous, mismatch=mismatch, machine_mismatch=machine_mismatch, external_absence=external_absence)
     dispatcher = LiveCanaryDispatcher(provider=provider, guard=Guard(request.nonce, events, anchor_error=anchor_error), report_gate=ReportGate(Reporter(events)), workload=Workload(complete=complete, remote_fault=remote_fault), ledger=ExposureLedger(tmp_path / "ledger.json"), output_root=tmp_path / "runs", clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)), absence_interval_seconds=0)
     return dispatcher, provider, events
 
@@ -216,7 +221,53 @@ def test_retry_budget_override_is_bounded_and_smoke_only(tmp_path: Path) -> None
     assert not replace(request, reserve=Decimal("0.90"), budget_category="gpu-smoke-retry").validate(now=now)
     assert "audited gpu-smoke retry reserve must be no greater than 0.90" in replace(request, reserve=Decimal("1.00"), budget_category="gpu-smoke-retry").validate(now=now)
     failures = replace(request, stage="metric-path", reserve=Decimal("0.90"), budget_category="gpu-smoke-retry").validate(now=now)
-    assert "budget category override is restricted to the audited gpu-smoke retry" in failures
+    assert "budget category override is restricted to an audited gpu-smoke entitlement" in failures
+    assert "run id must be 8-128 URL-safe characters" in replace(request, run_id="../../escape").validate(now=now)
+    assert not replace(request, reserve=Decimal("0.25"), budget_category="gpu-smoke-distinct-machine").validate(now=now)
+    assert "audited distinct-machine smoke reserve must be no greater than 0.25" in replace(request, reserve=Decimal("0.250001"), budget_category="gpu-smoke-distinct-machine").validate(now=now)
+    failures = replace(request, stage="metric-path", reserve=Decimal("0.25"), budget_category="gpu-smoke-distinct-machine").validate(now=now)
+    assert "budget category override is restricted to an audited gpu-smoke entitlement" in failures
+
+
+def test_historical_machine_ids_require_hash_sealed_ledger_bound_manifests(tmp_path: Path) -> None:
+    run_id = "gpu-smoke-history"
+    directory = tmp_path / run_id
+    directory.mkdir()
+    manifest = directory / "run-manifest.json"
+    manifest.write_text(json.dumps({"run_id": run_id, "stage": "gpu-smoke", "provider_create_calls": 1, "offer_contract": {"machine_id": 99239}}) + "\n")
+    sums = f"{hashlib.sha256(manifest.read_bytes()).hexdigest()}  run-manifest.json\n"
+    (directory / "SHA256SUMS").write_text(sums)
+    root_hash = hashlib.sha256(sums.encode()).hexdigest()
+    (directory / "ROOT-HASH.txt").write_text(root_hash + "\n")
+    (directory / "guard-anchor.json").write_text(json.dumps({"root_hash": root_hash, "acknowledged": root_hash}) + "\n")
+    pins = {run_id: (root_hash, 99239)}
+
+    assert _historical_smoke_machine_ids(tmp_path, (run_id,), expected_anchors=pins) == frozenset({99239})
+    manifest.write_text(manifest.read_text().replace("99239", "147086"))
+    forged_sums = f"{hashlib.sha256(manifest.read_bytes()).hexdigest()}  run-manifest.json\n"
+    forged_root = hashlib.sha256(forged_sums.encode()).hexdigest()
+    (directory / "SHA256SUMS").write_text(forged_sums)
+    (directory / "ROOT-HASH.txt").write_text(forged_root + "\n")
+    (directory / "guard-anchor.json").write_text(json.dumps({"root_hash": forged_root, "acknowledged": forged_root}) + "\n")
+    with pytest.raises(LiveDispatchError, match="signed-source pin"):
+        _historical_smoke_machine_ids(tmp_path, (run_id,), expected_anchors=pins)
+
+
+def test_distinct_machine_dispatch_blocks_historical_machine_before_guard_or_create(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    request = replace(request, reserve=Decimal("0.25"), budget_category="gpu-smoke-distinct-machine")
+    dispatcher, provider, events = _dispatcher(tmp_path, request, offer)
+    prior_run = "gpu-smoke-prior"
+    dispatcher.ledger.reserve(prior_run, Decimal("0.50"), "gpu-smoke")
+    monkeypatch.setattr(live_dispatch_module, "_historical_smoke_machine_ids", lambda *_args, **_kwargs: frozenset({offer.machine_id}))
+
+    result = dispatcher.run(request)
+
+    assert result.status == "BLOCKED"
+    assert result.limitation == "distinct-machine smoke offer reuses a historical paid-smoke machine"
+    assert provider.create_calls == 0
+    assert "arm" not in events
 
 
 def test_budget_failure_before_guard_arm_does_not_attempt_guard_anchor(tmp_path: Path) -> None:
@@ -256,6 +307,9 @@ def test_dispatcher_reconciles_ambiguous_create_without_a_second_create(tmp_path
     for line in pre_anchor_sums.read_text().splitlines():
         expected, relative = line.split("  ", 1)
         assert hashlib.sha256((result.manifest_path.parent / relative).read_bytes()).hexdigest() == expected
+    journal = (result.manifest_path.parent / "journal" / "journal.ndjson").read_text()
+    assert f'"machine_id":{offer.machine_id}' in journal
+    assert f'"dph_total":"{offer.dph_total}"' in journal
 
 
 def test_anchor_failure_never_publishes_real_gpu_claim(tmp_path: Path) -> None:
@@ -285,6 +339,22 @@ def test_confirmed_provider_fault_reports_before_exact_teardown(tmp_path: Path) 
     assert events.index("report-submit") < events.index("destroy")
     assert events.index("report-after") < events.index("destroy")
     assert result.absence_reads == 3
+
+
+def test_post_create_machine_mismatch_reports_before_teardown_without_running_workload(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    dispatcher, provider, events = _dispatcher(tmp_path, request, offer, machine_mismatch=True)
+
+    result = dispatcher.run(request)
+
+    assert result.status == "FAILED_SAFE"
+    assert provider.create_calls == 1
+    assert events.index("report-submit") < events.index("destroy")
+    journal = (result.manifest_path.parent / "journal" / "journal.ndjson").read_text()
+    assert '"expected_machine_id":99' in journal
+    assert '"observed_machine_id":147086' in journal
+    assert "canary.started" not in journal
 
 
 def test_external_guard_teardown_race_proves_absence_without_claiming_controller_destroy(tmp_path: Path) -> None:

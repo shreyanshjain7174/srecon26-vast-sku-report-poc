@@ -124,6 +124,29 @@ def test_audited_smoke_retry_envelope_keeps_pending_reservation_charged(tmp_path
         ledger.reserve("overflow", Decimal("0.01"), "gpu-smoke-retry")
 
 
+def test_distinct_machine_smoke_is_single_use_after_settled_retry(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("pending-original", Decimal("0.97"), "gpu-smoke")
+    ledger.reserve("settled-retry", Decimal("0.90"), "gpu-smoke-retry")
+    ledger.commit_actual("settled-retry", Decimal("0.005"), _proof(tmp_path, "settled-retry", "0.005"))
+
+    ledger.reserve("distinct-machine", Decimal("0.25"), "gpu-smoke-distinct-machine")
+
+    assert ledger.headroom() == Decimal("3.775")
+    assert ledger.smoke_run_ids() == ("distinct-machine", "pending-original", "settled-retry")
+    with pytest.raises(BudgetExceeded, match="unused entitlement"):
+        ledger.reserve("second-distinct-machine", Decimal("0.01"), "gpu-smoke-distinct-machine")
+
+
+def test_distinct_machine_smoke_requires_settled_retry(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("pending-original", Decimal("0.97"), "gpu-smoke")
+    ledger.reserve("pending-retry", Decimal("0.90"), "gpu-smoke-retry")
+
+    with pytest.raises(BudgetExceeded, match="one settled retry"):
+        ledger.reserve("distinct-machine", Decimal("0.25"), "gpu-smoke-distinct-machine")
+
+
 def test_audited_smoke_retry_rejects_one_dollar_and_requires_pending_original(tmp_path):
     ledger = ExposureLedger(tmp_path / "ledger.json")
     with pytest.raises(BudgetExceeded, match="pending original"):
