@@ -35,4 +35,4 @@ spec:
           name: vllm_kv_cache_usage_perc
         target:
           type: AverageValue
-          averageValue: "80"
+          averageValue: "0.8"
