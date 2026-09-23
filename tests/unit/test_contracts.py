@@ -1,5 +1,5 @@
+from dataclasses import replace
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
@@ -22,7 +22,7 @@ def test_offer_contract_mismatch_is_provider_fault(field, offer, instance):
     changed = {field: "wrong" if field in {"gpu_name", "compute_capability", "label"} else 999}
     if field == "dph_total":
         changed[field] = Decimal("9.99")
-    assert classify_fault(offer, instance.__class__(**{**instance.__dict__, **changed}), ProbeOutcome.PASS) is FaultClass.PROVIDER_FAULT_CONFIRMED
+    assert classify_fault(offer, replace(instance, **changed), ProbeOutcome.PASS) is FaultClass.PROVIDER_FAULT_CONFIRMED
 
 
 def test_model_download_failure_is_unresolved(offer, instance):
