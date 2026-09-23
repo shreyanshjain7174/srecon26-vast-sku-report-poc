@@ -1,0 +1,18 @@
+[Unit]
+Description=SRECon26 independent deadline guard for @NONCE@
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/libexec/srecon26-guard/guard_worker.py tick --root /var/lib/srecon26-guard --secret-file /etc/srecon26-guard/vast-api-key --nonce @NONCE@
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/srecon26-guard
+UMask=0077
+TimeoutStartSec=30s
+

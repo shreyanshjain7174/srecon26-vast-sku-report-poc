@@ -46,7 +46,12 @@ def main(arm_paths: dict[str, Path]) -> int:
         desired_one = len(negatives) >= 7 and all((json.loads(path.read_text()).get("status", {}).get("desiredReplicas", 1) == 1) for path in negatives)
         scaled = json.loads((arm_path / "scaled.hpa.json").read_text()).get("status", {}).get("desiredReplicas") == 2
         ready = json.loads((arm_path / "scaled.deployment.json").read_text()).get("status", {}).get("readyReplicas") == 2
-        results[arm] = desired_one and scaled and ready and negative_margins(arm, arm_path) and check(source, cpu_millicores(cpu))
+        try:
+            margins = negative_margins(arm, arm_path)
+            scaled_margins = check(source, cpu_millicores(cpu))
+        except (OSError, ValueError, StopIteration, json.JSONDecodeError):
+            margins = scaled_margins = False
+        results[arm] = desired_one and scaled and ready and margins and scaled_margins
     print(json.dumps(results, sort_keys=True))
     return 0 if all(results.values()) else 1
 
