@@ -90,6 +90,22 @@ def test_github_guard_rejects_an_attestation_from_any_non_workflow_actor() -> No
         transport.call("arm", {"nonce": NONCE, "label": LABEL, "hard_deadline": "2026-09-23T04:20:00Z"})
 
 
+def test_github_guard_can_adopt_exact_prearmed_dual_receipts_without_redispatch() -> None:
+    runner = GitHubRunner()
+    transport = GitHubGuardTransport(
+        GitHubGuardConfig("owner/private-repo", "main", 17, "sunny", dispatch_on_arm=False),
+        runner=runner,
+        sleep=lambda _seconds: None,
+        now=lambda: NOW,
+    )
+    client = GuardClient(transport, nonce=NONCE)
+
+    receipt = client.arm(RunIdentity("live-run", LABEL, NOW), NOW + timedelta(minutes=20))
+
+    assert receipt.host_identity == "github-runner-1+github-runner-2"
+    assert not any("/dispatches" in argument for call in runner.calls for argument in call)
+
+
 def test_ssh_resolver_rejects_an_instance_record_that_does_not_preserve_exact_label() -> None:
     instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
 

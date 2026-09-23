@@ -105,6 +105,7 @@ class GitHubGuardConfig:
     workflow: str = "independent-guard.yml"
     workflow_actor: str = "github-actions[bot]"
     arm_timeout_seconds: int = 120
+    dispatch_on_arm: bool = True
 
     def validate(self) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository):
@@ -222,9 +223,11 @@ class GitHubGuardTransport(GuardTransport):
             deadline = _parse_time(payload.get("hard_deadline", ""))
             if not _NONCE.fullmatch(nonce) or not label.endswith(f"--nonce-{nonce}"):
                 raise LiveFactoryError("GitHub guard arm request has invalid nonce-bound ownership")
-            dispatched_at = _utc(self.now())
-            self._dispatch(nonce=nonce, label=label, deadline=deadline)
-            until = min(deadline, dispatched_at + timedelta(seconds=self.config.arm_timeout_seconds))
+            started_at = _utc(self.now())
+            dispatched_at = started_at if self.config.dispatch_on_arm else datetime(1970, 1, 1, tzinfo=UTC)
+            if self.config.dispatch_on_arm:
+                self._dispatch(nonce=nonce, label=label, deadline=deadline)
+            until = min(deadline, started_at + timedelta(seconds=self.config.arm_timeout_seconds))
             while _utc(self.now()) < until:
                 receipt = self._find_attestation(nonce=nonce, label=label, deadline=deadline, dispatched_at=dispatched_at)
                 if receipt is not None:
@@ -608,6 +611,7 @@ def create_dispatcher() -> LiveCanaryDispatcher:
         issue_number=_integer(_required_env("SRECON26_GUARD_ISSUE"), "GitHub guard issue", minimum=1),
         trusted_author=_required_env("SRECON26_GUARD_TRUSTED_AUTHOR"),
         heartbeat_seconds=_integer(os.environ.get("SRECON26_GUARD_HEARTBEAT_SECONDS", "120"), "GitHub heartbeat", minimum=30, maximum=600),
+        dispatch_on_arm=os.environ.get("SRECON26_GUARD_ADOPT_EXISTING", "false").lower() != "true",
     )
     ssh = SshWorkloadConfig(
         user=_required_env("SRECON26_SSH_USER"), identity_file=Path(_required_env("SRECON26_SSH_IDENTITY_FILE")).expanduser(),
