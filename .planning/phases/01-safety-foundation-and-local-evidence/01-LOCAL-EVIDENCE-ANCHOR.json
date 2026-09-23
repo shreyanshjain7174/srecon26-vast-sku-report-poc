@@ -1,7 +1,13 @@
 {
   "external_guard_receipt": {
-    "note": "No independent guard acknowledgement exists yet; this metadata is not a receipt.",
-    "receipt_path": null,
+    "guard_journal_root": "76624912f5f1a397ebfad23fc782d29e43ab6c98d4f32433c6840dace8d42aa7",
+    "mode": "anchor_only",
+    "note": "Credential-free independent GitHub runner journal; provider_calls=0 and no live teardown claim.",
+    "receipt_path": ".planning/phases/01-safety-foundation-and-local-evidence/receipts/phase1-anchor-35820524825.json",
+    "remote_commit": "b1931d42df31d084495339f30d5b8cdf93de654f",
+    "remote_repository": "shreyanshjain7174/srecon26-independent-guard",
+    "remote_run_id": "35820524825",
+    "remote_run_url": "https://github.com/shreyanshjain7174/srecon26-independent-guard/actions/runs/35820524825",
     "required_fields": [
       "guard_id",
       "nonce",
@@ -13,7 +19,7 @@
       "kv": "0b61b3eb05eff58c8912ba0d3032dc1d60e495fe4c4af0b3d67e4bcbadf7be10",
       "queue": "f2d9faaba8f9b440843ed7f14f7cbbd4d536c5ba9a2ad7111d7c3deb125fceeb"
     },
-    "status": "PENDING"
+    "status": "ACKNOWLEDGED"
   },
   "provenance": "local-synthetic",
   "schema_version": 1,
