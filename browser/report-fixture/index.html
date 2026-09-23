@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Offline provider report fixture</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 3rem auto; max-width: 44rem; }
+      dl { display: grid; grid-template-columns: 10rem 1fr; gap: .5rem; }
+      #confirmation[hidden] { display: none; }
+      button { padding: .6rem 1rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Offline report fixture</h1>
+      <p>This page submits no provider request.</p>
+      <section id="instance" data-instance data-instance-id="417" data-label="srecon26-run-report" data-nonce="nonce-0123456789abcdef">
+        <dl>
+          <dt>Instance ID</dt><dd data-field="instance-id">417</dd>
+          <dt>Run label</dt><dd data-field="label">srecon26-run-report</dd>
+          <dt>Guard nonce</dt><dd data-field="nonce">nonce-0123456789abcdef</dd>
+        </dl>
+      </section>
+      <button type="button" data-action="report">Report fixture fault</button>
+      <p id="confirmation" hidden aria-live="polite">Fixture report recorded locally.</p>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

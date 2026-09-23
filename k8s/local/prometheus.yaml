@@ -1,0 +1,4 @@
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: prometheus-local, namespace: srecon26-local}
+data: {scrape_interval: 15s}

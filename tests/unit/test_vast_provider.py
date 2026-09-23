@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import json
+import stat
+import sys
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from srecon26_poc.contracts import OfferContract
+from srecon26_poc.provider import AccountSnapshot
+from srecon26_poc.vast_provider import (
+    OFFICIAL_KVM_IMAGE,
+    OFFICIAL_UBUNTU_2204_TEMPLATE_HASH,
+    VastCliProvider,
+    VastLaunchContract,
+    VastPreflightError,
+    VastProviderError,
+)
+
+
+FIXTURES = Path(__file__).parents[2] / "providers" / "vast" / "fixtures"
+
+
+@pytest.fixture
+def fixture_cli(tmp_path: Path) -> Path:
+    fixture_root = FIXTURES.as_posix()
+    script = tmp_path / "vastai-fixture"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"root = {fixture_root!r}\n"
+        "args = [arg for arg in sys.argv[1:] if arg not in {'--raw', '--no-color'}]\n"
+        "if args[:2] == ['show', 'user']:\n"
+        "  print(open(root + '/account.json').read())\n"
+        "elif args[:2] == ['show', 'instances']:\n"
+        "  print(open(root + '/instances.json').read())\n"
+        "elif args[:2] == ['search', 'offers']:\n"
+        "  print(open(root + '/offers.json').read())\n"
+        "else:\n"
+        "  raise SystemExit('unexpected command: ' + repr(args))\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    return script
+
+
+def test_account_snapshot_and_preflight_redact_secrets(fixture_cli: Path) -> None:
+    provider = VastCliProvider(fixture_cli, timeout_seconds=1)
+
+    assert provider.account_snapshot() == AccountSnapshot(instance_count=0)
+    snapshot = provider.read_only_preflight("external=false rentable=true verified=true", limit=5)
+
+    encoded = json.dumps(snapshot.to_json(), sort_keys=True)
+    assert snapshot.balance_threshold_enabled is False
+    assert snapshot.instance_count == 0
+    assert snapshot.offer_count == 1
+    assert set(snapshot.to_json()) == {"balance_threshold_enabled", "instance_count", "offer_count", "offers"}
+    assert "api_key" not in encoded
+    assert "must-not-escape-fixture" not in encoded
+    assert "operator@example.test" not in encoded
+    assert "must-not-escape-user-metadata" not in encoded
+
+
+def test_offer_contract_is_normalized_from_current_search_result(fixture_cli: Path) -> None:
+    provider = VastCliProvider(fixture_cli, timeout_seconds=1)
+
+    contract = provider.get_offer(101, label="phase2-nonce-label")
+
+    assert contract == OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, contract.dph_total, "phase2-nonce-label")
+    assert str(contract.dph_total) == "0.30"
+
+
+@pytest.mark.parametrize(
+    "account_payload",
+    [
+        {},
+        {"balance_threshold_enabled": True},
+        {"balance_threshold_enabled": False, "autobill": True},
+    ],
+)
+def test_preflight_rejects_enabled_unknown_or_disagreeing_autorecharge(
+    fixture_cli: Path, tmp_path: Path, account_payload: dict[str, object]
+) -> None:
+    provider = VastCliProvider(fixture_cli, timeout_seconds=1)
+    account = tmp_path / "account.json"
+    account.write_text(json.dumps(account_payload), encoding="utf-8")
+    original = provider._run_json
+
+    def account_with_autobill(args: list[str]) -> object:
+        if args == ["show", "user"]:
+            return json.loads(account.read_text(encoding="utf-8"))
+        return original(args)
+
+    provider._run_json = account_with_autobill  # type: ignore[method-assign]
+    with pytest.raises(VastPreflightError, match="auto-recharge|disagrees"):
+        provider.read_only_preflight("rentable=true", limit=1, require_ready=True)
+
+
+def test_legacy_disabled_autobill_cannot_authorize_preflight(fixture_cli: Path) -> None:
+    provider = VastCliProvider(fixture_cli, timeout_seconds=1)
+    original = provider._run_json
+
+    def legacy_only_account(args: list[str]) -> object:
+        if args == ["show", "user"]:
+            return {"autobill": False}
+        return original(args)
+
+    provider._run_json = legacy_only_account  # type: ignore[method-assign]
+    with pytest.raises(VastPreflightError, match="auto-recharge"):
+        provider.read_only_preflight("rentable=true", limit=1, require_ready=True)
+
+
+@pytest.mark.parametrize("limit", [0, 26])
+def test_preflight_bounds_offer_inspection(fixture_cli: Path, limit: int) -> None:
+    with pytest.raises(VastPreflightError, match="limit"):
+        VastCliProvider(fixture_cli, timeout_seconds=1).read_only_preflight("rentable=true", limit=limit)
+
+
+def test_create_response_may_be_a_single_json_record() -> None:
+    record = '{"id": 77, "gpu_name": "RTX 3090", "num_gpus": 1, "gpu_ram": 24, "compute_cap": 860, "machine_id": 99, "dph_total": 0.30, "label": "run-nonce-label"}'
+    provider = VastCliProvider("fixture", runner=lambda _args, _timeout: record)
+    contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
+
+    assert provider.create_once(contract, "run-id", VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE)).instance_id == 77
+
+
+def test_create_requires_explicit_frozen_kvm_launch_contract_and_exact_arguments() -> None:
+    calls: list[list[str]] = []
+    record = '{"id": 77, "gpu_name": "RTX 3090", "num_gpus": 1, "gpu_ram": 24, "compute_cap": 860, "machine_id": 99, "dph_total": 0.30, "label": "run-nonce-label"}'
+    provider = VastCliProvider("fixture", runner=lambda args, _timeout: calls.append(args) or record)
+    contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
+
+    created = provider.create_once(contract, "run-id", VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE))
+
+    assert created.instance_id == 77
+    assert calls == [[
+        "fixture", "--raw", "--no-color", "create", "instance", "101",
+        "--template_hash", OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, "--disk", "130", "--ssh", "--cancel-unavail", "--label", "run-nonce-label",
+    ]]
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [
+        VastLaunchContract(),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE, disk_gib=129),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, "docker.io/vastai/kvm:latest"),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE, ssh=False),
+        VastLaunchContract(ubuntu_template_hash="not-a-template", image_contract=OFFICIAL_KVM_IMAGE),
+    ],
+)
+def test_create_refuses_missing_or_relaxed_vm_contract_before_cli_mutation(launch: VastLaunchContract) -> None:
+    calls: list[list[str]] = []
+    provider = VastCliProvider("fixture", runner=lambda args, _timeout: calls.append(args) or "[]")
+    contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
+
+    with pytest.raises(VastProviderError):
+        provider.create_once(contract, "run-id", launch)
+
+    assert calls == []
