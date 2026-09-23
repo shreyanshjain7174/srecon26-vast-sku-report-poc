@@ -434,6 +434,24 @@ def test_ssh_resolver_waits_for_running_even_when_endpoint_is_published(tmp_path
     assert [json.loads(line)["actual_status"] for line in log.read_text().splitlines()] == ["loading", "running"]
 
 
+def test_ssh_resolver_retries_a_transient_null_instance_id_without_classifying_it(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    records = iter((
+        {"id": None, "label": LABEL, "actual_status": "created"},
+        {"id": 417, "label": LABEL, "actual_status": "running", "ssh_host": "203.0.113.8", "ssh_port": 22},
+    ))
+
+    def runner(_arguments, *, timeout: int) -> str:
+        del timeout
+        return json.dumps(next(records))
+
+    log = tmp_path / "status.ndjson"
+    endpoint = VastSshResolver("vastai", runner=runner, attempts=2, interval_seconds=0).resolve(instance, status_log=log)
+
+    assert (endpoint.host, endpoint.port) == ("203.0.113.8", 22)
+    assert [json.loads(line)["actual_status"] for line in log.read_text().splitlines()] == ["running"]
+
+
 def test_ssh_resolver_emits_typed_host_fault_only_after_all_exact_startup_reads(tmp_path: Path) -> None:
     instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
     statuses = iter(("created", "loading", "starting"))

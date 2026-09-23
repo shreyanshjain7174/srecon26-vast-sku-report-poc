@@ -529,7 +529,21 @@ class VastSshResolver:
                 reserve=self._STARTUP_REPORT_RESERVE,
             )
             if isinstance(raw, Mapping):
-                current_id = _integer(raw.get("id", raw.get("instance_id")), "instance id")
+                # Vast can transiently emit ``{"id": null}`` while the
+                # instance record is propagating.  It is neither ownership
+                # evidence nor a startup observation, so retain the bounded
+                # retry rather than turning a temporary incomplete response
+                # into a misleading provider-fault classification.
+                raw_instance_id = raw.get("id") or raw.get("instance_id")
+                if raw_instance_id is None:
+                    if attempt + 1 < self.attempts:
+                        if heartbeat is not None:
+                            heartbeat()
+                        if hard_deadline is not None and (hard_deadline - REPORT_MARGIN - self._STARTUP_REPORT_RESERVE - datetime.now(UTC)).total_seconds() <= self.interval_seconds:
+                            raise LiveFactoryError("provider status retry cannot fit before immutable teardown margin")
+                        self.sleep(self.interval_seconds)
+                    continue
+                current_id = _integer(raw_instance_id, "instance id")
                 label = raw.get("label")
                 if current_id != instance.instance_id or label != instance.label:
                     raise LiveFactoryError("exact instance SSH lookup changed ID or nonce-bound label")
