@@ -22,7 +22,14 @@ Three phases enforced by a hard dependency chain: build the safety envelope and 
   3. Controller resumes idempotently after crash from last valid journal entry without re-issuing any already-recorded create call
   4. Each of the three local HPA arms (CPU, queue-depth, synthetic-KV) independently drives a 1→2 replica transition with non-target signal maxima documented below their configured margins
   5. Every run produces a SHA256SUMS + ROOT-HASH integrity bundle anchored in a signed git commit and copied to the guard journal
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Establish the tested package scaffold, typed lifecycle contracts, and crash-safe hash-chained journal
+- [ ] 01-02-PLAN.md — Enforce Decimal-only exposure accounting and provider ownership contracts
+- [ ] 01-03-PLAN.md — Implement the independent guard, report-first lifecycle, and idempotent controller fakes
+- [ ] 01-04-PLAN.md — Prove CPU, queue, and synthetic-KV local HPA signal independence
+- [ ] 01-05-PLAN.md — Anchor local evidence and enforce automatic no-spend security gates
 
 ### Phase 2: Live GPU Canary and Paired Comparison
 **Goal**: Real GPU metric-path is proven end-to-end on Vast.ai hardware; paired comparison either produces three complete A/B blocks or is correctly labeled exploratory
@@ -55,6 +62,6 @@ Phases execute in numeric order: 1 → 2 → 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Safety Foundation and Local Evidence | 0/? | Not started | - |
+| 1. Safety Foundation and Local Evidence | 0/5 | Planned | - |
 | 2. Live GPU Canary and Paired Comparison | 0/? | Not started | - |
 | 3. Evidence, Charts, and Deck | 0/? | Not started | - |
