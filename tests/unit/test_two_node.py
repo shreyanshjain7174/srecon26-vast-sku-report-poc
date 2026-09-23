@@ -65,11 +65,13 @@ def lease(provider: Provider | None = None) -> tuple[TwoNodeLease, Provider]:
 
 def test_two_nodes_arm_before_first_create_and_clean_both_after_workload() -> None:
     controller, provider = lease()
-    result = controller.run(lambda server, worker: None)
+    heartbeats: list[str] = []
+    result = controller.run(lambda server, worker: None, heartbeat=lambda: heartbeats.append("sent"))
     assert provider.create_labels == ["two-node-server--nonce-servernonce1", "two-node-worker--nonce-workernonce1"]
     assert provider.live == []
     assert result.workload_completed is True
     assert set(result.absence_reads.values()) == {3}
+    assert len(heartbeats) == 2
 
 
 def test_worker_failure_cleans_server_and_never_retries_create() -> None:

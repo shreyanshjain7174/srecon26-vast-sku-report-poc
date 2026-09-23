@@ -9,6 +9,7 @@ performs exact teardown and three absence reads for every observed VM.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
 import subprocess
@@ -135,7 +136,14 @@ def main() -> int:
         work._fetch(server_ep, f"{server_root}/evidence", args.output / "server-evidence", hard_deadline=deadline, heartbeat=heartbeat, log=args.output / "evidence-fetch.log")
         remote(server_ep, ["env", f"CANARY_EVIDENCE_DIR={server_root}/evidence", f"CANARY_MANIFEST_DIR={server_root}/manifests", f"CANARY_MANIFEST_SHA256={manifest_hash}", "bash", f"{server_root}/remote_host_canary.sh", "cleanup"], "cleanup.log")
 
-    controller.run(workload)
+    try:
+        controller.run(workload, heartbeat=heartbeat)
+    except BaseException as error:
+        (args.output / "terminal-failure.json").write_text(
+            json.dumps({"error_type": type(error).__name__, "error": str(error)}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        raise
     return 0
 
 

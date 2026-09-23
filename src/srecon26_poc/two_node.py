@@ -100,7 +100,7 @@ class TwoNodeLease:
                 raise TwoNodeError("node remains present during three-read absence proof")
         return 3
 
-    def run(self, workload: Callable[[InstanceContract, InstanceContract], None]) -> TwoNodeResult:
+    def run(self, workload: Callable[[InstanceContract, InstanceContract], None], *, heartbeat: Callable[[], None] | None = None) -> TwoNodeResult:
         self._validate()
         # Never create a server until both independently operated guards attest.
         self._arm(self.server, self.server_guard)
@@ -111,7 +111,11 @@ class TwoNodeLease:
         absence: dict[str, int] = {}
         error: BaseException | None = None
         try:
+            if heartbeat is not None:
+                heartbeat()
             server = self._create(self.server)
+            if heartbeat is not None:
+                heartbeat()
             worker = self._create(self.worker)
             workload(server, worker)
             completed = True
