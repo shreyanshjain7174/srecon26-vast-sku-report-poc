@@ -1,0 +1,28 @@
+{
+  "schema": "srecon26-inference-measurement-retry-entitlement/v1",
+  "run_id": "inference-infer20260923150917",
+  "label": "srecon26-inference--nonce-1f2d33193338074f857dca2a",
+  "reason": "controller wrote over-escaped curl timing JSON after a successful streamed warmup",
+  "journal_sha256": "932c6bcc7d3babb71a9d0b9642575815610210e11ab7cdd3a09360273325080e",
+  "sealed_root": "78ae3731395b05000534d9ee83d15314b95e586b839e6fe4b4a567893c10abd0",
+  "root_hash_file_sha256": "9f8e63156c4370cfa85eb4b00ef0cc6df9f60c96f0a8fb0b7388fbdaa13f29ef",
+  "guard_anchor_sha256": "846eb97234077554cc668d9c80379ff6e9d84174a3b2a01e424fa591373f66a3",
+  "warmup_body_sha256": "e46bab4b8ec28b8b615f8d03ec4a6f7b91cd9cddadf7d8a46aa28644d893a583",
+  "warmup_curl_timing_sha256": "84bd8792a2b7172c47c9a426dd01cafdbb92f0f1902c3dfccdc1eca0985992b1",
+  "warmup_observation": {
+    "http_code": 200,
+    "ttft_method": "curl_time_starttransfer_first_stream_response_byte",
+    "ttft_seconds": "0.029360",
+    "e2e_seconds": "0.141320",
+    "prompt_tokens": 6,
+    "completion_tokens": 10,
+    "model": "Qwen/Qwen2.5-1.5B-Instruct"
+  },
+  "invoice_sha256": "3d4ac7bcde53178b4f4074b526d0b54e188d66069e26a7bc5f30850767602e33",
+  "actual_usd": "0.133",
+  "absence_sha256": "0b0ee68237f1e2eb3e5a9d3da19bbec5a32a7d8b39b8f1304be06a0d76fe9206",
+  "absence_reads": 3,
+  "provider_create_calls": 1,
+  "provider_destroy_calls": 1,
+  "report_attempted": false
+}

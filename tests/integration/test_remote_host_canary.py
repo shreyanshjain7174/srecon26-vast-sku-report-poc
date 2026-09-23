@@ -237,6 +237,7 @@ def test_direct_inference_evidence_contract_retains_raw_stream_timing_tokens_que
         'redact_stream <"$raw_body" >"$body"',
         'status "REDACTION_FAILED"',
         'jq -en --arg container "$container"',
+        '--write-out "{\\"request\\":\\"${label}\\"',
     ):
         assert required_measurement in script
 

@@ -784,7 +784,7 @@ run_inference_stream_request() {
   # final streaming event, from which TPOT and completion throughput follow.
   if ! curl --no-buffer --silent --show-error --fail --max-time "$request_timeout" \
     --output "$raw_body" \
-    --write-out "{\\\"request\\\":\\\"${label}\\\",\\\"ttft_method\\\":\\\"curl_time_starttransfer_first_stream_response_byte\\\",\\\"ttft_seconds\\\":%{time_starttransfer},\\\"e2e_seconds\\\":%{time_total},\\\"http_code\\\":%{http_code}}\\n" \
+    --write-out "{\"request\":\"${label}\",\"ttft_method\":\"curl_time_starttransfer_first_stream_response_byte\",\"ttft_seconds\":%{time_starttransfer},\"e2e_seconds\":%{time_total},\"http_code\":%{http_code}}\n" \
     --header 'content-type: application/json' --data "$payload" "$endpoint/v1/completions" >"$raw_timing"; then
     jq -n --arg request "$label" --arg status "FAILED_OR_TIMED_OUT" \
       '{request: $request, status: $status}' >"$timing"

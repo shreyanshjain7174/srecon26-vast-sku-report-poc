@@ -83,7 +83,12 @@ authentication response missed the 60-second window. Its canonical journal and
 three fresh zero-inventory provider reads are checked in as entitlement evidence.
 The `$4.25` inference category cap retains the four historical reservations
 (`$0.75 + $0.75 + $0.75 + $1.00`) and allows one final `$1.00` replacement under
-the unchanged `$5.00` global exposure ceiling. Each attempt uses budget
+the unchanged `$5.00` global exposure ceiling. A second, hash-pinned controller
+replacement covers run `inference-infer20260923150917`: it reached real RTX 4090
+inference and HTTP 200, then failed because the controller over-escaped curl
+timing JSON. Exact teardown, three provider absence reads, guard anchor, and
+`$0.133` invoice evidence are retained. Settled actuals restore headroom without
+erasing any reservation history. Each attempt uses budget
 category `gpu-inference-smoke`, reserves at most `$1.00`, and still requires a
 fresh read-only CLI/schema preflight because the corrected direct route has not
 yet been live-validated.
