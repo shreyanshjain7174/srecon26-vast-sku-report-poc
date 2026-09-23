@@ -386,6 +386,7 @@ class GuardWorker:
                 return None
             instance = matches[0]
             state["instance_id"] = instance.instance_id
+            state["status"] = "ARMED"
             self._append_event(directory, state, "instance_reconciled", now, {"instance_id": instance.instance_id})
             self._persist(directory, state)
             return instance
@@ -408,6 +409,13 @@ class GuardWorker:
                 return self._receipt(state)
             deadline = _parse_stamp(state["hard_deadline"])
             last_heartbeat = _parse_stamp(state["last_heartbeat"])
+            # A pre-create arm intentionally has no instance ID. Reconcile it
+            # even while healthy so normal lifecycle operations bind the exact
+            # nonce-bearing label before a later deadline/absence decision.
+            if state.get("instance_id") is None:
+                instance = self._reconcile(directory, state, now)
+                if instance is None:
+                    return self._receipt(self._load(directory))
             if now < deadline and now - last_heartbeat <= self.heartbeat_timeout:
                 return self._receipt(state)
             instance = self._reconcile(directory, state, now)

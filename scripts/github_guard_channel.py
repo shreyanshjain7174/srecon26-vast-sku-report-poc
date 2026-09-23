@@ -19,10 +19,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from guard.guard_worker import GuardSafetyError, GuardedInstance, GuardWorker, nonce_bound_label
+
 
 NONCE_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 LOGIN_RE = re.compile(r"^[A-Za-z0-9-]{1,39}$")
+IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+ROOT_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMENT_RE = re.compile(r"^SRECON26_GUARD_V1 (HEARTBEAT|ANCHOR) nonce=([A-Za-z0-9_-]{8,128}) root=([0-9a-f]{64})$")
 MAX_RUN = timedelta(minutes=60)
 FUTURE_SKEW = timedelta(minutes=5)
@@ -55,6 +59,24 @@ class CommentEvent:
 class GuardDecision:
     teardown_required: bool
     reason: str | None
+
+
+class _AnchorOnlyProvider:
+    """A provider sentinel: anchor-only mode must never reach a provider API."""
+
+    calls = 0
+
+    def find_instances(self, label: str) -> tuple[GuardedInstance, ...]:
+        self.calls += 1
+        raise GuardSafetyError("anchor-only mode cannot reconcile a provider")
+
+    def get_instance(self, instance_id: int) -> GuardedInstance | None:
+        self.calls += 1
+        raise GuardSafetyError("anchor-only mode cannot query a provider")
+
+    def destroy_exact(self, instance_id: int, expected_label: str) -> None:
+        self.calls += 1
+        raise GuardSafetyError("anchor-only mode cannot destroy a provider target")
 
 
 def _utc(value: datetime) -> datetime:
@@ -157,6 +179,54 @@ def _write_state(path: Path, state: Mapping[str, object]) -> None:
     os.replace(temporary, path)
 
 
+def _guard_receipt(receipt: object) -> dict[str, object]:
+    raw = asdict(receipt)
+    for key in ("hard_deadline", "last_heartbeat"):
+        raw[key] = _stamp(raw[key])
+    return raw
+
+
+def anchor_only(
+    *,
+    nonce: str,
+    label: str,
+    run_id: str,
+    host_identity: str,
+    phase_roots: Mapping[str, str],
+    root: Path,
+    receipt_path: Path,
+    now: datetime,
+) -> dict[str, object]:
+    """Record Phase 1 roots in a real guard journal without any provider path."""
+    now = _utc(now)
+    if not NONCE_RE.fullmatch(nonce) or not IDENTITY_RE.fullmatch(run_id) or not IDENTITY_RE.fullmatch(host_identity):
+        raise GuardChannelError("nonce, run identity, or host identity is invalid")
+    if host_identity in {"localhost", "127.0.0.1", "::1"}:
+        raise GuardChannelError("host identity must not be local")
+    if set(phase_roots) != {"cpu", "queue", "kv"} or any(not isinstance(value, str) or not ROOT_RE.fullmatch(value) for value in phase_roots.values()):
+        raise GuardChannelError("Phase 1 roots must be exactly cpu, queue, and kv SHA-256 roots")
+    expected_label = nonce_bound_label(f"phase1-anchor-{run_id}", nonce)
+    if label != expected_label:
+        raise GuardChannelError("anchor label must be derived from the run identity and nonce")
+    provider = _AnchorOnlyProvider()
+    worker = GuardWorker(root, provider, require_root_owner=False)
+    worker.arm(None, label, nonce, now + timedelta(minutes=5), now=now)
+    for _name, root_hash in sorted(phase_roots.items()):
+        receipt = worker.anchor(nonce, root_hash, now=now)
+    result = {
+        "mode": "anchor_only",
+        "host_identity": host_identity,
+        "run_id": run_id,
+        "label": label,
+        "nonce": nonce,
+        "phase1_roots": dict(phase_roots),
+        "provider_calls": provider.calls,
+        "guard_receipt": _guard_receipt(receipt),
+    }
+    _write_state(receipt_path, result)
+    return result
+
+
 def _config_record(config: GuardConfig) -> dict[str, object]:
     return {
         "nonce": config.nonce,
@@ -251,12 +321,12 @@ def sync(config: GuardConfig, comments: Iterable[object], *, worker: Path, root:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Nonce-bound GitHub issue channel for the deadline guard")
-    parser.add_argument("command", choices=("validate", "arm", "sync"))
-    parser.add_argument("--nonce", required=True)
-    parser.add_argument("--label", required=True)
-    parser.add_argument("--issue-number", required=True)
-    parser.add_argument("--hard-deadline", required=True)
-    parser.add_argument("--trusted-author", required=True)
+    parser.add_argument("command", choices=("validate", "arm", "sync", "anchor-only"))
+    parser.add_argument("--nonce")
+    parser.add_argument("--label")
+    parser.add_argument("--issue-number")
+    parser.add_argument("--hard-deadline")
+    parser.add_argument("--trusted-author")
     parser.add_argument("--heartbeat-seconds", default="120")
     parser.add_argument("--worker", type=Path)
     parser.add_argument("--root", type=Path)
@@ -264,7 +334,31 @@ def main() -> int:
     parser.add_argument("--channel-state", type=Path)
     parser.add_argument("--journal", type=Path)
     parser.add_argument("--comments-json", type=Path)
+    parser.add_argument("--run-id")
+    parser.add_argument("--host-identity")
+    parser.add_argument("--cpu-root")
+    parser.add_argument("--queue-root")
+    parser.add_argument("--kv-root")
+    parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
+    if args.command == "anchor-only":
+        required = (args.nonce, args.label, args.run_id, args.host_identity, args.cpu_root, args.queue_root, args.kv_root, args.root, args.receipt)
+        if any(item is None for item in required):
+            parser.error("anchor-only requires nonce, label, run/host identity, three roots, root, and receipt")
+        result = anchor_only(
+            nonce=args.nonce,
+            label=args.label,
+            run_id=args.run_id,
+            host_identity=args.host_identity,
+            phase_roots={"cpu": args.cpu_root, "queue": args.queue_root, "kv": args.kv_root},
+            root=args.root,
+            receipt_path=args.receipt,
+            now=datetime.now(UTC),
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    if not all((args.nonce, args.label, args.issue_number, args.hard_deadline, args.trusted_author)):
+        parser.error("validate, arm, and sync require nonce, label, issue number, deadline, and trusted author")
     config = parse_config(args.nonce, args.label, args.issue_number, args.hard_deadline, args.trusted_author, args.heartbeat_seconds, now=datetime.now(UTC))
     if args.command == "validate":
         print(json.dumps(_config_record(config), sort_keys=True))

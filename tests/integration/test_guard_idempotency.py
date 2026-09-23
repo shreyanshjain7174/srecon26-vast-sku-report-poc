@@ -76,6 +76,59 @@ def test_delayed_visibility_is_reconciled_by_nonce_before_deadline(tmp_path) -> 
     assert provider.destroy_calls == [(INSTANCE_ID, LABEL)]
 
 
+def test_healthy_prearmed_guard_binds_exact_created_instance_before_deadline(tmp_path) -> None:
+    provider = FakeProvider()
+    provider.instance = None
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(minutes=2), require_root_owner=False)
+    worker.arm(None, LABEL, NONCE, NOW + timedelta(minutes=10), now=NOW)
+    provider.instance = GuardedInstance(INSTANCE_ID, LABEL)
+
+    receipt = worker.tick(NONCE, now=NOW + timedelta(seconds=30))
+
+    assert receipt.status == "ARMED"
+    assert receipt.instance_id == INSTANCE_ID
+    assert provider.destroy_calls == []
+
+
+def test_healthy_prearmed_guard_stays_awaiting_when_no_exact_instance_exists(tmp_path) -> None:
+    provider = FakeProvider()
+    provider.instance = None
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(minutes=2), require_root_owner=False)
+    worker.arm(None, LABEL, NONCE, NOW + timedelta(minutes=10), now=NOW)
+
+    receipt = worker.tick(NONCE, now=NOW + timedelta(seconds=30))
+
+    assert receipt.status == "AWAITING_INSTANCE"
+    assert receipt.instance_id is None
+
+
+def test_prearmed_bound_target_can_later_observe_absence_and_disarm(tmp_path) -> None:
+    provider = FakeProvider()
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
+    worker.arm(None, LABEL, NONCE, NOW + timedelta(minutes=10), now=NOW)
+    worker.tick(NONCE, now=NOW + timedelta(milliseconds=500))
+    provider.instance = None
+
+    absent = worker.tick(NONCE, now=NOW + timedelta(seconds=2))
+    disarmed = worker.disarm_after_absence(NONCE, "a" * 64, now=NOW + timedelta(seconds=3))
+
+    assert absent.status == "ABSENT_OBSERVED"
+    assert disarmed.status == "DISARMED"
+
+
+def test_healthy_prearmed_guard_refuses_multiple_exact_matches(tmp_path) -> None:
+    class MultipleProvider(FakeProvider):
+        def find_instances(self, label: str) -> tuple[GuardedInstance, ...]:
+            return (GuardedInstance(INSTANCE_ID, label), GuardedInstance(INSTANCE_ID + 1, label))
+
+    worker = GuardWorker(tmp_path, MultipleProvider(), heartbeat_timeout=timedelta(minutes=2), require_root_owner=False)
+    worker.arm(None, LABEL, NONCE, NOW + timedelta(minutes=10), now=NOW)
+
+    receipt = worker.tick(NONCE, now=NOW + timedelta(seconds=30))
+
+    assert receipt.status == "OWNERSHIP_MISMATCH"
+
+
 def test_reopened_disarmed_guard_stays_disarmed(tmp_path) -> None:
     provider = FakeProvider()
     worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)

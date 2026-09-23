@@ -8,6 +8,7 @@ import pytest
 from scripts.github_guard_channel import (
     GuardChannelError,
     GuardConfig,
+    anchor_only,
     accepted_comment_events,
     evaluate_guard,
     parse_config,
@@ -85,5 +86,37 @@ def test_workflow_has_restricted_permissions_bounded_job_and_secret_only_credent
     assert "vars.VAST_API_KEY" not in workflow
     assert "pull_request:" not in workflow
     assert "schedule:" not in workflow
+    assert "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in workflow
+    assert "actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08" in workflow
+
+
+def test_anchor_only_creates_a_real_guard_journal_without_a_provider_credential(tmp_path: Path) -> None:
+    roots = {"cpu": "a" * 64, "queue": "b" * 64, "kv": "c" * 64}
+
+    receipt = anchor_only(
+        nonce=NONCE,
+        label="phase1-anchor-123456789--nonce-nonce_12345678",
+        run_id="123456789",
+        host_identity="github-runner-1",
+        phase_roots=roots,
+        root=tmp_path / "guard",
+        receipt_path=tmp_path / "receipt.json",
+        now=NOW,
+    )
+
+    journal = (tmp_path / "guard" / NONCE / "journal.ndjson").read_text(encoding="utf-8")
+    assert receipt["mode"] == "anchor_only"
+    assert receipt["provider_calls"] == 0
+    assert receipt["phase1_roots"] == roots
+    assert journal.count("controller_root_anchored") == 3
+    assert (tmp_path / "receipt.json").exists()
+
+
+def test_anchor_only_workflow_is_credential_free_and_pinned() -> None:
+    workflow = Path(".github/workflows/phase1-anchor-only.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in workflow
+    assert "secrets." not in workflow
+    assert "VAST_API_KEY" not in workflow
+    assert "contents: read" in workflow
     assert "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in workflow
     assert "actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08" in workflow

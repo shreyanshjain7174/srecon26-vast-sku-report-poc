@@ -1,0 +1,63 @@
+name: Phase 1 anchor-only guard journal
+
+on:
+  workflow_dispatch:
+    inputs:
+      nonce:
+        description: "New 8-128 character nonce for this journal"
+        required: true
+        type: string
+      cpu_root:
+        description: "Selected CPU Phase 1 SHA-256 root"
+        required: true
+        type: string
+      queue_root:
+        description: "Selected queue Phase 1 SHA-256 root"
+        required: true
+        type: string
+      kv_root:
+        description: "Selected KV Phase 1 SHA-256 root"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  anchor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      INPUT_NONCE: ${{ inputs.nonce }}
+      INPUT_CPU_ROOT: ${{ inputs.cpu_root }}
+      INPUT_QUEUE_ROOT: ${{ inputs.queue_root }}
+      INPUT_KV_ROOT: ${{ inputs.kv_root }}
+      ANCHOR_ROOT: ${{ runner.temp }}/phase1-anchor-guard
+      ANCHOR_RECEIPT: ${{ runner.temp }}/phase1-anchor-receipt.json
+    steps:
+      - name: Checkout pinned guard source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Write genuine credential-free guard anchor journal
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="${GITHUB_RUN_ID}"
+          host_identity="$(hostname -f 2>/dev/null || hostname)"
+          label="phase1-anchor-${run_id}--nonce-${INPUT_NONCE}"
+          python3 scripts/github_guard_channel.py anchor-only \
+            --nonce "$INPUT_NONCE" --label "$label" --run-id "$run_id" --host-identity "$host_identity" \
+            --cpu-root "$INPUT_CPU_ROOT" --queue-root "$INPUT_QUEUE_ROOT" --kv-root "$INPUT_KV_ROOT" \
+            --root "$ANCHOR_ROOT" --receipt "$ANCHOR_RECEIPT" >/dev/null
+
+      - name: Upload anchor journal and receipt
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: phase1-anchor-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/phase1-anchor-guard
+            ${{ runner.temp }}/phase1-anchor-receipt.json

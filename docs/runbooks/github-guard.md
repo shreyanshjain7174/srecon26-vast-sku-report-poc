@@ -46,3 +46,13 @@ At completion (including a failure), download the
 hash-chained journal and the channel journal/state. Review a terminal receipt
 and provider-side absence before accepting teardown as complete. Do not reuse a
 nonce, issue, or artifact for a later paid run.
+
+## Credential-free Phase 1 anchoring
+
+`Phase 1 anchor-only guard journal` is a separate manual workflow for recording
+the selected CPU, queue, and KV Phase 1 SHA-256 roots. It accepts three strict
+64-character lowercase hexadecimal roots and a new nonce, derives the label
+from the GitHub run identity and nonce, and records all three through the real
+guard worker's hash-chained journal. It takes no provider secret, creates no
+provider target, and never ticks or claims a live teardown. Download its
+`phase1-anchor-<run-id>` artifact for the receipt and guard journal.
