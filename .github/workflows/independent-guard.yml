@@ -134,6 +134,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          arm_receipt="$(sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 guard/guard_worker.py status \
+            --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" --nonce "$INPUT_NONCE")"
+          preflight="$(sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 guard/guard_worker.py preflight \
+            --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE")"
+          root_hash="$(jq -r '.root_hash' <<<"$arm_receipt")"
+          script_hash="$(jq -r '.script_hash' <<<"$preflight")"
+          host_identity="$(jq -r '.host_identity' <<<"$preflight")"
+          [[ "$root_hash" =~ ^[0-9a-f]{64}$ && "$script_hash" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$host_identity" =~ ^[A-Za-z0-9_.-]+$ ]]
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments" \
+            -f "body=SRECON26_GUARD_V1 ARMED nonce=${INPUT_NONCE} label=${INPUT_LABEL} deadline=${INPUT_HARD_DEADLINE} host=${host_identity} script=${script_hash} root=${root_hash}"
           gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments" \
             -f "body=SRECon26 guard armed. Only ${INPUT_TRUSTED_AUTHOR} with OWNER association may send exactly: SRECON26_GUARD_V1 HEARTBEAT nonce=${INPUT_NONCE} root=<64 lowercase hex>; or SRECON26_GUARD_V1 ANCHOR nonce=${INPUT_NONCE} root=<64 lowercase hex>."
 
