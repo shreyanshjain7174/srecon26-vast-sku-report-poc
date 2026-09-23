@@ -19,7 +19,8 @@ from typing import Iterator, Mapping, Protocol
 
 _GENESIS_HASH = "0" * 64
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
-_TERMINAL = frozenset({"TEARDOWN_CONFIRMED", "ABSENT_OBSERVED", "OWNERSHIP_MISMATCH", "TEARDOWN_UNCONFIRMED", "DISARMED"})
+_TERMINAL = frozenset({"ABSENCE_CONFIRMED", "OWNERSHIP_MISMATCH", "TEARDOWN_UNCONFIRMED", "DISARMED"})
+_ABSENCE_QUORUM = 3
 _MAX_POST_DEADLINE_WINDOW = timedelta(minutes=10)
 
 
@@ -48,6 +49,7 @@ class GuardReceipt:
     hard_deadline: datetime
     last_heartbeat: datetime
     status: str
+    absence_observations: tuple[datetime, ...]
     root_hash: str
     event_count: int
 
@@ -326,21 +328,36 @@ class GuardWorker:
         root, count, records = self._journal_root(directory)
         state["root_hash"] = root
         state["event_count"] = count
-        # A crash after journal append but before the state snapshot must never
-        # reissue a destructive call. Journal intent is the durable authority.
-        events = {str(record["event"]) for record in records}
-        if "disarmed" in events:
-            state["status"] = "DISARMED"
-        elif "ownership_mismatch" in events:
-            state["status"] = "OWNERSHIP_MISMATCH"
-        elif "teardown_confirmed" in events:
-            state["status"] = "TEARDOWN_CONFIRMED"
-        elif "teardown_unconfirmed" in events:
-            state["status"] = "TEARDOWN_UNCONFIRMED"
-        elif "teardown_error" in events:
-            state["status"] = "TEARDOWN_ERROR"
-        elif "teardown_requested" in events:
-            state["status"] = "TEARDOWN_REQUESTED"
+        # Rebuild proof state from the hash-chained journal so a crash after an
+        # append but before the state snapshot cannot lose or invent a read.
+        observations: list[str] = []
+        recovered_status = str(state.get("status", "ARMED"))
+        status_events = {
+            "armed": "ARMED",
+            "awaiting_instance": "AWAITING_INSTANCE",
+            "instance_reconciled": "ARMED",
+            "teardown_requested": "TEARDOWN_REQUESTED",
+            "teardown_error": "TEARDOWN_ERROR",
+            "teardown_unconfirmed": "TEARDOWN_UNCONFIRMED",
+            "absence_quorum_reset": "TEARDOWN_ERROR",
+            "absence_observation": "ABSENCE_PENDING",
+            "absence_confirmed": "ABSENCE_CONFIRMED",
+            "ownership_mismatch": "OWNERSHIP_MISMATCH",
+            "disarmed": "DISARMED",
+        }
+        for record in records:
+            event = str(record["event"])
+            payload = record.get("payload", {})
+            if event == "absence_quorum_reset":
+                observations = []
+            elif event == "absence_observation" and isinstance(payload, dict):
+                observed_at = str(payload.get("observed_at", record["wall_time"]))
+                if observed_at not in observations:
+                    observations.append(observed_at)
+            if event in status_events:
+                recovered_status = status_events[event]
+        state["absence_observations"] = observations
+        state["status"] = recovered_status
         return state
 
     @staticmethod
@@ -352,6 +369,7 @@ class GuardWorker:
             hard_deadline=_parse_stamp(state["hard_deadline"]),
             last_heartbeat=_parse_stamp(state["last_heartbeat"]),
             status=str(state["status"]),
+            absence_observations=tuple(_parse_stamp(value) for value in state.get("absence_observations", [])),
             root_hash=str(state["root_hash"]),
             event_count=int(state["event_count"]),
         )
@@ -402,6 +420,7 @@ class GuardWorker:
                 "hard_deadline": _stamp(deadline),
                 "last_heartbeat": _stamp(now),
                 "status": "ARMED",
+                "absence_observations": [],
                 "root_hash": _GENESIS_HASH,
                 "event_count": 0,
             }
@@ -440,21 +459,88 @@ class GuardWorker:
         self._append_event(directory, state, "teardown_unconfirmed", now, {"reason": reason})
         return self._persist(directory, state)
 
-    def _absence_observed(self, directory: Path, state: dict[str, object], now: datetime, *, target: str) -> GuardReceipt:
-        state["status"] = "ABSENT_OBSERVED"
-        self._append_event(directory, state, "absence_observed", now, {"target": target})
+    def _reset_absence_quorum(self, directory: Path, state: dict[str, object], now: datetime, reason: str) -> None:
+        if not state.get("absence_observations"):
+            return
+        state["absence_observations"] = []
+        self._append_event(directory, state, "absence_quorum_reset", now, {"reason": reason})
+        self._persist(directory, state)
+
+    def _provider_instance(self, instance_id: int) -> GuardedInstance | None:
+        instance = self.provider.get_instance(instance_id)
+        if instance is not None and (not isinstance(instance, GuardedInstance) or instance.instance_id != instance_id):
+            raise GuardSafetyError("provider returned unknown exact-instance inventory")
+        return instance
+
+    def _provider_label_matches(self, label: str) -> tuple[GuardedInstance, ...]:
+        matches = self.provider.find_instances(label)
+        if not isinstance(matches, tuple) or any(not isinstance(item, GuardedInstance) or item.label != label for item in matches):
+            raise GuardSafetyError("provider returned unknown nonce-label inventory")
+        return matches
+
+    def _record_absence_observation(self, directory: Path, state: dict[str, object], now: datetime) -> GuardReceipt:
+        observed_at = _stamp(now)
+        observations = [str(value) for value in state.get("absence_observations", [])]
+        if observed_at in observations:
+            state["status"] = "ABSENCE_PENDING"
+            return self._persist(directory, state)
+        observations.append(observed_at)
+        state["absence_observations"] = observations
+        state["status"] = "ABSENCE_PENDING"
+        self._append_event(
+            directory,
+            state,
+            "absence_observation",
+            now,
+            {
+                "observed_at": observed_at,
+                "observation_number": len(observations),
+                "instance_id": state.get("instance_id"),
+                "label": state["label"],
+            },
+        )
+        if len(observations) == _ABSENCE_QUORUM:
+            state["status"] = "ABSENCE_CONFIRMED"
+            self._append_event(
+                directory,
+                state,
+                "absence_confirmed",
+                now,
+                {"observations": observations, "quorum": _ABSENCE_QUORUM},
+            )
         return self._persist(directory, state)
+
+    def _observe_absence(self, directory: Path, state: dict[str, object], now: datetime) -> GuardReceipt:
+        """Record one absence read only when both ownership lookups agree."""
+        instance_id = state.get("instance_id")
+        exact = self._provider_instance(int(instance_id)) if instance_id is not None else None
+        matches = self._provider_label_matches(str(state["label"]))
+        if exact is not None:
+            self._reset_absence_quorum(directory, state, now, "exact instance remains present")
+            if exact.label != state["label"]:
+                return self._ownership_mismatch(directory, state, now, "exact ID no longer has the nonce-bound label")
+            return self._teardown_error(directory, state, now, "provider still reports exact target")
+        if len(matches) > 1:
+            self._reset_absence_quorum(directory, state, now, "duplicate nonce-bound labels")
+            return self._ownership_mismatch(directory, state, now, "multiple exact nonce-bound matches")
+        if matches:
+            self._reset_absence_quorum(directory, state, now, "nonce-bound label remains present")
+            if instance_id is not None and matches[0].instance_id == int(instance_id):
+                return self._teardown_error(directory, state, now, "provider inventory disagrees about exact target")
+            return self._ownership_mismatch(directory, state, now, "nonce-bound label moved to another exact ID")
+        return self._record_absence_observation(directory, state, now)
 
     def _reconcile(self, directory: Path, state: dict[str, object], now: datetime) -> GuardedInstance | None:
         instance_id = state.get("instance_id")
         if instance_id is None:
-            matches = self.provider.find_instances(str(state["label"]))
+            matches = self._provider_label_matches(str(state["label"]))
             if len(matches) == 0:
                 state["status"] = "AWAITING_INSTANCE"
                 self._append_event(directory, state, "awaiting_instance", now)
                 self._persist(directory, state)
                 return None
             if len(matches) != 1:
+                self._reset_absence_quorum(directory, state, now, "multiple exact nonce-bound matches")
                 self._ownership_mismatch(directory, state, now, "multiple exact nonce-bound matches")
                 return None
             instance = matches[0]
@@ -463,13 +549,11 @@ class GuardWorker:
             self._append_event(directory, state, "instance_reconciled", now, {"instance_id": instance.instance_id})
             self._persist(directory, state)
             return instance
-        instance = self.provider.get_instance(int(instance_id))
+        instance = self._provider_instance(int(instance_id))
         if instance is None:
-            state["status"] = "ABSENT_OBSERVED"
-            self._append_event(directory, state, "absence_observed", now, {"instance_id": instance_id})
-            self._persist(directory, state)
             return None
         if instance.label != state["label"]:
+            self._reset_absence_quorum(directory, state, now, "exact ID changed label")
             self._ownership_mismatch(directory, state, now, "exact ID no longer has the nonce-bound label")
             return None
         return instance
@@ -495,7 +579,11 @@ class GuardWorker:
                         # before then a delayed create remains possible.
                         state = self._load(directory)
                         if str(state["status"]) == "AWAITING_INSTANCE":
-                            return self._absence_observed(directory, state, now, target="nonce-bound label")
+                            try:
+                                return self._observe_absence(directory, state, now)
+                            except Exception as exc:
+                                self._reset_absence_quorum(directory, state, now, f"absence_{type(exc).__name__}")
+                                return self._teardown_error(directory, state, now, f"absence_{type(exc).__name__}")
                     return self._receipt(self._load(directory))
             if now < deadline and now - last_heartbeat <= self.heartbeat_timeout:
                 return self._receipt(state)
@@ -506,16 +594,34 @@ class GuardWorker:
                 try:
                     instance = self._reconcile(directory, state, now)
                 except Exception as exc:
+                    self._reset_absence_quorum(directory, state, now, f"final_reconcile_{type(exc).__name__}")
                     return self._teardown_unconfirmed(directory, state, now, f"final_reconcile_{type(exc).__name__}")
                 if instance is None:
-                    return self._receipt(self._load(directory))
+                    state = self._load(directory)
+                    if str(state["status"]) == "OWNERSHIP_MISMATCH":
+                        return self._receipt(state)
+                    try:
+                        return self._observe_absence(directory, state, now)
+                    except Exception as exc:
+                        self._reset_absence_quorum(directory, state, now, f"final_absence_{type(exc).__name__}")
+                        return self._teardown_unconfirmed(directory, state, now, f"final_absence_{type(exc).__name__}")
+                self._reset_absence_quorum(directory, state, now, "exact target remains present after retry window")
                 return self._teardown_unconfirmed(directory, state, now, "provider still reports exact target after post-deadline window")
             try:
                 instance = self._reconcile(directory, state, now)
             except Exception as exc:
+                self._reset_absence_quorum(directory, state, now, f"reconcile_{type(exc).__name__}")
                 return self._teardown_error(directory, state, now, f"reconcile_{type(exc).__name__}")
             if instance is None:
-                return self._receipt(self._load(directory))
+                state = self._load(directory)
+                if str(state["status"]) == "OWNERSHIP_MISMATCH":
+                    return self._receipt(state)
+                try:
+                    return self._observe_absence(directory, state, now)
+                except Exception as exc:
+                    self._reset_absence_quorum(directory, state, now, f"absence_{type(exc).__name__}")
+                    return self._teardown_error(directory, state, now, f"absence_{type(exc).__name__}")
+            self._reset_absence_quorum(directory, state, now, "exact target is present")
             self._append_event(directory, state, "teardown_requested", now, {"instance_id": instance.instance_id, "reason": "deadline" if now >= deadline else "heartbeat_loss"})
             state["status"] = "TEARDOWN_REQUESTED"
             self._persist(directory, state)
@@ -526,16 +632,10 @@ class GuardWorker:
             # A successful CLI exit is not sufficient: the provider must
             # independently confirm that this exact ID has disappeared.
             try:
-                absent = self.provider.get_instance(instance.instance_id)
+                return self._observe_absence(directory, state, now)
             except Exception as exc:
+                self._reset_absence_quorum(directory, state, now, f"absence_reconcile_{type(exc).__name__}")
                 return self._teardown_error(directory, state, now, f"absence_reconcile_{type(exc).__name__}")
-            if absent is not None:
-                if absent.label != instance.label:
-                    return self._ownership_mismatch(directory, state, now, "exact ID changed label after destroy request")
-                return self._teardown_error(directory, state, now, "provider still reports exact target after destroy request")
-            state["status"] = "TEARDOWN_CONFIRMED"
-            self._append_event(directory, state, "teardown_confirmed", now, {"instance_id": instance.instance_id})
-            return self._persist(directory, state)
 
     def anchor(self, nonce: str, root_hash: str, *, now: datetime) -> GuardReceipt:
         if not re.fullmatch(r"[0-9a-f]{64}", root_hash):
@@ -550,8 +650,8 @@ class GuardWorker:
             raise GuardSafetyError("absence proof must be a sha256 root hash")
         with self._locked(nonce) as directory:
             state = self._load(directory)
-            if str(state["status"]) not in {"TEARDOWN_CONFIRMED", "ABSENT_OBSERVED"}:
-                raise GuardSafetyError("cannot disarm before teardown or observed absence")
+            if str(state["status"]) != "ABSENCE_CONFIRMED":
+                raise GuardSafetyError("cannot disarm before three-read absence confirmation")
             state["status"] = "DISARMED"
             self._append_event(directory, state, "disarmed", _utc(now), {"absence_root_hash": absence_root_hash})
             return self._persist(directory, state)

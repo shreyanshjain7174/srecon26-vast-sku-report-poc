@@ -52,10 +52,16 @@ def test_guard_destroys_exact_owned_instance_after_heartbeat_loss(tmp_path) -> N
     worker.arm(INSTANCE_ID, LABEL, NONCE, clock.now() + timedelta(minutes=10), now=clock.now())
 
     clock.advance(worker.heartbeat_timeout + timedelta(seconds=1))
+    first = worker.tick(NONCE, now=clock.now())
+    clock.advance(timedelta(seconds=1))
     worker.tick(NONCE, now=clock.now())
+    clock.advance(timedelta(seconds=1))
+    confirmed = worker.tick(NONCE, now=clock.now())
 
     assert provider.destroy_calls == [(INSTANCE_ID, LABEL)]
-    assert worker.status(NONCE).status == "TEARDOWN_CONFIRMED"
+    assert first.status == "ABSENCE_PENDING"
+    assert confirmed.status == "ABSENCE_CONFIRMED"
+    assert worker.status(NONCE).status == "ABSENCE_CONFIRMED"
 
 
 def test_guard_refuses_changed_label_or_nonce(tmp_path) -> None:

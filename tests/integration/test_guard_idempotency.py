@@ -36,10 +36,13 @@ def test_repeated_tick_after_teardown_issues_one_destroy_and_preserves_root_hash
 
     first = worker.tick(NONCE, now=NOW + timedelta(seconds=2))
     second = worker.tick(NONCE, now=NOW + timedelta(seconds=3))
+    third = worker.tick(NONCE, now=NOW + timedelta(seconds=4))
+    stable = worker.tick(NONCE, now=NOW + timedelta(seconds=5))
 
     assert provider.destroy_calls == [(INSTANCE_ID, LABEL)]
-    assert first.root_hash == second.root_hash
-    assert second.status == "TEARDOWN_CONFIRMED"
+    assert first.status == second.status == "ABSENCE_PENDING"
+    assert third.status == "ABSENCE_CONFIRMED"
+    assert third.root_hash == stable.root_hash
 
 
 def test_reopening_worker_reads_durable_state_and_never_repeats_destroy(tmp_path) -> None:
@@ -49,10 +52,16 @@ def test_reopening_worker_reads_durable_state_and_never_repeats_destroy(tmp_path
     worker.tick(NONCE, now=NOW + timedelta(seconds=2))
 
     reopened = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
-    receipt = reopened.tick(NONCE, now=NOW + timedelta(seconds=3))
+    reopened.tick(NONCE, now=NOW + timedelta(seconds=3))
+    receipt = reopened.tick(NONCE, now=NOW + timedelta(seconds=4))
 
     assert provider.destroy_calls == [(INSTANCE_ID, LABEL)]
-    assert receipt.status == "TEARDOWN_CONFIRMED"
+    assert receipt.status == "ABSENCE_CONFIRMED"
+    assert receipt.absence_observations == (
+        NOW + timedelta(seconds=2),
+        NOW + timedelta(seconds=3),
+        NOW + timedelta(seconds=4),
+    )
 
 
 def test_same_nonce_cannot_change_target_or_deadline(tmp_path) -> None:
@@ -102,16 +111,19 @@ def test_healthy_prearmed_guard_stays_awaiting_when_no_exact_instance_exists(tmp
     assert receipt.instance_id is None
 
 
-def test_prearmed_backstop_confirms_label_absence_at_its_deadline(tmp_path) -> None:
+def test_prearmed_backstop_requires_three_label_absence_reads_after_its_deadline(tmp_path) -> None:
     provider = FakeProvider()
     provider.instance = None
     worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(minutes=2), require_root_owner=False)
     deadline = NOW + timedelta(minutes=10)
     worker.arm(None, LABEL, NONCE, deadline, now=NOW)
 
-    receipt = worker.tick(NONCE, now=deadline)
+    first = worker.tick(NONCE, now=deadline)
+    second = worker.tick(NONCE, now=deadline + timedelta(seconds=1))
+    receipt = worker.tick(NONCE, now=deadline + timedelta(seconds=2))
 
-    assert receipt.status == "ABSENT_OBSERVED"
+    assert first.status == second.status == "ABSENCE_PENDING"
+    assert receipt.status == "ABSENCE_CONFIRMED"
     assert provider.destroy_calls == []
 
 
@@ -122,10 +134,15 @@ def test_prearmed_bound_target_can_later_observe_absence_and_disarm(tmp_path) ->
     worker.tick(NONCE, now=NOW + timedelta(milliseconds=500))
     provider.instance = None
 
-    absent = worker.tick(NONCE, now=NOW + timedelta(seconds=2))
-    disarmed = worker.disarm_after_absence(NONCE, "a" * 64, now=NOW + timedelta(seconds=3))
+    first = worker.tick(NONCE, now=NOW + timedelta(seconds=2))
+    with pytest.raises(GuardSafetyError, match="three-read"):
+        worker.disarm_after_absence(NONCE, "a" * 64, now=NOW + timedelta(seconds=3))
+    worker.tick(NONCE, now=NOW + timedelta(seconds=3))
+    absent = worker.tick(NONCE, now=NOW + timedelta(seconds=4))
+    disarmed = worker.disarm_after_absence(NONCE, "a" * 64, now=NOW + timedelta(seconds=5))
 
-    assert absent.status == "ABSENT_OBSERVED"
+    assert first.status == "ABSENCE_PENDING"
+    assert absent.status == "ABSENCE_CONFIRMED"
     assert disarmed.status == "DISARMED"
 
 
@@ -147,7 +164,9 @@ def test_reopened_disarmed_guard_stays_disarmed(tmp_path) -> None:
     worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
     worker.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(minutes=1), now=NOW)
     worker.tick(NONCE, now=NOW + timedelta(seconds=2))
-    worker.disarm_after_absence(NONCE, "a" * 64, now=NOW + timedelta(seconds=3))
+    worker.tick(NONCE, now=NOW + timedelta(seconds=3))
+    worker.tick(NONCE, now=NOW + timedelta(seconds=4))
+    worker.disarm_after_absence(NONCE, "a" * 64, now=NOW + timedelta(seconds=5))
 
     reopened = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
 
@@ -175,9 +194,12 @@ def test_teardown_error_reconciles_and_retries_only_the_exact_owned_target(tmp_p
 
     first = worker.tick(NONCE, now=NOW + timedelta(seconds=11))
     second = worker.tick(NONCE, now=NOW + timedelta(seconds=12))
+    worker.tick(NONCE, now=NOW + timedelta(seconds=13))
+    confirmed = worker.tick(NONCE, now=NOW + timedelta(seconds=14))
 
     assert first.status == "TEARDOWN_ERROR"
-    assert second.status == "TEARDOWN_CONFIRMED"
+    assert second.status == "ABSENCE_PENDING"
+    assert confirmed.status == "ABSENCE_CONFIRMED"
     assert provider.destroy_calls == [(INSTANCE_ID, LABEL), (INSTANCE_ID, LABEL)]
 
 
@@ -201,10 +223,135 @@ def test_destroy_success_requires_provider_confirmed_absence_before_terminal_rec
 
     first = worker.tick(NONCE, now=NOW + timedelta(seconds=11))
     second = worker.tick(NONCE, now=NOW + timedelta(seconds=12))
+    worker.tick(NONCE, now=NOW + timedelta(seconds=13))
+    confirmed = worker.tick(NONCE, now=NOW + timedelta(seconds=14))
 
     assert first.status == "TEARDOWN_ERROR"
-    assert second.status == "TEARDOWN_CONFIRMED"
+    assert second.status == "ABSENCE_PENDING"
+    assert confirmed.status == "ABSENCE_CONFIRMED"
     assert provider.destroy_calls == [(INSTANCE_ID, LABEL), (INSTANCE_ID, LABEL)]
+
+
+def test_duplicate_timestamp_does_not_advance_three_read_quorum(tmp_path) -> None:
+    provider = FakeProvider()
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
+    worker.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(minutes=1), now=NOW)
+
+    first = worker.tick(NONCE, now=NOW + timedelta(seconds=2))
+    duplicate = worker.tick(NONCE, now=NOW + timedelta(seconds=2))
+    second = worker.tick(NONCE, now=NOW + timedelta(seconds=3))
+    third = worker.tick(NONCE, now=NOW + timedelta(seconds=4))
+
+    assert len(first.absence_observations) == 1
+    assert duplicate.absence_observations == first.absence_observations
+    assert second.status == "ABSENCE_PENDING"
+    assert third.status == "ABSENCE_CONFIRMED"
+
+
+def test_provider_failure_resets_pending_absence_quorum(tmp_path) -> None:
+    class FailingReadProvider(FakeProvider):
+        fail_next_read = False
+
+        def get_instance(self, instance_id: int) -> GuardedInstance | None:
+            if self.fail_next_read:
+                self.fail_next_read = False
+                raise TimeoutError("provider unavailable")
+            return super().get_instance(instance_id)
+
+    provider = FailingReadProvider()
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
+    worker.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(minutes=1), now=NOW)
+    first = worker.tick(NONCE, now=NOW + timedelta(seconds=2))
+    provider.fail_next_read = True
+
+    failed = worker.tick(NONCE, now=NOW + timedelta(seconds=3))
+    restarted = worker.tick(NONCE, now=NOW + timedelta(seconds=4))
+    worker.tick(NONCE, now=NOW + timedelta(seconds=5))
+    confirmed = worker.tick(NONCE, now=NOW + timedelta(seconds=6))
+
+    assert first.status == "ABSENCE_PENDING"
+    assert failed.status == "TEARDOWN_ERROR"
+    assert failed.absence_observations == ()
+    assert len(restarted.absence_observations) == 1
+    assert confirmed.status == "ABSENCE_CONFIRMED"
+
+
+def test_unknown_provider_inventory_resets_and_refuses_pending_quorum(tmp_path) -> None:
+    class UnknownInventoryProvider(FakeProvider):
+        unknown = False
+
+        def find_instances(self, label: str) -> tuple[GuardedInstance, ...]:
+            if self.unknown:
+                return []  # type: ignore[return-value]
+            return super().find_instances(label)
+
+    provider = UnknownInventoryProvider()
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
+    worker.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(minutes=1), now=NOW)
+    worker.tick(NONCE, now=NOW + timedelta(seconds=2))
+    provider.unknown = True
+
+    refused = worker.tick(NONCE, now=NOW + timedelta(seconds=3))
+
+    assert refused.status == "TEARDOWN_ERROR"
+    assert refused.absence_observations == ()
+
+
+def test_reappearing_exact_target_resets_pending_absence_quorum(tmp_path) -> None:
+    class StaleDestroyProvider(FakeProvider):
+        keep_present = False
+
+        def destroy_exact(self, instance_id: int, expected_label: str) -> None:
+            self.destroy_calls.append((instance_id, expected_label))
+            if not self.keep_present:
+                self.instance = None
+
+    provider = StaleDestroyProvider()
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
+    worker.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(minutes=1), now=NOW)
+    worker.tick(NONCE, now=NOW + timedelta(seconds=2))
+    provider.instance = GuardedInstance(INSTANCE_ID, LABEL)
+    provider.keep_present = True
+
+    present = worker.tick(NONCE, now=NOW + timedelta(seconds=3))
+
+    assert present.status == "TEARDOWN_ERROR"
+    assert present.absence_observations == ()
+
+
+def test_changed_exact_id_label_refuses_pending_absence_quorum(tmp_path) -> None:
+    provider = FakeProvider()
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
+    worker.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(minutes=1), now=NOW)
+    worker.tick(NONCE, now=NOW + timedelta(seconds=2))
+    provider.instance = GuardedInstance(INSTANCE_ID, f"changed--nonce-{NONCE}")
+
+    refused = worker.tick(NONCE, now=NOW + timedelta(seconds=3))
+
+    assert refused.status == "OWNERSHIP_MISMATCH"
+    assert refused.absence_observations == ()
+    assert provider.destroy_calls == [(INSTANCE_ID, LABEL)]
+
+
+def test_duplicate_nonce_bound_labels_refuse_pending_absence_quorum(tmp_path) -> None:
+    class DuplicateLabelProvider(FakeProvider):
+        duplicates = False
+
+        def find_instances(self, label: str) -> tuple[GuardedInstance, ...]:
+            if self.duplicates:
+                return (GuardedInstance(INSTANCE_ID + 1, label), GuardedInstance(INSTANCE_ID + 2, label))
+            return super().find_instances(label)
+
+    provider = DuplicateLabelProvider()
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
+    worker.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(minutes=1), now=NOW)
+    worker.tick(NONCE, now=NOW + timedelta(seconds=2))
+    provider.duplicates = True
+
+    refused = worker.tick(NONCE, now=NOW + timedelta(seconds=3))
+
+    assert refused.status == "OWNERSHIP_MISMATCH"
+    assert refused.absence_observations == ()
 
 
 def test_no_destroy_is_issued_after_bounded_post_deadline_window(tmp_path) -> None:
