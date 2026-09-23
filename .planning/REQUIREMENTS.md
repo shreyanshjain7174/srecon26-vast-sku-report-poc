@@ -23,8 +23,8 @@
 
 ### Experiment Controller
 
-- [ ] **CTRL-01**: Controller uses a hash-chained append-only run journal; each event record carries a monotone sequence number and `previous_hash` field
-- [ ] **CTRL-02**: Controller resumes idempotently after a crash by replaying the journal from the last valid hash-chain entry without re-issuing any already-recorded create call
+- [x] **CTRL-01**: Controller uses a hash-chained append-only run journal; each event record carries a monotone sequence number and `previous_hash` field
+- [x] **CTRL-02**: Controller resumes idempotently after a crash by replaying the journal from the last valid hash-chain entry without re-issuing any already-recorded create call
 - [ ] **CTRL-03**: Ambiguous provider `create` responses are never retried; controller reconciles instance state by label, records the ambiguity event, and halts until resolved
 - [ ] **CTRL-04**: Controller enforces the report-before-destroy ordering: qualifying `PROVIDER_FAULT_CONFIRMED` events trigger the report adapter before teardown; destroy is not issued until the report step completes or the hard deadline forces it
 - [ ] **CTRL-05**: `DIAGNOSIS_UNRESOLVED` status never triggers the provider report adapter; only `PROVIDER_FAULT_CONFIRMED` does
@@ -97,8 +97,8 @@
 
 ### Error Handling & Observability
 
-- [ ] **ERR-01**: All experiment controller state transitions are logged to the journal with ISO-8601 timestamps and structured key-value fields; no unstructured log lines on the critical path
-- [ ] **ERR-02**: Any exception that causes the controller to halt produces a `HALT` journal event with the exception class, message, and traceback hash before process exit
+- [x] **ERR-01**: All experiment controller state transitions are logged to the journal with ISO-8601 timestamps and structured key-value fields; no unstructured log lines on the critical path
+- [x] **ERR-02**: Any exception that causes the controller to halt produces a `HALT` journal event with the exception class, message, and traceback hash before process exit
 - [ ] **ERR-03**: Budget ledger write failures are fatal and produce a `BUDGET_WRITE_FAIL` halt event; the controller never continues past a failed budget write
 - [ ] **ERR-04**: Guard heartbeat failures are logged with timestamp and retry count; the guard treats three consecutive missed heartbeats as controller loss
 - [ ] **ERR-05**: Analyzer run produces a machine-readable verdict file (`verdict.json`) in addition to human-readable output; deck generator consumes `verdict.json`, not log output
@@ -150,8 +150,8 @@
 | GUARD-03 | Phase 1 | Pending |
 | GUARD-04 | Phase 1 | Pending |
 | GUARD-05 | Phase 1 | Pending |
-| CTRL-01 | Phase 1 | Pending |
-| CTRL-02 | Phase 1 | Pending |
+| CTRL-01 | Phase 1 | Complete |
+| CTRL-02 | Phase 1 | Complete |
 | CTRL-03 | Phase 1 | Pending |
 | CTRL-04 | Phase 1 | Pending |
 | CTRL-05 | Phase 1 | Pending |
@@ -171,8 +171,8 @@
 | INT-03 | Phase 1 | Pending |
 | INT-04 | Phase 1 | Pending |
 | INT-05 | Phase 1 | Pending |
-| ERR-01 | Phase 1 | Pending |
-| ERR-02 | Phase 1 | Pending |
+| ERR-01 | Phase 1 | Complete |
+| ERR-02 | Phase 1 | Complete |
 | ERR-03 | Phase 1 | Pending |
 | ERR-04 | Phase 1 | Pending |
 | GPU-01 | Phase 2 | Pending |

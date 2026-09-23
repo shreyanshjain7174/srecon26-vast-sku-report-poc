@@ -25,7 +25,7 @@ Three phases enforced by a hard dependency chain: build the safety envelope and 
 **Plans**: 5 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Establish the tested package scaffold, typed lifecycle contracts, and crash-safe hash-chained journal
+- [x] 01-01-PLAN.md — Establish the tested package scaffold, typed lifecycle contracts, and crash-safe hash-chained journal
 - [ ] 01-02-PLAN.md — Enforce Decimal-only exposure accounting and provider ownership contracts
 - [ ] 01-03-PLAN.md — Implement the independent guard, report-first lifecycle, and idempotent controller fakes
 - [ ] 01-04-PLAN.md — Prove CPU, queue, and synthetic-KV local HPA signal independence
@@ -62,6 +62,6 @@ Phases execute in numeric order: 1 → 2 → 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Safety Foundation and Local Evidence | 0/5 | Planned | - |
+| 1. Safety Foundation and Local Evidence | 1/5 | In Progress|  |
 | 2. Live GPU Canary and Paired Comparison | 0/? | Not started | - |
 | 3. Evidence, Charts, and Deck | 0/? | Not started | - |
