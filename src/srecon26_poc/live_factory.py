@@ -384,18 +384,29 @@ class VastSshResolver:
         key = public_key_file.read_text(encoding="utf-8").strip()
         if not re.fullmatch(r"ssh-(?:rsa|ed25519) [A-Za-z0-9+/=]+(?: [^\r\n]+)?", key):
             raise LiveFactoryError("SSH public key file is invalid")
-        lookup_timeout = self._require_cli_window(hard_deadline, "SSH key ownership lookup")
-        heartbeat()
-        raw = _json(self.runner([self.cli_path, "--raw", "--no-color", "show", "instance", str(instance.instance_id)], timeout=lookup_timeout), context="Vast instance ownership lookup")
-        self._require_remaining_margin(hard_deadline, "SSH key ownership lookup")
-        if not isinstance(raw, Mapping) or _integer(raw.get("id", raw.get("instance_id")), "instance id") != instance.instance_id or raw.get("label") != instance.label:
-            raise LiveFactoryError("refusing to attach SSH key after instance ownership changed")
-        status = str(raw.get("actual_status", "")).lower()
-        if status not in {"loading", "running"}:
-            raise LiveFactoryError("refusing to attach SSH key without an exact nonterminal provider status")
-        status_log.parent.mkdir(parents=True, exist_ok=True)
-        with status_log.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"event": "ssh_key_attach_precheck", "instance_id": instance.instance_id, "label": instance.label, "actual_status": status, "observed_at": _stamp(datetime.now(UTC))}, sort_keys=True) + "\n")
+        terminal = {"error", "offline", "stopped", "exited"}
+        for attempt in range(self.attempts):
+            lookup_timeout = self._require_cli_window(hard_deadline, "SSH key ownership lookup")
+            heartbeat()
+            raw = _json(self.runner([self.cli_path, "--raw", "--no-color", "show", "instance", str(instance.instance_id)], timeout=lookup_timeout), context="Vast instance ownership lookup")
+            self._require_remaining_margin(hard_deadline, "SSH key ownership lookup")
+            if not isinstance(raw, Mapping) or _integer(raw.get("id", raw.get("instance_id")), "instance id") != instance.instance_id or raw.get("label") != instance.label:
+                raise LiveFactoryError("refusing to attach SSH key after instance ownership changed")
+            status = str(raw.get("actual_status", "")).lower()
+            status_log.parent.mkdir(parents=True, exist_ok=True)
+            with status_log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"event": "ssh_key_attach_wait", "attempt": attempt + 1, "instance_id": instance.instance_id, "label": instance.label, "actual_status": status, "observed_at": _stamp(datetime.now(UTC))}, sort_keys=True) + "\n")
+            if status in terminal:
+                raise LiveFactoryError(f"refusing to attach SSH key after terminal provider status: {status}")
+            if status in {"loading", "running"}:
+                break
+            if attempt + 1 < self.attempts:
+                heartbeat()
+                if (hard_deadline - REPORT_MARGIN - datetime.now(UTC)).total_seconds() <= self.interval_seconds:
+                    raise LiveFactoryError("SSH key attach retry cannot fit before immutable teardown margin")
+                self.sleep(self.interval_seconds)
+        else:
+            raise LiveFactoryError("exact instance did not reach a safe SSH key attach status within the bounded wait")
         attach_timeout = self._require_cli_window(hard_deadline, "SSH key attach")
         self.runner([self.cli_path, "--raw", "--no-color", "attach", "ssh", str(instance.instance_id), str(public_key_file)], timeout=attach_timeout)
         self._require_remaining_margin(hard_deadline, "SSH key attach")

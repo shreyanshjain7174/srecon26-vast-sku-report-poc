@@ -162,6 +162,22 @@ def test_ssh_resolver_attaches_public_key_only_after_exact_ownership_check(tmp_p
     assert len(beats) == 2
 
 
+def test_ssh_resolver_waits_for_loading_before_attaching_public_key(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    public_key = tmp_path / "id_rsa.pub"
+    public_key.write_text("ssh-rsa QUJDRA== test@example")
+    statuses = iter(("created", "loading"))
+    calls: list[list[str]] = []
+
+    def runner(arguments, *, timeout: int) -> str:
+        calls.append(arguments)
+        return json.dumps({"id": 417, "label": LABEL, "actual_status": next(statuses)}) if "show" in arguments else ""
+
+    VastSshResolver("vastai", runner=runner, interval_seconds=0).attach_public_key(instance, public_key, hard_deadline=datetime.now(UTC) + timedelta(minutes=20), heartbeat=lambda: None, status_log=tmp_path / "status.ndjson")
+    assert sum("show" in call for call in calls) == 2
+    assert calls[-1][-4:] == ["attach", "ssh", "417", str(public_key)]
+
+
 def test_ssh_resolver_does_not_start_cli_lookup_without_full_deadline_window() -> None:
     instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
     calls: list[list[str]] = []
@@ -190,7 +206,7 @@ def test_ssh_resolver_does_not_start_key_attach_lookup_without_full_deadline_win
     assert calls == []
 
 
-@pytest.mark.parametrize("status", ["", "error", "stopped"])
+@pytest.mark.parametrize("status", ["error", "stopped"])
 def test_ssh_resolver_refuses_key_attach_without_nonterminal_status(tmp_path: Path, status: str) -> None:
     instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
     public_key = tmp_path / "id_rsa.pub"
@@ -202,8 +218,23 @@ def test_ssh_resolver_refuses_key_attach_without_nonterminal_status(tmp_path: Pa
         calls.append(arguments)
         return json.dumps({"id": 417, "label": LABEL, "actual_status": status})
 
-    with pytest.raises(LiveFactoryError, match="nonterminal"):
+    with pytest.raises(LiveFactoryError, match="terminal provider status"):
         VastSshResolver("vastai", runner=runner).attach_public_key(instance, public_key, hard_deadline=datetime.now(UTC) + timedelta(minutes=20), heartbeat=lambda: None, status_log=tmp_path / "status.ndjson")
+    assert not any("attach" in call for call in calls)
+
+
+def test_ssh_resolver_never_attaches_key_from_unknown_status(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    public_key = tmp_path / "id_rsa.pub"
+    public_key.write_text("ssh-rsa QUJDRA== test@example")
+    calls: list[list[str]] = []
+
+    def runner(arguments, *, timeout: int) -> str:
+        calls.append(arguments)
+        return json.dumps({"id": 417, "label": LABEL, "actual_status": ""})
+
+    with pytest.raises(LiveFactoryError, match="did not reach a safe SSH key attach status"):
+        VastSshResolver("vastai", runner=runner, attempts=2, interval_seconds=0).attach_public_key(instance, public_key, hard_deadline=datetime.now(UTC) + timedelta(minutes=20), heartbeat=lambda: None, status_log=tmp_path / "status.ndjson")
     assert not any("attach" in call for call in calls)
 
 
