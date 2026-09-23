@@ -15,6 +15,9 @@ from .journal import InvalidJournal, RunJournal
 MAX_EXPOSURE = Decimal("5.00")
 CATEGORY_CAPS = {
     "gpu-smoke": Decimal("1.00"),
+    # One durable retry entitlement while exactly one original smoke invoice
+    # remains pending.  It cannot be split across multiple retry reservations.
+    "gpu-smoke-retry": Decimal("0.90"),
     "canary": Decimal("1.00"),
     "paired-comparison": Decimal("3.00"),
 }
@@ -210,6 +213,11 @@ class ExposureLedger:
                 if isinstance(existing, Mapping) and self._decimal(existing["amount"]) == amount and existing["category"] == category:
                     return MAX_EXPOSURE - self._exposure(data)
                 raise BudgetExceeded("run already has a different reservation")
+            if category == "gpu-smoke-retry":
+                retries = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
+                pending_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == "gpu-smoke" and entry.get("actual") is None and entry.get("absence_proof") is None]
+                if retries or len(pending_smokes) != 1:
+                    raise BudgetExceeded("smoke retry requires exactly one pending original invoice and one unused retry entitlement")
             category_total = self._category_exposure(data, category)
             if category_total + amount > CATEGORY_CAPS[category] or self._exposure(data) + amount > MAX_EXPOSURE:
                 raise BudgetExceeded("reservation would exceed approved exposure")

@@ -206,6 +206,7 @@ class LiveCanaryRequest:
     gates: GateArtifactPaths
     launch: VastLaunchContract
     workload: WorkloadContract
+    budget_category: str | None = None
 
     def validate(self, *, now: datetime) -> tuple[str, ...]:
         failures: list[str] = []
@@ -219,6 +220,11 @@ class LiveCanaryRequest:
             failures.append("label must bind exactly this nonce")
         if not isinstance(self.reserve, Decimal) or not self.reserve.is_finite() or not Decimal("0") < self.reserve <= MAX_STAGE_RESERVE:
             failures.append("reserve must be a positive Decimal no greater than 1.00")
+        if self.budget_category is not None:
+            if self.stage != "gpu-smoke" or self.budget_category != "gpu-smoke-retry":
+                failures.append("budget category override is restricted to the audited gpu-smoke retry")
+            elif self.reserve > Decimal("0.90"):
+                failures.append("audited gpu-smoke retry reserve must be no greater than 0.90")
         if self.hard_deadline.tzinfo is None or self.hard_deadline.astimezone(UTC) <= now:
             failures.append("hard deadline must be a future timezone-aware timestamp")
         elif self.hard_deadline.astimezone(UTC) - now > MAX_STAGE_RUNTIME:
@@ -573,7 +579,7 @@ class LiveCanaryDispatcher:
         guard_armed = False
         try:
             self._append(journal, RunState.OFFLINE_VALIDATED, "gates.passed", {"gate_hashes": dict(gate_hashes)})
-            self.ledger.reserve(request.run_id, request.reserve, "gpu-smoke" if request.stage == "gpu-smoke" else "canary")
+            self.ledger.reserve(request.run_id, request.reserve, request.budget_category or ("gpu-smoke" if request.stage == "gpu-smoke" else "canary"))
             self._append(journal, RunState.BUDGET_RESERVED, "budget.reserved", {"reserve": str(request.reserve), "project_cap": str(PROJECT_CAP)})
             self._append(journal, RunState.OFFER_PINNED, "offer.pinned", {"offer_id": current_offer.offer_id, "label": current_offer.label, "vms_enabled": True})
             if self.report_gate is None:

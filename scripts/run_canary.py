@@ -490,6 +490,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Offline-only bounded canary lifecycle simulator")
     parser.add_argument("--stage", choices=("gpu-smoke", "metric-path"), required=True)
     parser.add_argument("--reserve", type=Decimal, default=Decimal("1.00"))
+    parser.add_argument("--budget-category", choices=("gpu-smoke-retry",))
     parser.add_argument("--require-zero-instances", action="store_true")
     parser.add_argument("--fixture", action="store_true", help="run only an in-memory fixture")
     parser.add_argument("--live", action="store_true", help="dispatch only through explicit gate artifacts and an injected integration factory")
@@ -551,6 +552,7 @@ def main() -> int:
                 GateArtifactPaths(args.phase1_verification, args.semgrep_artifact, args.provider_preflight, args.guard_attestation, args.report_fixture, args.smoke_manifest),
                 VastLaunchContract(ubuntu_template_hash=args.ubuntu_template_hash, image_contract=args.vm_image_contract),
                 WorkloadContract(args.model_id, args.model_revision, args.vllm_image_digest),
+                args.budget_category,
             )
             result = run_live_dispatch(dispatcher=_load_dispatcher(args.dispatcher_factory), request=request)
             print(json.dumps({"status": result.status, "manifest": str(result.manifest_path), "provenance": result.provenance}, sort_keys=True))

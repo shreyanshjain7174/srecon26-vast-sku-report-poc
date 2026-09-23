@@ -112,7 +112,25 @@ def test_actual_spend_still_counts_toward_category_cap(tmp_path):
     ledger.reserve("run-a", Decimal("1.00"), "gpu-smoke")
     ledger.commit_actual("run-a", Decimal("0.01"), _proof(tmp_path, "run-a"))
     with pytest.raises(BudgetExceeded):
-        ledger.reserve("run-b", Decimal("1.00"), "gpu-smoke")
+        ledger.reserve("run-b", Decimal("2.00"), "gpu-smoke")
+
+
+def test_audited_smoke_retry_envelope_keeps_pending_reservation_charged(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("pending-invoice", Decimal("0.97"), "gpu-smoke")
+    ledger.reserve("bounded-retry", Decimal("0.90"), "gpu-smoke-retry")
+    assert ledger.headroom() == Decimal("3.13")
+    with pytest.raises(BudgetExceeded):
+        ledger.reserve("overflow", Decimal("0.01"), "gpu-smoke-retry")
+
+
+def test_audited_smoke_retry_rejects_one_dollar_and_requires_pending_original(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    with pytest.raises(BudgetExceeded, match="pending original"):
+        ledger.reserve("retry-without-original", Decimal("0.90"), "gpu-smoke-retry")
+    ledger.reserve("pending-invoice", Decimal("0.97"), "gpu-smoke")
+    with pytest.raises(BudgetExceeded):
+        ledger.reserve("oversized-retry", Decimal("1.00"), "gpu-smoke-retry")
 
 
 def test_idempotent_reservation_returns_without_relocking(tmp_path):

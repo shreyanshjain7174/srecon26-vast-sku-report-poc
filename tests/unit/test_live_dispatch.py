@@ -207,6 +207,15 @@ def test_missing_current_gate_never_reads_or_mutates_provider(tmp_path: Path) ->
     assert manifest["provenance"] == "live-limitation"
 
 
+def test_retry_budget_override_is_bounded_and_smoke_only(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, _ = _request(tmp_path, now)
+    assert not replace(request, reserve=Decimal("0.90"), budget_category="gpu-smoke-retry").validate(now=now)
+    assert "audited gpu-smoke retry reserve must be no greater than 0.90" in replace(request, reserve=Decimal("1.00"), budget_category="gpu-smoke-retry").validate(now=now)
+    failures = replace(request, stage="metric-path", reserve=Decimal("0.90"), budget_category="gpu-smoke-retry").validate(now=now)
+    assert "budget category override is restricted to the audited gpu-smoke retry" in failures
+
+
 def test_budget_failure_before_guard_arm_does_not_attempt_guard_anchor(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     request, offer = _request(tmp_path, now)
