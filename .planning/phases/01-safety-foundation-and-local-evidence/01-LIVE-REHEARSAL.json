@@ -1,10 +1,11 @@
 {
   "provenance": "local-synthetic",
   "cpu_run": "local-evidence/phase1-live-202609d03531790135589z/cpu",
-  "queue_run": "local-evidence/phase1-live-202609d03531790135589z/queue",
+  "queue_run": "local-evidence/phase1-live-202609d04271790137679z/queue",
   "kv_run": "local-evidence/phase1-live-202609d04031790136227z/kv",
   "validation": {"cpu": true, "queue": true, "kv": true},
   "negative_control_seconds": 90,
+  "queue_negative_cpu_max_millicores": 16.456944,
   "cleanup_verified": true,
   "provider_activity": false
 }
