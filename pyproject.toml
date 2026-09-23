@@ -1,0 +1,15 @@
+[build-system]
+requires = []
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "srecon26-poc"
+version = "0.1.0"
+description = "Safety-first local evidence harness for the SRECon26 LLM HPA PoC"
+requires-python = ">=3.14"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+
