@@ -19,6 +19,15 @@ readonly NAMESPACE="srecon26-canary"
 readonly FIELD_MANAGER="srecon26-remote-canary"
 readonly DEFAULT_WAIT_SECONDS=600
 readonly DEFAULT_COMMAND_TIMEOUT_SECONDS=60
+readonly DEFAULT_LOAD_SECONDS=45
+readonly DEFAULT_LOAD_CONCURRENCY=8
+readonly DEFAULT_LOAD_PROMPT_REPETITIONS=512
+readonly DEFAULT_LOAD_MAX_TOKENS=256
+readonly DEFAULT_LOAD_REQUEST_TIMEOUT_SECONDS=90
+# Preserve the controller's report, exact teardown, and absence-proof budget.
+# The remote phase is never allowed to consume this immutable margin.
+readonly MIN_HARD_DEADLINE_MARGIN_SECONDS=165
+readonly DEFAULT_HARD_DEADLINE_MARGIN_SECONDS=180
 
 usage() {
   cat <<'USAGE'
@@ -30,7 +39,10 @@ Required for probe/collect: CANARY_EVIDENCE_DIR (absolute, empty or new dir)
 Required for install: K3S_BINARY_PATH (pre-staged local amd64 binary)
 Required for deploy/cleanup: CANARY_EVIDENCE_DIR, CANARY_MANIFEST_DIR,
   CANARY_MANIFEST_SHA256.  Deploy additionally needs CANARY_VLLM_IMAGE,
-  CANARY_MODEL, and CANARY_MODEL_REVISION.
+  CANARY_MODEL, CANARY_MODEL_REVISION, and CANARY_HARD_DEADLINE (an RFC3339
+  UTC deadline).  Deploy runs one bounded, concurrent localhost-only load
+  phase and preserves at least 165 seconds for report, teardown, and absence
+  proof.
 
 The pinned k3s source is recorded in this script, but installation never
 downloads it.  The supplied binary must verify to the recorded SHA256.
@@ -79,6 +91,77 @@ command_timeout_seconds() {
   positive_integer "$value"
   (( value <= 120 )) || die "CANARY_COMMAND_TIMEOUT_SECONDS must be no greater than 120"
   printf '%s\n' "$value"
+}
+
+bounded_value() {
+  local variable_name="$1"
+  local default_value="$2"
+  local maximum="$3"
+  local value="${!variable_name:-$default_value}"
+  positive_integer "$value"
+  (( value <= maximum )) || die "$variable_name must be no greater than $maximum"
+  printf '%s\n' "$value"
+}
+
+load_seconds() {
+  bounded_value CANARY_LOAD_SECONDS "$DEFAULT_LOAD_SECONDS" 120
+}
+
+load_concurrency() {
+  bounded_value CANARY_LOAD_CONCURRENCY "$DEFAULT_LOAD_CONCURRENCY" 32
+}
+
+load_prompt_repetitions() {
+  bounded_value CANARY_LOAD_PROMPT_REPETITIONS "$DEFAULT_LOAD_PROMPT_REPETITIONS" 4096
+}
+
+load_max_tokens() {
+  bounded_value CANARY_LOAD_MAX_TOKENS "$DEFAULT_LOAD_MAX_TOKENS" 1024
+}
+
+load_request_timeout_seconds() {
+  bounded_value CANARY_LOAD_REQUEST_TIMEOUT_SECONDS "$DEFAULT_LOAD_REQUEST_TIMEOUT_SECONDS" 120
+}
+
+hard_deadline_epoch() {
+  local hard_deadline="${CANARY_HARD_DEADLINE:-}"
+  [[ -n "$hard_deadline" ]] || die "CANARY_HARD_DEADLINE must be an RFC3339 UTC timestamp"
+  require_command date
+  local epoch
+  epoch="$(date -u -d "$hard_deadline" +%s 2>/dev/null)" \
+    || die "CANARY_HARD_DEADLINE must be an RFC3339 UTC timestamp"
+  [[ "$epoch" =~ ^[0-9]+$ ]] || die "CANARY_HARD_DEADLINE could not be converted to an epoch"
+  (( epoch > $(date -u +%s) )) || die "CANARY_HARD_DEADLINE has already elapsed"
+  printf '%s\n' "$epoch"
+}
+
+hard_deadline_margin_seconds() {
+  local value="${CANARY_HARD_DEADLINE_MARGIN_SECONDS:-$DEFAULT_HARD_DEADLINE_MARGIN_SECONDS}"
+  positive_integer "$value"
+  (( value >= MIN_HARD_DEADLINE_MARGIN_SECONDS && value <= 300 )) \
+    || die "CANARY_HARD_DEADLINE_MARGIN_SECONDS must be between $MIN_HARD_DEADLINE_MARGIN_SECONDS and 300"
+  printf '%s\n' "$value"
+}
+
+remaining_seconds_until() {
+  local deadline_epoch="$1"
+  local now
+  now="$(date -u +%s)"
+  (( deadline_epoch > now )) || return 1
+  printf '%s\n' "$(( deadline_epoch - now ))"
+}
+
+pressure_phase_deadline_epoch() {
+  local hard_deadline margin duration now latest_safe_phase_deadline phase_deadline
+  hard_deadline="$(hard_deadline_epoch)"
+  margin="$(hard_deadline_margin_seconds)"
+  duration="$(load_seconds)"
+  now="$(date -u +%s)"
+  latest_safe_phase_deadline="$(( hard_deadline - margin ))"
+  (( latest_safe_phase_deadline > now && latest_safe_phase_deadline - now >= duration )) \
+    || die "CANARY_HARD_DEADLINE does not leave enough time for the bounded load phase and teardown margin"
+  phase_deadline="$(( now + duration ))"
+  printf '%s\n' "$phase_deadline"
 }
 
 # Evidence output must never intentionally include credentials.  Command
@@ -315,6 +398,197 @@ run_request_pair() {
   trap - RETURN
 }
 
+cleanup_pressure_processes() {
+  local pid
+  for pid in "$@"; do
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  done
+}
+
+capture_until_deadline() {
+  local output="$1"
+  local deadline_epoch="$2"
+  shift 2
+  local remaining
+  remaining="$(remaining_seconds_until "$deadline_epoch")" \
+    || die "load phase reached its deadline before capturing evidence"
+  # This is deliberately independent of CANARY_COMMAND_TIMEOUT_SECONDS: a
+  # capture may never cross the pressure phase deadline.
+  if timeout --foreground "$remaining" "$@" 2>&1 | redact_stream >"$output"; then
+    return 0
+  fi
+  local result=${PIPESTATUS[0]}
+  printf 'command exited %s\n' "$result" >>"$output"
+  return "$result"
+}
+
+curl_timeout_until_deadline() {
+  local deadline_epoch="$1"
+  local configured_timeout="$2"
+  local remaining
+  remaining="$(remaining_seconds_until "$deadline_epoch")" \
+    || die "load phase reached its deadline before making an HTTP request"
+  (( remaining < configured_timeout )) && configured_timeout="$remaining"
+  (( configured_timeout >= 1 )) || die "load phase has no time remaining for an HTTP request"
+  printf '%s\n' "$configured_timeout"
+}
+
+wait_for_local_endpoint_until_deadline() {
+  local url="$1"
+  local deadline_epoch="$2"
+  local description="$3"
+  local request_timeout
+  while true; do
+    request_timeout="$(curl_timeout_until_deadline "$deadline_epoch" 5)"
+    if curl --silent --show-error --fail --max-time "$request_timeout" "$url" >/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  # Kept for shellcheck/control-flow clarity; the deadline helper exits first.
+  die "$description did not become ready before the bounded load deadline"
+}
+
+capture_pressure_snapshot() {
+  local out="$1"
+  local phase="$2"
+  local prometheus_port="$3"
+  local deadline_epoch="$4"
+  local query request_timeout
+  # CPU comes from resource metrics. Queue, KV, and the actual vLLM TTFT
+  # histogram are preserved together as raw Prometheus query output.
+  capture_until_deadline "$out/pressure-${phase}-cpu.txt" "$deadline_epoch" \
+    kubectl -n "$NAMESPACE" top pods || die "cannot capture ${phase} CPU resource metrics"
+  capture_until_deadline "$out/pressure-${phase}-hpa.json" "$deadline_epoch" \
+    kubectl -n "$NAMESPACE" get hpa vllm-observer -o json || die "cannot capture ${phase} HPA desired replicas"
+  capture_until_deadline "$out/pressure-${phase}-ready.json" "$deadline_epoch" \
+    kubectl -n "$NAMESPACE" get deployment vllm -o json || die "cannot capture ${phase} vLLM ready replicas"
+  capture_until_deadline "$out/pressure-${phase}-pods.json" "$deadline_epoch" \
+    kubectl -n "$NAMESPACE" get pods -l app=vllm -o json || die "cannot capture ${phase} vLLM pod readiness"
+  query='vllm:num_requests_waiting or vllm:kv_cache_usage_perc or vllm:time_to_first_token_seconds_count or vllm:time_to_first_token_seconds_sum'
+  request_timeout="$(curl_timeout_until_deadline "$deadline_epoch" 15)"
+  curl --silent --show-error --fail --max-time "$request_timeout" --get \
+    --data-urlencode "query=$query" \
+    "http://127.0.0.1:${prometheus_port}/api/v1/query" | redact_stream \
+    >"$out/pressure-${phase}-queue-kv-ttft-prometheus.json" \
+    || die "cannot capture ${phase} vLLM queue, KV, and TTFT metrics"
+}
+
+run_pressure_request() {
+  local out="$1"
+  local phase="$2"
+  local request_number="$3"
+  local endpoint="$4"
+  local payload="$5"
+  local deadline_epoch="$6"
+  local request_timeout timing body
+  request_timeout="$(curl_timeout_until_deadline "$deadline_epoch" "$(load_request_timeout_seconds)")"
+  timing="$out/pressure-${phase}-request-${request_number}-timing.json"
+  body="$out/pressure-${phase}-request-${request_number}.ndjson"
+  # vLLM streaming lets curl record the first response byte while retaining
+  # the full request latency.  The record explicitly names the method so it
+  # is not mistaken for an application-side token timestamp.
+  if curl --no-buffer --silent --show-error --fail --max-time "$request_timeout" \
+    --output "$body" \
+    --write-out "{\"request\":${request_number},\"phase\":\"${phase}\",\"ttft_method\":\"curl_time_starttransfer_first_stream_response_byte\",\"ttft_seconds\":%{time_starttransfer},\"latency_seconds\":%{time_total},\"http_code\":%{http_code}}\\n" \
+    --header 'content-type: application/json' --data "$payload" "$endpoint" >"$timing"; then
+    return 0
+  fi
+  jq -n --arg phase "$phase" --argjson request "$request_number" \
+    --arg status "failed_or_timed_out" \
+    '{request: $request, phase: $phase, status: $status}' >"$timing"
+  return 1
+}
+
+run_pressure_load() {
+  require_command curl
+  require_command jq
+  require_command kubectl
+  require_command timeout
+  local out="$1"
+  local phase_deadline load_duration concurrency prompt_repetitions max_tokens
+  phase_deadline="$(pressure_phase_deadline_epoch)"
+  load_duration="$(load_seconds)"
+  concurrency="$(load_concurrency)"
+  prompt_repetitions="$(load_prompt_repetitions)"
+  max_tokens="$(load_max_tokens)"
+  local vllm_port="${CANARY_LOCAL_PORT:-18000}"
+  local prometheus_port="${CANARY_PROMETHEUS_LOCAL_PORT:-19090}"
+  [[ "$vllm_port" =~ ^[1-9][0-9]{3,4}$ ]] || die "CANARY_LOCAL_PORT must be a local high TCP port"
+  [[ "$prometheus_port" =~ ^[1-9][0-9]{3,4}$ ]] || die "CANARY_PROMETHEUS_LOCAL_PORT must be a local high TCP port"
+  [[ "$vllm_port" != "$prometheus_port" ]] || die "vLLM and Prometheus localhost ports must differ"
+
+  local baseline_prompt="${CANARY_PROMPT:-Reply with the word ready.}"
+  local pressure_prompt="$baseline_prompt"
+  local repetition
+  for ((repetition = 0; repetition < prompt_repetitions; repetition++)); do
+    pressure_prompt+=" pressure"
+  done
+  local baseline_payload pressure_payload
+  baseline_payload="$(jq -cn --arg model "$CANARY_MODEL" --arg prompt "$baseline_prompt" \
+    '{model: $model, prompt: $prompt, max_tokens: 8, temperature: 0, stream: true}')"
+  pressure_payload="$(jq -cn --arg model "$CANARY_MODEL" --arg prompt "$pressure_prompt" --argjson max_tokens "$max_tokens" \
+    '{model: $model, prompt: $prompt, max_tokens: $max_tokens, temperature: 0, stream: true}')"
+
+  local port_forward_timeout
+  port_forward_timeout="$(remaining_seconds_until "$phase_deadline")" \
+    || die "load phase reached its deadline before port forwarding"
+  timeout --foreground "$port_forward_timeout" kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 \
+    "svc/vllm" "${vllm_port}:8000" >"$out/pressure-vllm-port-forward.txt" 2>&1 &
+  local vllm_pid=$!
+  timeout --foreground "$port_forward_timeout" kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 \
+    "svc/prometheus" "${prometheus_port}:9090" >"$out/pressure-prometheus-port-forward.txt" 2>&1 &
+  local prometheus_pid=$!
+  local -a request_pids=()
+  # `die` exits the remote script, so this must be an EXIT trap rather than a
+  # function-return trap.  It prevents a failed phase from leaving tunnel or
+  # curl processes alive while the independent guard performs teardown.
+  trap 'cleanup_pressure_processes "$vllm_pid" "$prometheus_pid" "${request_pids[@]:-}"' EXIT
+
+  wait_for_local_endpoint_until_deadline "http://127.0.0.1:${vllm_port}/health" "$phase_deadline" "vLLM localhost health check"
+  wait_for_local_endpoint_until_deadline "http://127.0.0.1:${prometheus_port}/-/ready" "$phase_deadline" "Prometheus localhost health check"
+  capture_pressure_snapshot "$out" before "$prometheus_port" "$phase_deadline"
+  run_pressure_request "$out" before 0 "http://127.0.0.1:${vllm_port}/v1/completions" "$baseline_payload" "$phase_deadline" \
+    || die "baseline vLLM request failed before pressure load"
+
+  local request_number
+  for ((request_number = 1; request_number <= concurrency; request_number++)); do
+    run_pressure_request "$out" during "$request_number" "http://127.0.0.1:${vllm_port}/v1/completions" "$pressure_payload" "$phase_deadline" &
+    request_pids+=("$!")
+  done
+  # Give concurrent streams a bounded portion of the phase to enter vLLM's
+  # scheduler before taking the pressure snapshot.
+  local snapshot_delay=2
+  (( load_duration < snapshot_delay )) && snapshot_delay="$load_duration"
+  local remaining_before_snapshot
+  remaining_before_snapshot="$(remaining_seconds_until "$phase_deadline")" \
+    || die "load phase reached its deadline before the during-pressure snapshot"
+  (( remaining_before_snapshot < snapshot_delay )) && snapshot_delay="$remaining_before_snapshot"
+  sleep "$snapshot_delay"
+  capture_pressure_snapshot "$out" during "$prometheus_port" "$phase_deadline"
+
+  local request_failures=0 request_pid
+  for request_pid in "${request_pids[@]}"; do
+    wait "$request_pid" || request_failures=$(( request_failures + 1 ))
+  done
+  capture_pressure_snapshot "$out" after "$prometheus_port" "$phase_deadline"
+  run_pressure_request "$out" after 0 "http://127.0.0.1:${vllm_port}/v1/completions" "$baseline_payload" "$phase_deadline" \
+    || request_failures=$(( request_failures + 1 ))
+
+  jq -n --arg status "$([[ "$request_failures" -eq 0 ]] && printf PASSED || printf FAILED)" \
+    --arg hard_deadline "$CANARY_HARD_DEADLINE" --argjson phase_deadline_epoch "$phase_deadline" \
+    --argjson load_seconds "$load_duration" --argjson concurrency "$concurrency" \
+    --argjson prompt_repetitions "$prompt_repetitions" --argjson max_tokens "$max_tokens" \
+    --argjson failed_requests "$request_failures" \
+    '{status: $status, hard_deadline: $hard_deadline, pressure_phase_deadline_epoch: $phase_deadline_epoch, load_seconds: $load_seconds, concurrency: $concurrency, prompt_repetitions: $prompt_repetitions, max_tokens: $max_tokens, failed_requests: $failed_requests, ttft_method: "curl_time_starttransfer_first_stream_response_byte"}' \
+    >"$out/pressure-load-status.json"
+  cleanup_pressure_processes "$vllm_pid" "$prometheus_pid" "${request_pids[@]}"
+  trap - EXIT
+  (( request_failures == 0 )) || die "one or more concurrent pressure requests failed"
+}
+
 deploy_canary() {
   require_root
   require_command timeout
@@ -337,6 +611,7 @@ deploy_canary() {
   wait_for_rollout deployment prometheus
   wait_for_rollout deployment prometheus-adapter
   run_request_pair "$out"
+  run_pressure_load "$out"
   trap - RETURN
   rm -rf "$rendered"
 }

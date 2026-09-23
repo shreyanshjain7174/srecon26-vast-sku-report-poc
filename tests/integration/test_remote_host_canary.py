@@ -122,6 +122,45 @@ def test_evidence_contract_captures_every_required_observation_layer_without_sec
     assert "redact_stream" in script
 
 
+def test_deploy_runs_a_bounded_concurrent_pressure_phase_before_cleanup() -> None:
+    script = _script()
+
+    assert "run_pressure_load \"$out\"" in script
+    assert "CANARY_HARD_DEADLINE" in script
+    assert "CANARY_HARD_DEADLINE does not leave enough time for the bounded load phase and teardown margin" in script
+    assert "MIN_HARD_DEADLINE_MARGIN_SECONDS=165" in script
+    assert "CANARY_LOAD_SECONDS" in script
+    assert "CANARY_LOAD_CONCURRENCY" in script
+    assert "CANARY_LOAD_PROMPT_REPETITIONS" in script
+    assert "CANARY_LOAD_MAX_TOKENS" in script
+    assert "run_pressure_request \"$out\" during" in script
+    assert "cleanup_pressure_processes" in script
+    assert 'trap \'cleanup_pressure_processes' in script
+    assert "' EXIT" in script
+
+
+def test_pressure_phase_preserves_before_during_after_cpu_queue_kv_ttft_and_hpa_evidence() -> None:
+    script = _script()
+
+    for filename in (
+        "pressure-${phase}-cpu.txt",
+        "pressure-${phase}-hpa.json",
+        "pressure-${phase}-ready.json",
+        "pressure-${phase}-pods.json",
+        "pressure-${phase}-queue-kv-ttft-prometheus.json",
+    ):
+        assert filename in script
+    for phase in ("before", "during", "after"):
+        assert f'capture_pressure_snapshot "$out" {phase}' in script
+
+    assert "pressure-load-status.json" in script
+    assert "ttft_seconds" in script
+    assert "latency_seconds" in script
+    assert "vllm:num_requests_waiting" in script
+    assert "vllm:kv_cache_usage_perc" in script
+    assert "vllm:time_to_first_token_seconds" in script
+
+
 def test_cleanup_is_idempotent_and_scoped_to_the_checksumbound_bundle() -> None:
     script = _script()
 
