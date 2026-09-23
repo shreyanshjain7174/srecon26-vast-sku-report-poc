@@ -14,6 +14,13 @@ text shapes, three PNG images, and one native clustered-column chart on slide
 linked media, animation, transitions, SmartArt, grouped shapes, or tables.
 Arial and Cambria are the only declared fonts.
 
+The final PDF was rendered into all 16 slide images under
+`artifacts/presentation/qa-google-import-ready-20260923/`. A full contact-sheet
+review plus full-size inspection of slides 8, 12, and 16 found no local
+clipping, overlap, reversed flow, missing image, or chart-label regression.
+This proves the final local binary renders coherently; it does not substitute
+for Google's conversion render.
+
 ## Import risk
 
 Slide 8's native chart is the only material Google Slides conversion risk.
