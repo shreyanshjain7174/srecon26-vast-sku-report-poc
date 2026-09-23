@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hpa-target
+  namespace: srecon26-local
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: hpa-target}}
+  template:
+    metadata: {labels: {app: hpa-target}}
+    spec:
+      containers:
+        - name: target
+          image: registry.k8s.io/pause:3.10
+          resources: {requests: {cpu: 100m}}
