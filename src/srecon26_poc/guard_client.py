@@ -27,6 +27,17 @@ def _parse(value: object) -> datetime:
     return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
 
 
+def _label_binds_nonce(label: str, nonce: str) -> bool:
+    """Check the provider-visible nonce-bound label protocol.
+
+    Vast raw instance records have a label but no independent nonce field, so
+    a remote guard can only verify ownership through this exact label.
+    """
+    delimiter = f"--nonce-{nonce}"
+    prefix = label.removesuffix(delimiter)
+    return bool(prefix) and prefix != label and "--nonce-" not in prefix
+
+
 @dataclass(frozen=True, slots=True)
 class GuardRemoteReceipt:
     status: str
@@ -73,6 +84,8 @@ class GuardClient:
         return GuardAttestation(receipt.host_identity, receipt.script_hash, self.nonce, armed.label, armed.hard_deadline, armed.last_heartbeat)
 
     def arm(self, identity: RunIdentity, hard_deadline: datetime) -> GuardRemoteReceipt:
+        if not _label_binds_nonce(identity.label, self.nonce):
+            raise GuardClientError("run label does not use the exact nonce-bound provider label protocol")
         receipt = GuardRemoteReceipt.from_mapping(
             self.transport.call(
                 "arm",

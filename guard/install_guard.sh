@@ -20,11 +20,17 @@ if [[ ! -f ${secret_file} ]] || [[ $(stat -f '%Sp' "${secret_file}") != '-rw----
   echo "provider secret must be a root-owned 0600 regular file" >&2
   exit 2
 fi
+vastai_bin=$(command -v vastai || true)
+if [[ -z ${vastai_bin} ]] || [[ ! -x ${vastai_bin} ]]; then
+  echo "actual vastai binary is required before guard installation" >&2
+  exit 2
+fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 install -d -o root -g root -m 0700 /var/lib/srecon26-guard /etc/srecon26-guard
 install -d -o root -g root -m 0755 /usr/local/libexec/srecon26-guard
 install -o root -g root -m 0750 "${script_dir}/guard_worker.py" /usr/local/libexec/srecon26-guard/guard_worker.py
+install -o root -g root -m 0755 "${vastai_bin}" /usr/local/libexec/srecon26-guard/vastai
 install -o root -g root -m 0600 "${secret_file}" /etc/srecon26-guard/vast-api-key
 sed "s/@NONCE@/${nonce}/g" "${script_dir}/srecon26-guard.service.template" > "/etc/systemd/system/srecon26-guard-${nonce}.service"
 sed "s/@NONCE@/${nonce}/g" "${script_dir}/srecon26-guard.timer.template" > "/etc/systemd/system/srecon26-guard-${nonce}.timer"

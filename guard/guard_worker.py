@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -29,11 +30,10 @@ class GuardSafetyError(RuntimeError):
 class GuardedInstance:
     instance_id: int
     label: str
-    nonce: str
 
 
 class GuardProvider(Protocol):
-    def find_instances(self, label: str, nonce: str) -> tuple[GuardedInstance, ...]: ...
+    def find_instances(self, label: str) -> tuple[GuardedInstance, ...]: ...
     def get_instance(self, instance_id: int) -> GuardedInstance | None: ...
     def destroy_exact(self, instance_id: int, expected_label: str) -> None: ...
 
@@ -86,13 +86,44 @@ def load_provider_secret(path: Path, *, require_root_owner: bool = True) -> str:
     return secret
 
 
-class VastCliGuardProvider:
-    """Minimal guarded Vast CLI adapter; it refuses records lacking a nonce."""
+def nonce_bound_label(run_label: str, nonce: str) -> str:
+    """Return the provider label protocol used as the remote nonce binding.
 
-    def __init__(self, secret_file: Path, *, vast_bin: str = "/usr/local/bin/vast", timeout_seconds: int = 20) -> None:
+    Vast records expose their label but not arbitrary guard metadata. The
+    complete label is therefore the provider-observable ownership token.
+    """
+    if not run_label or "--nonce-" in run_label:
+        raise GuardSafetyError("run label must be non-empty and must not contain the nonce delimiter")
+    if not _NONCE.fullmatch(nonce):
+        raise GuardSafetyError("nonce must be 8-128 URL-safe characters")
+    return f"{run_label}--nonce-{nonce}"
+
+
+def label_binds_nonce(label: str, nonce: str) -> bool:
+    """True only for a complete label produced by :func:`nonce_bound_label`."""
+    try:
+        prefix = label.removesuffix(f"--nonce-{nonce}")
+        return bool(prefix) and prefix != label and nonce_bound_label(prefix, nonce) == label
+    except GuardSafetyError:
+        return False
+
+
+class VastCliGuardProvider:
+    """Minimal guarded Vast CLI adapter using Vast's observable label field."""
+
+    def __init__(self, secret_file: Path, *, vast_bin: str = "vastai", timeout_seconds: int = 20) -> None:
         self.secret_file = Path(secret_file)
-        self.vast_bin = vast_bin
+        self.vast_bin = self._resolve_vastai(vast_bin)
         self.timeout_seconds = timeout_seconds
+
+    @staticmethod
+    def _resolve_vastai(vast_bin: str) -> str:
+        if Path(vast_bin).name != "vastai":
+            raise GuardSafetyError("guard requires the actual vastai binary, not a compatibility alias")
+        resolved = shutil.which(vast_bin) if Path(vast_bin).parent == Path(".") else str(Path(vast_bin))
+        if not resolved or not Path(resolved).is_file() or not os.access(resolved, os.X_OK):
+            raise GuardSafetyError("vastai binary is missing or not executable")
+        return str(Path(resolved).resolve())
 
     def _run(self, arguments: list[str]) -> object:
         secret = load_provider_secret(self.secret_file)
@@ -111,15 +142,17 @@ class VastCliGuardProvider:
     def _instance(raw: Mapping[str, object]) -> GuardedInstance | None:
         raw_id = raw.get("id", raw.get("instance_id"))
         label = raw.get("label")
-        nonce = raw.get("nonce", raw.get("guard_nonce"))
-        if raw_id is None or not isinstance(label, str) or not isinstance(nonce, str):
+        if raw_id is None or not isinstance(label, str):
             return None
-        return GuardedInstance(int(raw_id), label, nonce)
+        try:
+            return GuardedInstance(int(raw_id), label)
+        except (TypeError, ValueError):
+            return None
 
-    def find_instances(self, label: str, nonce: str) -> tuple[GuardedInstance, ...]:
+    def find_instances(self, label: str) -> tuple[GuardedInstance, ...]:
         raw = self._run(["show", "instances", "--raw"])
         items = raw if isinstance(raw, list) else raw.get("instances", []) if isinstance(raw, dict) else []
-        return tuple(instance for item in items if isinstance(item, dict) if (instance := self._instance(item)) is not None and instance.label == label and instance.nonce == nonce)
+        return tuple(instance for item in items if isinstance(item, dict) if (instance := self._instance(item)) is not None and instance.label == label)
 
     def get_instance(self, instance_id: int) -> GuardedInstance | None:
         raw = self._run(["show", "instance", str(instance_id), "--raw"])
@@ -290,8 +323,9 @@ class GuardWorker:
         return {"host_identity": os.uname().nodename, "script_hash": script_hash, "root_hash": _GENESIS_HASH, "status": "READY"}
 
     def arm(self, instance_id: int | None, label: str, nonce: str, hard_deadline: datetime, *, now: datetime) -> GuardReceipt:
-        if not label:
-            raise GuardSafetyError("label is required")
+        self._check_nonce(nonce)
+        if not label_binds_nonce(label, nonce):
+            raise GuardSafetyError("label must use the exact nonce-bound provider label protocol")
         if instance_id is not None and instance_id <= 0:
             raise GuardSafetyError("instance id must be positive")
         now, deadline = _utc(now), _utc(hard_deadline)
@@ -341,7 +375,7 @@ class GuardWorker:
     def _reconcile(self, directory: Path, state: dict[str, object], now: datetime) -> GuardedInstance | None:
         instance_id = state.get("instance_id")
         if instance_id is None:
-            matches = self.provider.find_instances(str(state["label"]), str(state["nonce"]))
+            matches = self.provider.find_instances(str(state["label"]))
             if len(matches) == 0:
                 state["status"] = "AWAITING_INSTANCE"
                 self._append_event(directory, state, "awaiting_instance", now)
@@ -361,8 +395,8 @@ class GuardWorker:
             self._append_event(directory, state, "absence_observed", now, {"instance_id": instance_id})
             self._persist(directory, state)
             return None
-        if instance.label != state["label"] or instance.nonce != state["nonce"]:
-            self._ownership_mismatch(directory, state, now, "exact ID no longer has expected label and nonce")
+        if instance.label != state["label"]:
+            self._ownership_mismatch(directory, state, now, "exact ID no longer has the nonce-bound label")
             return None
         return instance
 
@@ -417,6 +451,7 @@ def _main() -> int:
     parser.add_argument("command", choices=("preflight", "arm", "heartbeat", "status", "tick", "anchor", "disarm-after-absence"))
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--secret-file", type=Path, required=True)
+    parser.add_argument("--vast-bin", default="vastai")
     parser.add_argument("--nonce")
     parser.add_argument("--label")
     parser.add_argument("--instance-id", type=int)
@@ -424,7 +459,7 @@ def _main() -> int:
     parser.add_argument("--root-hash")
     args = parser.parse_args()
     now = datetime.now(UTC)
-    provider = VastCliGuardProvider(args.secret_file)
+    provider = VastCliGuardProvider(args.secret_file, vast_bin=args.vast_bin)
     worker = GuardWorker(args.root, provider)
     if args.command == "preflight":
         payload: object = worker.preflight()

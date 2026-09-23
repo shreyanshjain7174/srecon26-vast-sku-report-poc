@@ -13,6 +13,8 @@ from srecon26_poc.types import RunIdentity
 
 
 NOW = datetime(2026, 9, 23, tzinfo=UTC)
+NONCE = "nonce-123"
+LABEL = f"srecon26-run-1--nonce-{NONCE}"
 
 
 class Transport:
@@ -46,8 +48,8 @@ class Transport:
 
 def test_client_serializes_utc_identity_without_instance_or_secret() -> None:
     transport = Transport()
-    identity = RunIdentity("run-1", "srecon26-run-1", NOW)
-    client = GuardClient(transport, nonce="nonce-123")
+    identity = RunIdentity("run-1", LABEL, NOW)
+    client = GuardClient(transport, nonce=NONCE)
 
     receipt = client.arm(identity, NOW + timedelta(minutes=10))
 
@@ -56,8 +58,8 @@ def test_client_serializes_utc_identity_without_instance_or_secret() -> None:
         "arm",
         {
             "run_id": "run-1",
-            "label": "srecon26-run-1",
-            "nonce": "nonce-123",
+            "label": LABEL,
+            "nonce": NONCE,
             "hard_deadline": "2026-09-23T00:10:00Z",
         },
     )
@@ -71,9 +73,9 @@ def test_client_rejects_remote_receipt_with_wrong_nonce() -> None:
                 receipt["nonce"] = "other"
             return receipt
 
-    client = GuardClient(WrongNonceTransport(), nonce="nonce-123")
+    client = GuardClient(WrongNonceTransport(), nonce=NONCE)
     with pytest.raises(GuardClientError, match="nonce"):
-        client.arm(RunIdentity("run-1", "srecon26-run-1", NOW), NOW + timedelta(minutes=10))
+        client.arm(RunIdentity("run-1", LABEL, NOW), NOW + timedelta(minutes=10))
 
 
 def test_remote_receipt_requires_hash_shaped_root() -> None:
@@ -83,14 +85,14 @@ def test_remote_receipt_requires_hash_shaped_root() -> None:
 
 def test_preflight_after_arm_returns_contract_attestation() -> None:
     transport = Transport()
-    identity = RunIdentity("run-1", "srecon26-run-1", NOW)
-    client = GuardClient(transport, nonce="nonce-123")
+    identity = RunIdentity("run-1", LABEL, NOW)
+    client = GuardClient(transport, nonce=NONCE)
     client.arm(identity, NOW + timedelta(minutes=10))
 
     attestation = client.preflight()
 
     validate_attestation(identity, attestation)
-    assert attestation.nonce == "nonce-123"
+    assert attestation.nonce == NONCE
     assert attestation.hard_deadline == NOW + timedelta(minutes=10)
 
 
@@ -109,6 +111,15 @@ def test_guard_service_templates_harden_the_worker_and_keep_secrets_out_of_argv(
     assert "OnUnitActiveSec=" in timer
     assert worker.startswith("#!/usr/bin/env python3\n")
     assert installer.index("install -d -o root -g root -m 0755 /usr/local/libexec/srecon26-guard") < installer.index("guard_worker.py\" /usr/local/libexec")
+    assert "command -v vastai" in installer
+    assert "--vast-bin /usr/local/libexec/srecon26-guard/vastai" in service
+
+
+def test_client_refuses_a_label_without_the_provider_nonce_protocol() -> None:
+    client = GuardClient(Transport(), nonce=NONCE)
+
+    with pytest.raises(GuardClientError, match="nonce-bound"):
+        client.arm(RunIdentity("run-1", "srecon26-run-1", NOW), NOW + timedelta(minutes=10))
 
 
 def test_independent_preflight_fails_closed_without_deployed_root_and_credential(tmp_path) -> None:

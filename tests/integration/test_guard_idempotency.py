@@ -9,17 +9,17 @@ from guard.guard_worker import GuardSafetyError, GuardedInstance, GuardWorker
 
 NOW = datetime(2026, 9, 23, tzinfo=UTC)
 INSTANCE_ID = 417
-LABEL = "srecon26-run-guard"
 NONCE = "nonce-0123456789abcdef"
+LABEL = f"srecon26-run-guard--nonce-{NONCE}"
 
 
 class FakeProvider:
     def __init__(self) -> None:
-        self.instance: GuardedInstance | None = GuardedInstance(INSTANCE_ID, LABEL, NONCE)
+        self.instance: GuardedInstance | None = GuardedInstance(INSTANCE_ID, LABEL)
         self.destroy_calls: list[tuple[int, str]] = []
 
-    def find_instances(self, label: str, nonce: str) -> tuple[GuardedInstance, ...]:
-        return (self.instance,) if self.instance and self.instance.label == label and self.instance.nonce == nonce else ()
+    def find_instances(self, label: str) -> tuple[GuardedInstance, ...]:
+        return (self.instance,) if self.instance and self.instance.label == label else ()
 
     def get_instance(self, instance_id: int) -> GuardedInstance | None:
         return self.instance if self.instance and self.instance.instance_id == instance_id else None
@@ -69,7 +69,7 @@ def test_delayed_visibility_is_reconciled_by_nonce_before_deadline(tmp_path) -> 
     provider.instance = None
     worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
     worker.arm(None, LABEL, NONCE, NOW + timedelta(minutes=1), now=NOW)
-    provider.instance = GuardedInstance(INSTANCE_ID, LABEL, NONCE)
+    provider.instance = GuardedInstance(INSTANCE_ID, LABEL)
 
     worker.tick(NONCE, now=NOW + timedelta(seconds=2))
 

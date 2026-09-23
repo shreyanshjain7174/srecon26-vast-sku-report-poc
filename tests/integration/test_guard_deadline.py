@@ -7,8 +7,8 @@ from guard.guard_worker import GuardedInstance, GuardWorker
 
 
 INSTANCE_ID = 417
-LABEL = "srecon26-run-guard"
 NONCE = "nonce-0123456789abcdef"
+LABEL = f"srecon26-run-guard--nonce-{NONCE}"
 
 
 @dataclass
@@ -24,11 +24,11 @@ class Clock:
 
 class FakeProvider:
     def __init__(self) -> None:
-        self.instance: GuardedInstance | None = GuardedInstance(INSTANCE_ID, LABEL, NONCE)
+        self.instance: GuardedInstance | None = GuardedInstance(INSTANCE_ID, LABEL)
         self.destroy_calls: list[tuple[int, str]] = []
 
-    def find_instances(self, label: str, nonce: str) -> tuple[GuardedInstance, ...]:
-        if self.instance is not None and self.instance.label == label and self.instance.nonce == nonce:
+    def find_instances(self, label: str) -> tuple[GuardedInstance, ...]:
+        if self.instance is not None and self.instance.label == label:
             return (self.instance,)
         return ()
 
@@ -62,7 +62,7 @@ def test_guard_refuses_changed_label_or_nonce(tmp_path) -> None:
     clock, provider, worker = harness(tmp_path)
     worker.arm(INSTANCE_ID, LABEL, NONCE, clock.now() + timedelta(minutes=10), now=clock.now())
     assert provider.instance is not None
-    provider.instance = GuardedInstance(INSTANCE_ID, "unowned", NONCE)
+    provider.instance = GuardedInstance(INSTANCE_ID, f"unowned--nonce-{NONCE}")
 
     worker.tick(NONCE, now=clock.now() + timedelta(minutes=10))
 

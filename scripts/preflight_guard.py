@@ -33,6 +33,7 @@ def main() -> int:
     parser.add_argument("--host", default=os.environ.get("SRECON26_GUARD_HOST"))
     parser.add_argument("--root", type=Path, default=Path("/var/lib/srecon26-guard"))
     parser.add_argument("--secret-file", type=Path, default=Path("/etc/srecon26-guard/vast-api-key"))
+    parser.add_argument("--vast-bin", default="/usr/local/libexec/srecon26-guard/vastai")
     parser.add_argument("--json", type=Path, required=True)
     args = parser.parse_args()
 
@@ -48,8 +49,9 @@ def main() -> int:
         result["configured_guard_host"] = args.host
         result["independent_identity_configured"] = True
     if args.root.exists():
-        worker = GuardWorker(args.root, VastCliGuardProvider(args.secret_file), require_root_owner=True)
+        worker = GuardWorker(args.root, VastCliGuardProvider(args.secret_file, vast_bin=args.vast_bin), require_root_owner=True)
         result["root_private_and_root_owned"] = True
+        result["vastai_binary"] = args.vast_bin
         result["guard_script_hash"] = worker.preflight()["script_hash"]
     else:
         result["root_private_and_root_owned"] = False
