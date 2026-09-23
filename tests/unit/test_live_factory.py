@@ -46,7 +46,7 @@ class GitHubRunner:
         command = list(arguments)
         self.calls.append(command)
         endpoint = command[4]
-        if endpoint.endswith("/comments?per_page=100&sort=created&direction=desc"):
+        if "/comments?per_page=100&since=" in endpoint:
             return json.dumps(self.comments)
         if endpoint.endswith("/comments"):
             body = next((item.split("=", 1)[1] for item in command if item.startswith("body=")), "")
@@ -91,7 +91,7 @@ def test_github_guard_dispatch_verifies_bound_action_attestation_then_comments_h
         item == f"body=SRECON26_GUARD_V1 ANCHOR nonce={NONCE} root={'c' * 64}"
         for call in runner.calls for item in call
     )
-    assert any("sort=created&direction=desc" in argument for call in runner.calls for argument in call)
+    assert any("comments?per_page=100&since=2026-09-23T04:00:00Z" in argument for call in runner.calls for argument in call)
 
 
 def test_github_guard_rejects_anchor_without_remote_workflow_ack() -> None:

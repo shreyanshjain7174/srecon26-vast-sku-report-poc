@@ -154,13 +154,13 @@ class GitHubGuardTransport(GuardTransport):
             arguments.extend(("-f", f"{key}={value}"))
         return _json(self.runner(arguments, timeout=20), context="GitHub API") if method != "POST" or endpoint.endswith("comments") else self.runner(arguments, timeout=20)
 
-    def _comments(self) -> list[Mapping[str, object]]:
+    def _comments(self, *, since: datetime) -> list[Mapping[str, object]]:
         # The arm receipt is necessarily one of the newest comments.  Avoid
         # ``gh --paginate`` here because its multiple JSON documents are not a
         # single trustworthy parse unit.
         raw = self._api(
             "GET",
-            f"repos/{self.config.repository}/issues/{self.config.issue_number}/comments?per_page=100&sort=created&direction=desc",
+            f"repos/{self.config.repository}/issues/{self.config.issue_number}/comments?per_page=100&since={_stamp(since)}",
         )
         if not isinstance(raw, list) or not all(isinstance(item, Mapping) for item in raw):
             raise LiveFactoryError("GitHub issue comments have an unexpected response")
@@ -186,7 +186,7 @@ class GitHubGuardTransport(GuardTransport):
     def _find_attestation(self, *, nonce: str, label: str, deadline: datetime, dispatched_at: datetime) -> GuardRemoteReceipt | None:
         primary: tuple[re.Match[str], datetime] | None = None
         backstop: tuple[re.Match[str], datetime] | None = None
-        for comment in self._comments():
+        for comment in self._comments(since=dispatched_at):
             body = comment.get("body")
             created = comment.get("created_at")
             user = comment.get("user")
@@ -267,7 +267,7 @@ class GitHubGuardTransport(GuardTransport):
             submitted_at = _utc(self.now())
             self._comment(f"SRECON26_GUARD_V1 ANCHOR nonce={self._nonce} root={root}")
             for _attempt in range(max(1, self.config.arm_timeout_seconds // 2)):
-                for comment in self._comments():
+                for comment in self._comments(since=submitted_at):
                     body = comment.get("body")
                     created = comment.get("created_at")
                     user = comment.get("user")

@@ -159,9 +159,10 @@ jobs:
           set -euo pipefail
           terminal_since=0
           while true; do
-            # Read the newest bounded page.  The issue is intentionally reused,
-            # so the default oldest-first page can omit this run's heartbeats.
-            timeout 15s gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100&sort=created&direction=desc" > "$CHANNEL_ROOT/comments.json"
+            # Bound the reused issue to comments created since this run armed.
+            # Heartbeat throttling keeps the current-run page below 100 items.
+            armed_since="$(jq -r '.config.armed_at' "$CHANNEL_ROOT/channel-state.json")"
+            timeout 15s gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100&since=${armed_since}" > "$CHANNEL_ROOT/comments.json"
             sync_result="$(timeout 50s sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 scripts/github_guard_channel.py sync \
               --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" --issue-number "$INPUT_ISSUE_NUMBER" \
               --hard-deadline "$INPUT_HARD_DEADLINE" --trusted-author "$INPUT_TRUSTED_AUTHOR" \

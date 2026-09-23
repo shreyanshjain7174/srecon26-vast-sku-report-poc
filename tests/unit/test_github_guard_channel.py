@@ -103,7 +103,8 @@ def test_workflow_has_restricted_permissions_bounded_jobs_and_secret_only_creden
     assert "Arm independent deadline backstop before any paid create" in workflow
     assert "Destroy at immutable deadline and confirm provider absence" in workflow
     assert workflow.count("--post-deadline-window-seconds 300") == 2
-    assert 'comments?per_page=100&sort=created&direction=desc' in workflow
+    assert 'comments?per_page=100&since=${armed_since}' in workflow
+    assert "armed_since=\"$(jq -r '.config.armed_at'" in workflow
     assert "SRECON26_GUARD_V1 ANCHORED nonce=${INPUT_NONCE} root=${anchor_root}" in workflow
     assert "terminal_since" in workflow
     assert "gh api --paginate" not in workflow
