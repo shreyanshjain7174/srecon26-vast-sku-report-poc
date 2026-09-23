@@ -1,9 +1,9 @@
 # GitHub-hosted independent guard channel
 
 This PoC workflow is a bounded, disposable control channel for the existing
-nonce-bound Vast guard worker. It runs on a standard GitHub-hosted Ubuntu runner
-for at most 60 minutes and must be dispatched **before** any paid create. It is
-not a replacement for a longer-lived independently reachable teardown service.
+nonce-bound Vast guard worker. It runs two independent GitHub-hosted Ubuntu
+jobs and must be dispatched **before** any paid create. It is not a replacement
+for a longer-lived independently reachable teardown service.
 
 ## Deployment inputs
 
@@ -43,20 +43,36 @@ SRECON26_GUARD_V1 ANCHOR nonce=<nonce> root=<64 lowercase hex>
 The deadline, nonce, label, owner, issue, and heartbeat window are persisted at
 arming and cannot be changed by a later sync or comment. A missed heartbeat or
 the immutable deadline causes the guard worker to reconcile the exact
-label-and-nonce target and request teardown. If no target exists yet it keeps
-watching; this is why the workflow must be armed before a create request.
+label-and-nonce target and request teardown. A successful destroy command is
+not teardown proof: the provider must subsequently report the exact numeric ID
+absent. A `TEARDOWN_ERROR` stays retryable only inside the fixed five-minute
+post-deadline window; every retry re-reads the exact ID and its
+nonce-bound label before it can destroy. A `TEARDOWN_UNCONFIRMED` receipt is a
+failure requiring operator escalation, never a successful cleanup claim.
+
+The `deadline-backstop` job starts in parallel with the heartbeat/API-polling
+`guard` job; it has no `needs` dependency, a separate runner, root-only
+credential file, guard state, and artifact. It arms before any paid create,
+waits until the immutable deadline without relying on issue polling, then ticks
+the same exact-ID-and-label teardown protocol through the bounded confirmation
+window. Do not create until **both** jobs have completed their respective arm
+steps. A failed or stalled heartbeat/API-polling job does not cancel the
+backstop. Because the jobs do not share state, provider-side exact ownership and
+absence confirmation—not a shared local lock—are the double-destroy safety
+boundary.
 
 The worker reads the encrypted Actions secret only after GitHub injects it into a
 root-only `0600` file. The channel never receives the secret, and neither the
-workflow nor the Python wrapper prints it. The job has only `contents: read`
-and `issues: write` permissions; it has no pull-request, deployment, cloud, or
+workflow nor the Python wrapper prints it. The jobs have only `contents: read`
+and `issues: write` permissions; they have no pull-request, deployment, cloud, or
 repository-write permission.
 
-At completion (including a failure), download the
-`independent-guard-<nonce>` artifact. It contains the root-owned worker
-hash-chained journal and the channel journal/state. Review a terminal receipt
-and provider-side absence before accepting teardown as complete. Do not reuse a
-nonce, issue, or artifact for a later paid run.
+At completion (including a failure), download both
+`independent-guard-<nonce>` and `independent-deadline-backstop-<nonce>`
+artifacts. They contain independent root-owned worker hash-chained journals,
+plus the primary channel journal/state. Review a terminal receipt and
+provider-side absence from the authoritative backstop before accepting teardown
+as complete. Do not reuse a nonce, issue, or artifact for a later paid run.
 
 ## Credential-free Phase 1 anchoring
 

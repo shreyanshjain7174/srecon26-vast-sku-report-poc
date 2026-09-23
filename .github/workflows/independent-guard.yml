@@ -45,7 +45,9 @@ concurrency:
 jobs:
   guard:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # The dispatch deadline is at most 60 minutes and teardown confirmation
+    # gets a separately bounded five-minute window after it.
+    timeout-minutes: 70
     env:
       INPUT_NONCE: ${{ inputs.nonce }}
       INPUT_LABEL: ${{ inputs.label }}
@@ -89,8 +91,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)" = "true"
-          test "$(gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}" --jq 'has("pull_request") | not')" = "true"
+          test "$(timeout 15s gh api "repos/${GITHUB_REPOSITORY}" --jq .private)" = "true"
+          test "$(timeout 15s gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}" --jq 'has("pull_request") | not')" = "true"
 
       - name: Install encrypted Actions secret and verify its root-only presence
         shell: bash
@@ -111,7 +113,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo python3 guard/guard_worker.py provider-preflight \
+          timeout 30s sudo python3 guard/guard_worker.py provider-preflight \
             --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" --vast-bin "$VAST_BIN" >/dev/null
 
       - name: Arm the independent guard before any paid create
@@ -134,18 +136,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          arm_receipt="$(sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 guard/guard_worker.py status \
+          arm_receipt="$(timeout 30s sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 guard/guard_worker.py status \
             --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" --nonce "$INPUT_NONCE")"
-          preflight="$(sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 guard/guard_worker.py preflight \
+          preflight="$(timeout 30s sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 guard/guard_worker.py preflight \
             --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE")"
           root_hash="$(jq -r '.root_hash' <<<"$arm_receipt")"
           script_hash="$(jq -r '.script_hash' <<<"$preflight")"
           host_identity="$(jq -r '.host_identity' <<<"$preflight")"
           [[ "$root_hash" =~ ^[0-9a-f]{64}$ && "$script_hash" =~ ^[0-9a-f]{64}$ ]]
           [[ "$host_identity" =~ ^[A-Za-z0-9_.-]+$ ]]
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments" \
+          timeout 15s gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments" \
             -f "body=SRECON26_GUARD_V1 ARMED nonce=${INPUT_NONCE} label=${INPUT_LABEL} deadline=${INPUT_HARD_DEADLINE} host=${host_identity} script=${script_hash} root=${root_hash}"
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments" \
+          timeout 15s gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments" \
             -f "body=SRECon26 guard armed. Only ${INPUT_TRUSTED_AUTHOR} with OWNER association may send exactly: SRECON26_GUARD_V1 HEARTBEAT nonce=${INPUT_NONCE} root=<64 lowercase hex>; or SRECON26_GUARD_V1 ANCHOR nonce=${INPUT_NONCE} root=<64 lowercase hex>."
 
       - name: Watch owner-authored heartbeats and autonomously tick guard
@@ -156,15 +158,18 @@ jobs:
         run: |
           set -euo pipefail
           while true; do
-            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100" > "$CHANNEL_ROOT/comments.json"
-            sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 scripts/github_guard_channel.py sync \
+            # This deliberately reads one bounded page.  The issue is armed
+            # empty and the owner can send a new heartbeat if comment volume
+            # ever pushes an unread one out of the page.
+            timeout 15s gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100" > "$CHANNEL_ROOT/comments.json"
+            timeout 50s sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 scripts/github_guard_channel.py sync \
               --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" --issue-number "$INPUT_ISSUE_NUMBER" \
               --hard-deadline "$INPUT_HARD_DEADLINE" --trusted-author "$INPUT_TRUSTED_AUTHOR" \
               --heartbeat-seconds "$INPUT_HEARTBEAT_SECONDS" --worker guard/guard_worker.py \
               --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" \
               --channel-state "$CHANNEL_ROOT/channel-state.json" --journal "$CHANNEL_ROOT/channel.ndjson" \
               --comments-json "$CHANNEL_ROOT/comments.json" > "$CHANNEL_ROOT/last-sync.json"
-            if grep -Eq '"status": "(TEARDOWN_CONFIRMED|ABSENT_OBSERVED|OWNERSHIP_MISMATCH|TEARDOWN_ERROR|DISARMED)"' "$CHANNEL_ROOT/last-sync.json"; then
+            if grep -Eq '"status": "(TEARDOWN_CONFIRMED|ABSENT_OBSERVED|OWNERSHIP_MISMATCH|TEARDOWN_UNCONFIRMED|DISARMED)"' "$CHANNEL_ROOT/last-sync.json"; then
               break
             fi
             sleep 20
@@ -188,3 +193,143 @@ jobs:
           path: |
             /tmp/srecon26-github-guard
             /var/lib/srecon26-github-guard
+
+  deadline-backstop:
+    # This job has no dependency on `guard`: it has its own runner, guard
+    # state, credential file, and deadline loop.  It must be visibly armed
+    # before an operator makes a paid create request.
+    if: ${{ !inputs.preflight_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      INPUT_NONCE: ${{ inputs.nonce }}
+      INPUT_LABEL: ${{ inputs.label }}
+      INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
+      INPUT_HARD_DEADLINE: ${{ inputs.hard_deadline }}
+      INPUT_TRUSTED_AUTHOR: ${{ inputs.trusted_author }}
+      INPUT_HEARTBEAT_SECONDS: ${{ inputs.heartbeat_seconds }}
+      PYTHONPATH: .
+      GUARD_ROOT: /var/lib/srecon26-github-backstop
+      GUARD_SECRET_FILE: /etc/srecon26-github-backstop/vast-api-key
+      BACKSTOP_STATE: /tmp/srecon26-github-backstop
+      VAST_VENV: /tmp/srecon26-vast-backstop-cli
+    steps:
+      - name: Checkout pinned backstop source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Vast CLI and resolve its exact binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$VAST_VENV"
+          "$VAST_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "vastai==1.8.0"
+          VAST_BIN="$(realpath "$VAST_VENV/bin/vastai")"
+          test -x "$VAST_BIN"
+          printf 'VAST_BIN=%s\n' "$VAST_BIN" >> "$GITHUB_ENV"
+
+      - name: Validate bounded backstop inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/github_guard_channel.py validate \
+            --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" \
+            --issue-number "$INPUT_ISSUE_NUMBER" --hard-deadline "$INPUT_HARD_DEADLINE" \
+            --trusted-author "$INPUT_TRUSTED_AUTHOR" --heartbeat-seconds "$INPUT_HEARTBEAT_SECONDS" >/dev/null
+
+      - name: Install backstop credential as root-only file
+        shell: bash
+        env:
+          VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$VAST_API_KEY"
+          sudo install -d -m 700 "$GUARD_ROOT" "$(dirname "$GUARD_SECRET_FILE")"
+          printf '%s' "$VAST_API_KEY" | sudo tee "$GUARD_SECRET_FILE" >/dev/null
+          sudo chmod 600 "$GUARD_SECRET_FILE"
+          unset VAST_API_KEY
+          test "$(sudo stat -c '%u:%a' "$GUARD_SECRET_FILE")" = "0:600"
+
+      - name: Verify backstop provider authorization before arming
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 30s sudo python3 guard/guard_worker.py provider-preflight \
+            --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" --vast-bin "$VAST_BIN" >/dev/null
+
+      - name: Arm independent deadline backstop before any paid create
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$BACKSTOP_STATE"
+          timeout 30s sudo python3 guard/guard_worker.py arm \
+            --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" --vast-bin "$VAST_BIN" \
+            --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" --hard-deadline "$INPUT_HARD_DEADLINE" \
+            --heartbeat-timeout-seconds "$INPUT_HEARTBEAT_SECONDS" \
+            --post-deadline-window-seconds 300 \
+            > "$BACKSTOP_STATE/armed.json"
+          printf 'Independent deadline backstop is armed for %s.\n' "$INPUT_HARD_DEADLINE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Destroy at immutable deadline and confirm provider absence
+        shell: bash
+        run: |
+          set -euo pipefail
+          deadline_epoch="$(python3 -c 'from datetime import UTC, datetime; import os; print(int(datetime.fromisoformat(os.environ["INPUT_HARD_DEADLINE"].replace("Z", "+00:00")).astimezone(UTC).timestamp()))')"
+          now_epoch="$(date -u +%s)"
+          if (( deadline_epoch > now_epoch )); then
+            sleep "$((deadline_epoch - now_epoch))"
+          fi
+          final_epoch="$((deadline_epoch + 300))"
+          while true; do
+            set +e
+            timeout 50s sudo python3 guard/guard_worker.py tick \
+              --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" --vast-bin "$VAST_BIN" \
+              --nonce "$INPUT_NONCE" --heartbeat-timeout-seconds "$INPUT_HEARTBEAT_SECONDS" \
+              --post-deadline-window-seconds 300 \
+              > "$BACKSTOP_STATE/last-tick.json"
+            tick_exit=$?
+            set -e
+            status="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["status"])' "$BACKSTOP_STATE/last-tick.json" 2>/dev/null || true)"
+            case "$status" in
+              TEARDOWN_CONFIRMED|ABSENT_OBSERVED|OWNERSHIP_MISMATCH|DISARMED)
+                printf 'Backstop terminal receipt: %s\n' "$status" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+                ;;
+              TEARDOWN_UNCONFIRMED)
+                printf 'Backstop could not confirm provider absence in the bounded window.\n' >> "$GITHUB_STEP_SUMMARY"
+                exit 2
+                ;;
+            esac
+            now_epoch="$(date -u +%s)"
+            if (( now_epoch > final_epoch )); then
+              printf 'Backstop failed to obtain a terminal provider receipt before its bounded window.\n' >> "$GITHUB_STEP_SUMMARY"
+              exit 2
+            fi
+            # A failed bounded invocation (including a provider timeout) is
+            # retryable only inside this fixed post-deadline window.
+            if (( tick_exit != 0 )); then
+              sleep 5
+            else
+              sleep 10
+            fi
+          done
+
+      - name: Make backstop journals available for evidence upload
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chmod -R a+rX "$GUARD_ROOT" || true
+          chmod -R a+rX "$BACKSTOP_STATE" || true
+
+      - name: Preserve independent backstop evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: independent-deadline-backstop-${{ inputs.nonce }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            /tmp/srecon26-github-backstop
+            /var/lib/srecon26-github-backstop

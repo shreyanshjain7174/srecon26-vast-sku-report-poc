@@ -77,15 +77,17 @@ def test_deadline_is_immutable_even_with_a_fresh_heartbeat() -> None:
     assert decision.reason == "immutable_deadline"
 
 
-def test_workflow_has_restricted_permissions_bounded_job_and_secret_only_credential_path() -> None:
+def test_workflow_has_restricted_permissions_bounded_jobs_and_secret_only_credential_path() -> None:
     workflow = Path(".github/workflows/independent-guard.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
     assert "Verify private issue control channel" in workflow
-    assert "timeout-minutes: 60" in workflow
+    assert workflow.count("timeout-minutes: 70") == 2
     assert "contents: read" in workflow
     assert "issues: write" in workflow
     assert "secrets.VAST_API_KEY" in workflow
-    assert workflow.count("secrets.VAST_API_KEY") == 1
+    # Each isolated runner gets the encrypted secret only long enough to write
+    # its own root-only credential file; the channel receives neither copy.
+    assert workflow.count("secrets.VAST_API_KEY") == 2
     assert "vars.VAST_API_KEY" not in workflow
     assert "pull_request:" not in workflow
     assert "schedule:" not in workflow
@@ -96,6 +98,14 @@ def test_workflow_has_restricted_permissions_bounded_job_and_secret_only_credent
     assert 'SRECON26_GUARD_VAST_BIN="$VAST_BIN"' in workflow
     assert "runner.temp" not in workflow
     assert "VAST_VENV: /tmp/srecon26-vast-cli" in workflow
+    assert "deadline-backstop:" in workflow
+    assert "needs: guard" not in workflow
+    assert "Arm independent deadline backstop before any paid create" in workflow
+    assert "Destroy at immutable deadline and confirm provider absence" in workflow
+    assert workflow.count("--post-deadline-window-seconds 300") == 2
+    assert 'timeout 15s gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100"' in workflow
+    assert "gh api --paginate" not in workflow
+    assert "TEARDOWN_UNCONFIRMED" in workflow
 
 
 def test_workflow_preflight_only_mode_is_read_only_and_skips_the_live_watch() -> None:
@@ -155,6 +165,7 @@ def test_remote_rehearsal_workflow_is_bounded_fake_only_and_pinned() -> None:
     worker = Path("guard/guard_worker.py").read_text(encoding="utf-8")
     assert "--heartbeat-timeout-seconds" in worker
     assert "between 1 and 600" in worker
+    assert "post_deadline_window" in worker
 
 
 def test_fake_label_only_vast_cli_records_one_exact_destroy(tmp_path: Path) -> None:

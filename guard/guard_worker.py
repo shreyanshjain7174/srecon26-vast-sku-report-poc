@@ -19,7 +19,8 @@ from typing import Iterator, Mapping, Protocol
 
 _GENESIS_HASH = "0" * 64
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
-_TERMINAL = frozenset({"TEARDOWN_CONFIRMED", "ABSENT_OBSERVED", "OWNERSHIP_MISMATCH", "TEARDOWN_ERROR", "DISARMED"})
+_TERMINAL = frozenset({"TEARDOWN_CONFIRMED", "ABSENT_OBSERVED", "OWNERSHIP_MISMATCH", "TEARDOWN_UNCONFIRMED", "DISARMED"})
+_MAX_POST_DEADLINE_WINDOW = timedelta(minutes=10)
 
 
 class GuardSafetyError(RuntimeError):
@@ -112,7 +113,9 @@ def label_binds_nonce(label: str, nonce: str) -> bool:
 class VastCliGuardProvider:
     """Minimal guarded Vast CLI adapter using Vast's observable label field."""
 
-    def __init__(self, secret_file: Path, *, vast_bin: str = "vastai", timeout_seconds: int = 20) -> None:
+    def __init__(self, secret_file: Path, *, vast_bin: str = "vastai", timeout_seconds: int = 10) -> None:
+        if not 1 <= timeout_seconds <= 60:
+            raise ValueError("timeout_seconds must be between 1 and 60")
         self.secret_file = Path(secret_file)
         self.vast_bin = self._resolve_vastai(vast_bin)
         self.timeout_seconds = timeout_seconds
@@ -185,7 +188,14 @@ class VastCliGuardProvider:
 
 
 class GuardWorker:
-    """Durable, nonce-bound worker that can issue at most one destroy per target."""
+    """Durable, nonce-bound worker with bounded, exact-target teardown retries.
+
+    A provider destroy can time out after accepting the request.  The journal
+    therefore never treats a destroy request as proof of teardown: every retry
+    first re-reads the exact numeric ID and nonce-bound label, and only a
+    provider read which reports that ID absent is confirmation.  Retrying ends
+    at a fixed, bounded interval after the immutable deadline.
+    """
 
     def __init__(
         self,
@@ -193,13 +203,17 @@ class GuardWorker:
         provider: GuardProvider,
         *,
         heartbeat_timeout: timedelta = timedelta(minutes=2),
+        post_deadline_window: timedelta = timedelta(minutes=5),
         require_root_owner: bool = True,
     ) -> None:
         if heartbeat_timeout <= timedelta(0):
             raise ValueError("heartbeat_timeout must be positive")
+        if not timedelta(seconds=1) <= post_deadline_window <= _MAX_POST_DEADLINE_WINDOW:
+            raise ValueError("post_deadline_window must be between 1 second and 10 minutes")
         self.root = Path(root).resolve()
         self.provider = provider
         self.heartbeat_timeout = heartbeat_timeout
+        self.post_deadline_window = post_deadline_window
         self.require_root_owner = require_root_owner
         self._ensure_root()
 
@@ -309,6 +323,8 @@ class GuardWorker:
             state["status"] = "OWNERSHIP_MISMATCH"
         elif "teardown_confirmed" in events:
             state["status"] = "TEARDOWN_CONFIRMED"
+        elif "teardown_unconfirmed" in events:
+            state["status"] = "TEARDOWN_UNCONFIRMED"
         elif "teardown_error" in events:
             state["status"] = "TEARDOWN_ERROR"
         elif "teardown_requested" in events:
@@ -400,6 +416,23 @@ class GuardWorker:
         self._append_event(directory, state, "ownership_mismatch", now, {"reason": reason})
         return self._persist(directory, state)
 
+    def _teardown_error(self, directory: Path, state: dict[str, object], now: datetime, reason: str) -> GuardReceipt:
+        """Record a retryable failure without treating it as teardown proof."""
+        state["status"] = "TEARDOWN_ERROR"
+        self._append_event(directory, state, "teardown_error", now, {"reason": reason})
+        return self._persist(directory, state)
+
+    def _teardown_unconfirmed(self, directory: Path, state: dict[str, object], now: datetime, reason: str) -> GuardReceipt:
+        """Stop destructive retries only after the fixed post-deadline bound."""
+        state["status"] = "TEARDOWN_UNCONFIRMED"
+        self._append_event(directory, state, "teardown_unconfirmed", now, {"reason": reason})
+        return self._persist(directory, state)
+
+    def _absence_observed(self, directory: Path, state: dict[str, object], now: datetime, *, target: str) -> GuardReceipt:
+        state["status"] = "ABSENT_OBSERVED"
+        self._append_event(directory, state, "absence_observed", now, {"target": target})
+        return self._persist(directory, state)
+
     def _reconcile(self, directory: Path, state: dict[str, object], now: datetime) -> GuardedInstance | None:
         instance_id = state.get("instance_id")
         if instance_id is None:
@@ -433,7 +466,7 @@ class GuardWorker:
         now = _utc(now)
         with self._locked(nonce) as directory:
             state = self._load(directory)
-            if str(state["status"]) in _TERMINAL or str(state["status"]) == "TEARDOWN_REQUESTED":
+            if str(state["status"]) in _TERMINAL:
                 return self._receipt(state)
             deadline = _parse_stamp(state["hard_deadline"])
             last_heartbeat = _parse_stamp(state["last_heartbeat"])
@@ -443,10 +476,32 @@ class GuardWorker:
             if state.get("instance_id") is None:
                 instance = self._reconcile(directory, state, now)
                 if instance is None:
+                    if now >= deadline:
+                        # A label query that returns no exact match is the only
+                        # provider-confirmed absence available before an ID was
+                        # ever bound.  It is terminal only at the deadline:
+                        # before then a delayed create remains possible.
+                        state = self._load(directory)
+                        if str(state["status"]) == "AWAITING_INSTANCE":
+                            return self._absence_observed(directory, state, now, target="nonce-bound label")
                     return self._receipt(self._load(directory))
             if now < deadline and now - last_heartbeat <= self.heartbeat_timeout:
                 return self._receipt(state)
-            instance = self._reconcile(directory, state, now)
+            # Once the immutable deadline has passed, provider confirmation is
+            # the only successful terminal state.  Do one final read at the
+            # bound, but never issue a fresh destroy outside it.
+            if now > deadline + self.post_deadline_window:
+                try:
+                    instance = self._reconcile(directory, state, now)
+                except Exception as exc:
+                    return self._teardown_unconfirmed(directory, state, now, f"final_reconcile_{type(exc).__name__}")
+                if instance is None:
+                    return self._receipt(self._load(directory))
+                return self._teardown_unconfirmed(directory, state, now, "provider still reports exact target after post-deadline window")
+            try:
+                instance = self._reconcile(directory, state, now)
+            except Exception as exc:
+                return self._teardown_error(directory, state, now, f"reconcile_{type(exc).__name__}")
             if instance is None:
                 return self._receipt(self._load(directory))
             self._append_event(directory, state, "teardown_requested", now, {"instance_id": instance.instance_id, "reason": "deadline" if now >= deadline else "heartbeat_loss"})
@@ -455,9 +510,17 @@ class GuardWorker:
             try:
                 self.provider.destroy_exact(instance.instance_id, instance.label)
             except Exception as exc:
-                state["status"] = "TEARDOWN_ERROR"
-                self._append_event(directory, state, "teardown_error", now, {"exception": type(exc).__name__})
-                return self._persist(directory, state)
+                return self._teardown_error(directory, state, now, f"destroy_{type(exc).__name__}")
+            # A successful CLI exit is not sufficient: the provider must
+            # independently confirm that this exact ID has disappeared.
+            try:
+                absent = self.provider.get_instance(instance.instance_id)
+            except Exception as exc:
+                return self._teardown_error(directory, state, now, f"absence_reconcile_{type(exc).__name__}")
+            if absent is not None:
+                if absent.label != instance.label:
+                    return self._ownership_mismatch(directory, state, now, "exact ID changed label after destroy request")
+                return self._teardown_error(directory, state, now, "provider still reports exact target after destroy request")
             state["status"] = "TEARDOWN_CONFIRMED"
             self._append_event(directory, state, "teardown_confirmed", now, {"instance_id": instance.instance_id})
             return self._persist(directory, state)
@@ -489,6 +552,7 @@ def _main() -> int:
     parser.add_argument("--secret-file", type=Path, required=True)
     parser.add_argument("--vast-bin", default=os.environ.get("SRECON26_GUARD_VAST_BIN", "vastai"))
     parser.add_argument("--heartbeat-timeout-seconds", type=int, default=120)
+    parser.add_argument("--post-deadline-window-seconds", type=int, default=300)
     parser.add_argument("--nonce")
     parser.add_argument("--label")
     parser.add_argument("--instance-id", type=int)
@@ -497,9 +561,16 @@ def _main() -> int:
     args = parser.parse_args()
     if not 1 <= args.heartbeat_timeout_seconds <= 600:
         parser.error("--heartbeat-timeout-seconds must be between 1 and 600")
+    if not 1 <= args.post_deadline_window_seconds <= 600:
+        parser.error("--post-deadline-window-seconds must be between 1 and 600")
     now = datetime.now(UTC)
     provider = VastCliGuardProvider(args.secret_file, vast_bin=args.vast_bin)
-    worker = GuardWorker(args.root, provider, heartbeat_timeout=timedelta(seconds=args.heartbeat_timeout_seconds))
+    worker = GuardWorker(
+        args.root,
+        provider,
+        heartbeat_timeout=timedelta(seconds=args.heartbeat_timeout_seconds),
+        post_deadline_window=timedelta(seconds=args.post_deadline_window_seconds),
+    )
     if args.command == "preflight":
         payload: object = worker.preflight()
     elif args.command == "provider-preflight":
