@@ -18,6 +18,17 @@ guard` with:
 - `hard_deadline`: a fixed UTC ISO-8601 value no more than 60 minutes ahead;
 - `trusted_author`: the GitHub login of the repository owner who will comment;
 - `heartbeat_seconds`: 30-600 seconds (120 is the default).
+- `preflight_only`: set to `true` for a safe readiness check before the live
+  dispatch. It still requires the bounded inputs above so it can validate the
+  intended private control channel.
+
+The preflight-only dispatch installs the pinned guard CLI, verifies the secret
+is a root-owned `0600` file, and uses only Vast's read-only instance listing to
+prove the credential is authorized and that the account currently has **zero**
+instances. Any authorization failure, malformed listing, or existing instance
+fails closed. It does not arm the guard, post an issue comment, begin the
+60-minute heartbeat watch, create a provider resource, or request a destroy.
+The normal live dispatch repeats this preflight immediately before it arms.
 
 The workflow accepts comments only when all conditions hold: the issue is in the
 private repository, the author login equals `trusted_author`, GitHub reports the

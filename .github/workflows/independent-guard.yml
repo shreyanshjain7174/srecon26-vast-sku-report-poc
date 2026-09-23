@@ -28,6 +28,11 @@ on:
         required: false
         default: "120"
         type: string
+      preflight_only:
+        description: "Validate the private channel and an empty authorized Vast account, then exit without arming"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -52,11 +57,22 @@ jobs:
       GUARD_ROOT: /var/lib/srecon26-github-guard
       GUARD_SECRET_FILE: /etc/srecon26-github-guard/vast-api-key
       CHANNEL_ROOT: /tmp/srecon26-github-guard
+      VAST_VENV: ${{ runner.temp }}/srecon26-vast-cli
     steps:
       - name: Checkout pinned guard source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+
+      - name: Install pinned Vast CLI and resolve its exact binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$VAST_VENV"
+          "$VAST_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "vastai==1.8.0"
+          VAST_BIN="$(realpath "$VAST_VENV/bin/vastai")"
+          test -x "$VAST_BIN"
+          printf 'VAST_BIN=%s\n' "$VAST_BIN" >> "$GITHUB_ENV"
 
       - name: Validate bounded dispatch inputs before any provider operation
         shell: bash
@@ -76,7 +92,7 @@ jobs:
           test "$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)" = "true"
           test "$(gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}" --jq 'has("pull_request") | not')" = "true"
 
-      - name: Install encrypted Actions secret as a root-only file
+      - name: Install encrypted Actions secret and verify its root-only presence
         shell: bash
         env:
           VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
@@ -88,12 +104,23 @@ jobs:
           sudo chmod 600 "$GUARD_SECRET_FILE"
           unset VAST_API_KEY
 
+          sudo test -f "$GUARD_SECRET_FILE"
+          test "$(sudo stat -c '%u:%a' "$GUARD_SECRET_FILE")" = "0:600"
+
+      - name: Verify provider authorization and zero instance inventory without mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo python3 guard/guard_worker.py provider-preflight \
+            --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" --vast-bin "$VAST_BIN" >/dev/null
+
       - name: Arm the independent guard before any paid create
+        if: ${{ !inputs.preflight_only }}
         shell: bash
         run: |
           set -euo pipefail
           install -d -m 700 "$CHANNEL_ROOT"
-          sudo python3 scripts/github_guard_channel.py arm \
+          sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 scripts/github_guard_channel.py arm \
             --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" --issue-number "$INPUT_ISSUE_NUMBER" \
             --hard-deadline "$INPUT_HARD_DEADLINE" --trusted-author "$INPUT_TRUSTED_AUTHOR" \
             --heartbeat-seconds "$INPUT_HEARTBEAT_SECONDS" --worker guard/guard_worker.py \
@@ -101,6 +128,7 @@ jobs:
             --channel-state "$CHANNEL_ROOT/channel-state.json" --journal "$CHANNEL_ROOT/channel.ndjson"
 
       - name: Publish exact private-issue comment protocol
+        if: ${{ !inputs.preflight_only }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -110,6 +138,7 @@ jobs:
             -f "body=SRECon26 guard armed. Only ${INPUT_TRUSTED_AUTHOR} with OWNER association may send exactly: SRECON26_GUARD_V1 HEARTBEAT nonce=${INPUT_NONCE} root=<64 lowercase hex>; or SRECON26_GUARD_V1 ANCHOR nonce=${INPUT_NONCE} root=<64 lowercase hex>."
 
       - name: Watch owner-authored heartbeats and autonomously tick guard
+        if: ${{ !inputs.preflight_only }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -117,7 +146,7 @@ jobs:
           set -euo pipefail
           while true; do
             gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100" > "$CHANNEL_ROOT/comments.json"
-            sudo python3 scripts/github_guard_channel.py sync \
+            sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 scripts/github_guard_channel.py sync \
               --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" --issue-number "$INPUT_ISSUE_NUMBER" \
               --hard-deadline "$INPUT_HARD_DEADLINE" --trusted-author "$INPUT_TRUSTED_AUTHOR" \
               --heartbeat-seconds "$INPUT_HEARTBEAT_SECONDS" --worker guard/guard_worker.py \
@@ -131,7 +160,7 @@ jobs:
           done
 
       - name: Upload durable guard journals
-        if: always()
+        if: ${{ always() && !inputs.preflight_only }}
         shell: bash
         run: |
           set -euo pipefail
@@ -139,7 +168,7 @@ jobs:
           sudo chmod -R a+rX "$CHANNEL_ROOT" || true
 
       - name: Preserve worker and channel evidence
-        if: always()
+        if: ${{ always() && !inputs.preflight_only }}
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: independent-guard-${{ inputs.nonce }}

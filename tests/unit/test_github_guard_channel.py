@@ -91,6 +91,21 @@ def test_workflow_has_restricted_permissions_bounded_job_and_secret_only_credent
     assert "schedule:" not in workflow
     assert "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in workflow
     assert "actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08" in workflow
+    assert '"vastai==1.8.0"' in workflow
+    assert 'VAST_BIN="$(realpath "$VAST_VENV/bin/vastai")"' in workflow
+    assert 'SRECON26_GUARD_VAST_BIN="$VAST_BIN"' in workflow
+
+
+def test_workflow_preflight_only_mode_is_read_only_and_skips_the_live_watch() -> None:
+    workflow = Path(".github/workflows/independent-guard.yml").read_text(encoding="utf-8")
+
+    assert "preflight_only:" in workflow
+    assert "type: boolean" in workflow
+    assert "provider-preflight" in workflow
+    assert 'test "$(sudo stat -c \'%u:%a\' "$GUARD_SECRET_FILE")" = "0:600"' in workflow
+    assert "if: ${{ !inputs.preflight_only }}" in workflow
+    assert "Watch owner-authored heartbeats and autonomously tick guard" in workflow
+    assert workflow.index("Verify provider authorization and zero instance inventory without mutation") < workflow.index("Arm the independent guard before any paid create")
 
 
 def test_anchor_only_creates_a_real_guard_journal_without_a_provider_credential(tmp_path: Path) -> None:

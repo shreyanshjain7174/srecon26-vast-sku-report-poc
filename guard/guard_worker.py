@@ -33,6 +33,7 @@ class GuardedInstance:
 
 
 class GuardProvider(Protocol):
+    def instance_inventory_count(self) -> int: ...
     def find_instances(self, label: str) -> tuple[GuardedInstance, ...]: ...
     def get_instance(self, instance_id: int) -> GuardedInstance | None: ...
     def destroy_exact(self, instance_id: int, expected_label: str) -> None: ...
@@ -139,6 +140,23 @@ class VastCliGuardProvider:
         return json.loads(completed.stdout)
 
     @staticmethod
+    def _instance_listing(raw: object) -> list[object]:
+        """Return a verified provider inventory payload.
+
+        Treat an unknown response shape as unsafe: an authorization error or
+        API change must never be mistaken for an empty account.
+        """
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict) and isinstance(raw.get("instances"), list):
+            return raw["instances"]
+        raise GuardSafetyError("provider instance listing has an unexpected response")
+
+    def instance_inventory_count(self) -> int:
+        """Authenticate through Vast's read-only inventory endpoint."""
+        return len(self._instance_listing(self._run(["show", "instances", "--raw"])))
+
+    @staticmethod
     def _instance(raw: Mapping[str, object]) -> GuardedInstance | None:
         raw_id = raw.get("id", raw.get("instance_id"))
         label = raw.get("label")
@@ -150,8 +168,7 @@ class VastCliGuardProvider:
             return None
 
     def find_instances(self, label: str) -> tuple[GuardedInstance, ...]:
-        raw = self._run(["show", "instances", "--raw"])
-        items = raw if isinstance(raw, list) else raw.get("instances", []) if isinstance(raw, dict) else []
+        items = self._instance_listing(self._run(["show", "instances", "--raw"]))
         return tuple(instance for item in items if isinstance(item, dict) if (instance := self._instance(item)) is not None and instance.label == label)
 
     def get_instance(self, instance_id: int) -> GuardedInstance | None:
@@ -322,6 +339,17 @@ class GuardWorker:
         script_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         return {"host_identity": os.uname().nodename, "script_hash": script_hash, "root_hash": _GENESIS_HASH, "status": "READY"}
 
+    def provider_preflight(self) -> dict[str, object]:
+        """Fail closed unless the credential can list a completely empty account.
+
+        This deliberately performs no guard state or provider mutation. It is
+        the mandatory last check before a workflow may arm a paid-run watcher.
+        """
+        inventory_count = self.provider.instance_inventory_count()
+        if inventory_count != 0:
+            raise GuardSafetyError("provider account has existing instances; refusing to arm")
+        return {"instance_count": inventory_count, "status": "PROVIDER_PREFLIGHT_READY"}
+
     def arm(self, instance_id: int | None, label: str, nonce: str, hard_deadline: datetime, *, now: datetime) -> GuardReceipt:
         self._check_nonce(nonce)
         if not label_binds_nonce(label, nonce):
@@ -456,10 +484,10 @@ class GuardWorker:
 
 def _main() -> int:
     parser = argparse.ArgumentParser(description="SRECon26 independent deadline guard")
-    parser.add_argument("command", choices=("preflight", "arm", "heartbeat", "status", "tick", "anchor", "disarm-after-absence"))
+    parser.add_argument("command", choices=("preflight", "provider-preflight", "arm", "heartbeat", "status", "tick", "anchor", "disarm-after-absence"))
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--secret-file", type=Path, required=True)
-    parser.add_argument("--vast-bin", default="vastai")
+    parser.add_argument("--vast-bin", default=os.environ.get("SRECON26_GUARD_VAST_BIN", "vastai"))
     parser.add_argument("--heartbeat-timeout-seconds", type=int, default=120)
     parser.add_argument("--nonce")
     parser.add_argument("--label")
@@ -474,6 +502,8 @@ def _main() -> int:
     worker = GuardWorker(args.root, provider, heartbeat_timeout=timedelta(seconds=args.heartbeat_timeout_seconds))
     if args.command == "preflight":
         payload: object = worker.preflight()
+    elif args.command == "provider-preflight":
+        payload = worker.provider_preflight()
     else:
         if not args.nonce:
             parser.error("--nonce is required for this command")
