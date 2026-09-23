@@ -35,7 +35,13 @@ from srecon26_poc.contracts import InstanceContract, OfferContract, ProbeOutcome
 from srecon26_poc.controller import ExperimentController, LifecycleHalted
 from srecon26_poc.guard import GuardAttestation
 from srecon26_poc.journal import RunJournal
-from srecon26_poc.live_dispatch import GateArtifactPaths, LiveCanaryDispatcher, LiveCanaryRequest, WorkloadContract
+from srecon26_poc.live_dispatch import (
+    GateArtifactPaths,
+    InferenceAttemptHistory,
+    LiveCanaryDispatcher,
+    LiveCanaryRequest,
+    WorkloadContract,
+)
 from srecon26_poc.provider import AmbiguousCreate
 from srecon26_poc.reporting import FaultRecord, ReportGate, ReportReceipt
 from srecon26_poc.types import FaultClass, RunIdentity, RunState
@@ -475,6 +481,19 @@ def _parse_utc(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _parse_inference_history(value: str) -> InferenceAttemptHistory:
+    run_id, separator, machine_id = value.partition(":")
+    if not separator:
+        raise argparse.ArgumentTypeError("inference history must be RUN_ID:MACHINE_ID")
+    try:
+        history = InferenceAttemptHistory(run_id, int(machine_id))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("inference history machine id must be an integer") from error
+    if not history.valid():
+        raise argparse.ArgumentTypeError("inference history must contain a valid run and positive machine id")
+    return history
+
+
 def _load_dispatcher(spec: str) -> LiveCanaryDispatcher:
     """Load an operator-owned integration factory; no repository default exists."""
 
@@ -514,6 +533,14 @@ def main() -> int:
     parser.add_argument("--model-id")
     parser.add_argument("--model-revision")
     parser.add_argument("--vllm-image-digest")
+    parser.add_argument(
+        "--inference-history",
+        action="append",
+        type=_parse_inference_history,
+        default=[],
+        metavar="RUN_ID:MACHINE_ID",
+        help="exact prior inference attempt identity when its sealed manifest lacks terminal anchor evidence",
+    )
     parser.add_argument("--dispatcher-factory", help="operator-owned module:callable returning injected live dependencies")
     args = parser.parse_args()
     try:
@@ -555,6 +582,7 @@ def main() -> int:
                 VastLaunchContract(ubuntu_template_hash=args.ubuntu_template_hash, image_contract=args.vm_image_contract),
                 WorkloadContract(args.model_id, args.model_revision, args.vllm_image_digest),
                 args.budget_category,
+                tuple(args.inference_history),
             )
             result = run_live_dispatch(dispatcher=_load_dispatcher(args.dispatcher_factory), request=request)
             print(json.dumps({"status": result.status, "manifest": str(result.manifest_path), "provenance": result.provenance}, sort_keys=True))

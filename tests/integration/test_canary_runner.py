@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ import pytest
 
 from scripts.run_canary import (
     FixtureScenario,
+    _parse_inference_history,
     default_gate_evidence,
     run_blocked_paid_invocation,
     run_fixture,
@@ -16,6 +18,19 @@ from scripts.run_canary import (
 
 
 NOW = datetime(2026, 9, 23, 12, tzinfo=UTC)
+
+
+def test_parse_explicit_inference_history_binds_exact_prior_machine() -> None:
+    history = _parse_inference_history("inference-infer20260923155935:8024")
+
+    assert history.run_id == "inference-infer20260923155935"
+    assert history.machine_id == 8024
+
+
+@pytest.mark.parametrize("value", ["missing-separator", "run:zero", "run:not-an-int"])
+def test_parse_explicit_inference_history_rejects_invalid_identity(value: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_inference_history(value)
 
 
 def _manifest(result):
