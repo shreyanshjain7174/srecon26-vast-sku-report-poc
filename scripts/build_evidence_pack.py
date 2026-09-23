@@ -106,6 +106,25 @@ def two_node_startup_chart() -> dict[str, object]:
         created = bool(manifest.get("server", {}).get("instance") or manifest.get("worker", {}).get("instance"))
         running = "running" in statuses
         completed = manifest.get("status") == "completed"
+        guards = manifest.get("guards") if isinstance(manifest.get("guards"), dict) else {}
+        guards_armed = all(
+            isinstance(guards.get(role), dict) and guards[role].get("status") == "ARMED"
+            for role in ("server", "worker")
+        )
+        finalization = manifest.get("provider_finalization") if isinstance(manifest.get("provider_finalization"), dict) else {}
+        absence_proved = all(
+            isinstance(finalization.get(role), dict)
+            and isinstance(finalization[role].get("absence"), dict)
+            and finalization[role]["absence"].get("status") == "THREE_READS_CONFIRMED"
+            for role in ("server", "worker")
+        )
+        billing_captured = all(
+            isinstance(finalization.get(role), dict)
+            and isinstance(finalization[role].get("billing"), dict)
+            and finalization[role]["billing"].get("status") == "AUTHORITATIVE_INVOICE_CAPTURED"
+            for role in ("server", "worker")
+        )
+        report = manifest.get("report") if isinstance(manifest.get("report"), dict) else {}
         counts["created"] += int(created)
         counts["running"] += int(running)
         counts["completed"] += int(completed)
@@ -113,8 +132,17 @@ def two_node_startup_chart() -> dict[str, object]:
             "run": run_dir.name,
             "template": manifest.get("vm_template", "ubuntu-cli"),
             "created": created,
+            "guard_backend": manifest.get("guard_backend", "github-legacy"),
+            "both_bound_arm_receipts": guards_armed,
             "provider_running_observed": running,
             "kubernetes_completed": completed,
+            "three_read_absence_proved_for_both": absence_proved,
+            "authoritative_billing_captured_for_both": billing_captured,
+            "report": {
+                "attempted": report.get("attempted") is True,
+                "confirmed": report.get("confirmed") is True,
+                "instance_id": report.get("instance_id"),
+            },
         })
     (OUT / "two-node-canary-startup.svg").write_text(svg_chart(
         "Two-node Vast canary: provider startup evidence",
@@ -147,6 +175,8 @@ def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[st
             "Local HPA proof validates independent signal plumbing; the KV source is synthetic.",
             "No CPU-only versus queue/KV-aware HPA A/B result exists yet.",
             "Provider ‘running’ does not establish SSH, GPU, Kubernetes, vLLM, metrics, or HPA readiness.",
+            "A two-node result is complete only when both bound guard receipts, raw workload outputs, exact billing, and three-read absence artifacts are retained.",
+            "The website Report action is attempted only for a frozen exact-instance provider fault before normal teardown.",
         ],
     }
     (OUT / "evidence-summary.json").write_text(json.dumps(summary, indent=2) + "\n")

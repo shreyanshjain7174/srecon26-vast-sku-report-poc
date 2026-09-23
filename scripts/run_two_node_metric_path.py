@@ -19,13 +19,28 @@ import time
 import traceback
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Callable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from srecon26_poc.contracts import OfferContract
-from srecon26_poc.live_factory import DynamicGitHubGuard, GitHubGuardConfig, SshRemoteWorkload, SshWorkloadConfig, VastSshResolver
+from srecon26_poc.azure_guard_transport import AzureGuardSshConfig
+from srecon26_poc.contracts import InstanceContract, OfferContract, ProbeOutcome, classify_fault
+from srecon26_poc.live_dispatch import REPORT_MARGIN, ProviderFaultEvidence
+from srecon26_poc.live_factory import (
+    DynamicAzureGuard,
+    DynamicGitHubGuard,
+    GitHubGuardConfig,
+    LiveFactoryError,
+    ProviderStartupFault,
+    SshRemoteWorkload,
+    SshWorkloadConfig,
+    VastSshResolver,
+    _load_report_gate,
+)
+from srecon26_poc.reporting import FaultRecord
 from srecon26_poc.two_node import NodeLease, TwoNodeLease
+from srecon26_poc.types import FaultClass
 from srecon26_poc.vast_provider import (
     OFFICIAL_KVM_IMAGE,
     OFFICIAL_UBUNTU_2204_TEMPLATE_HASH,
@@ -56,25 +71,130 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     temporary.replace(path)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--server-offer", type=int, required=True)
     parser.add_argument("--server-machine", type=int, required=True)
     parser.add_argument("--worker-offer", type=int, required=True)
     parser.add_argument("--worker-machine", type=int, required=True)
-    parser.add_argument("--server-guard-repository", required=True)
-    parser.add_argument("--server-guard-issue", type=int, required=True)
-    parser.add_argument("--worker-guard-repository", required=True)
-    parser.add_argument("--worker-guard-issue", type=int, required=True)
-    parser.add_argument("--guard-author", required=True)
+    parser.add_argument("--guard-backend", choices=("github", "azure"), default="github")
+    parser.add_argument("--server-guard-repository")
+    parser.add_argument("--server-guard-issue", type=int)
+    parser.add_argument("--worker-guard-repository")
+    parser.add_argument("--worker-guard-issue", type=int)
+    parser.add_argument("--guard-author")
+    parser.add_argument("--azure-guard-host")
+    parser.add_argument("--azure-guard-user")
+    parser.add_argument("--azure-guard-identity", type=Path)
+    parser.add_argument("--azure-guard-known-hosts", type=Path)
+    parser.add_argument("--azure-guard-port", type=int, default=22)
+    parser.add_argument("--azure-guard-timeout-seconds", type=int, default=20)
+    parser.add_argument("--azure-guard-absence-timeout-seconds", type=int, default=240)
     parser.add_argument("--heartbeat-seconds", type=int, default=300)
+    parser.add_argument("--report-adapter-factory", default=os.environ.get("SRECON26_REPORT_ADAPTER_FACTORY"))
+    parser.add_argument("--vast-cli", default=os.environ.get("SRECON26_VAST_CLI", "vastai"))
     parser.add_argument("--vm-template", choices=("ubuntu-cli", "ubuntu-desktop"), default="ubuntu-cli")
     parser.add_argument("--output", type=Path, required=True)
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def validate_configuration(args: argparse.Namespace) -> None:
+    if args.guard_backend == "github":
+        required = {
+            "--server-guard-repository": args.server_guard_repository,
+            "--server-guard-issue": args.server_guard_issue,
+            "--worker-guard-repository": args.worker_guard_repository,
+            "--worker-guard-issue": args.worker_guard_issue,
+            "--guard-author": args.guard_author,
+        }
+        missing = [name for name, value in required.items() if value in (None, "")]
+        if missing:
+            raise SystemExit(f"GitHub guard backend requires {', '.join(missing)}")
+        if args.server_guard_repository == args.worker_guard_repository and args.server_guard_issue == args.worker_guard_issue:
+            raise SystemExit("server and worker must use distinct independent GitHub guard channels")
+    else:
+        required = {
+            "--azure-guard-host": args.azure_guard_host,
+            "--azure-guard-user": args.azure_guard_user,
+            "--azure-guard-identity": args.azure_guard_identity,
+            "--azure-guard-known-hosts": args.azure_guard_known_hosts,
+        }
+        missing = [name for name, value in required.items() if value in (None, "")]
+        if missing:
+            raise SystemExit(f"Azure guard backend requires {', '.join(missing)}")
+        if not 1 <= args.azure_guard_port <= 65535:
+            raise SystemExit("Azure guard port must be from 1 to 65535")
+        if not 1 <= args.azure_guard_timeout_seconds <= 60:
+            raise SystemExit("Azure guard timeout must be from 1 to 60 seconds")
+        if not 30 <= args.azure_guard_absence_timeout_seconds <= 600:
+            raise SystemExit("Azure guard absence timeout must be from 30 to 600 seconds")
+    if not args.report_adapter_factory:
+        raise SystemExit("--report-adapter-factory is required before a paid two-node run")
+
+
+def build_guards(
+    args: argparse.Namespace,
+    *,
+    on_server_armed: Callable[[Mapping[str, object]], None],
+    on_worker_armed: Callable[[Mapping[str, object]], None],
+) -> tuple[DynamicGitHubGuard | DynamicAzureGuard, DynamicGitHubGuard | DynamicAzureGuard]:
+    """Build two nonce-isolated clients without accepting secret material."""
+
+    if args.guard_backend == "github":
+        common = {"ref": "main", "trusted_author": args.guard_author, "heartbeat_seconds": args.heartbeat_seconds}
+        return (
+            DynamicGitHubGuard(
+                GitHubGuardConfig(repository=args.server_guard_repository, issue_number=args.server_guard_issue, **common),
+                on_armed=on_server_armed,
+            ),
+            DynamicGitHubGuard(
+                GitHubGuardConfig(repository=args.worker_guard_repository, issue_number=args.worker_guard_issue, **common),
+                on_armed=on_worker_armed,
+            ),
+        )
+    config = AzureGuardSshConfig(
+        host=args.azure_guard_host,
+        user=args.azure_guard_user,
+        identity_file=args.azure_guard_identity,
+        known_hosts_file=args.azure_guard_known_hosts,
+        port=args.azure_guard_port,
+        timeout_seconds=args.azure_guard_timeout_seconds,
+    )
+    # The clients intentionally do not share an AzureSshGuardTransport: each
+    # transport permanently binds later RPCs to one distinct nonce receipt.
+    return (
+        DynamicAzureGuard(config, on_armed=on_server_armed),
+        DynamicAzureGuard(config, on_armed=on_worker_armed),
+    )
+
+
+class RecordingProvider:
+    """Record every exact create reconciliation without changing provider IO."""
+
+    def __init__(self, provider: VastCliProvider, observer: Callable[[InstanceContract], None]) -> None:
+        self.provider = provider
+        self.observer = observer
+
+    def create_once(self, contract: OfferContract, request_key: str, launch: VastLaunchContract) -> InstanceContract:
+        instance = self.provider.create_once(contract, request_key, launch)
+        self.observer(instance)
+        return instance
+
+    def reconcile_label(self, label: str) -> InstanceContract:
+        instance = self.provider.reconcile_label(label)
+        self.observer(instance)
+        return instance
+
+    def destroy_exact(self, instance_id: int, expected_label: str) -> None:
+        self.provider.destroy_exact(instance_id, expected_label)
+
+    def list_instances(self) -> tuple[InstanceContract, ...]:
+        return self.provider.list_instances()
 
 
 def main() -> int:
     args = parse_args()
+    validate_configuration(args)
     if args.output.exists():
         raise SystemExit("output path already exists; refusing replay")
     if args.server_offer == args.worker_offer or args.server_machine == args.worker_machine:
@@ -83,27 +203,18 @@ def main() -> int:
         raise SystemExit("heartbeat seconds must be from 30 to 600")
     args.output.mkdir(parents=True, mode=0o700)
     deadline = datetime.now(UTC) + timedelta(minutes=42)
-    provider = VastCliProvider("vastai", reconcile_attempts=24, reconcile_interval_seconds=5)
+    provider = VastCliProvider(args.vast_cli, reconcile_attempts=24, reconcile_interval_seconds=5)
     if provider.list_instances():
         raise SystemExit("Vast inventory is not empty")
+    report_gate = _load_report_gate(args.report_adapter_factory)
 
     server_nonce, worker_nonce = secrets.token_urlsafe(18), secrets.token_urlsafe(18)
     server_label = f"srecon26-two-node-server--nonce-{server_nonce}"
     worker_label = f"srecon26-two-node-worker--nonce-{worker_nonce}"
     server_offer = provider.get_vms_enabled_offer(args.server_offer, machine_id=args.server_machine, label=server_label)
     worker_offer = provider.get_vms_enabled_offer(args.worker_offer, machine_id=args.worker_machine, label=worker_label)
-    if args.server_guard_repository == args.worker_guard_repository and args.server_guard_issue == args.worker_guard_issue:
-        raise SystemExit("server and worker must use distinct independent guard channels")
-    server_guard = DynamicGitHubGuard(GitHubGuardConfig(
-        repository=args.server_guard_repository, ref="main", issue_number=args.server_guard_issue,
-        trusted_author=args.guard_author, heartbeat_seconds=args.heartbeat_seconds,
-    ))
-    worker_guard = DynamicGitHubGuard(GitHubGuardConfig(
-        repository=args.worker_guard_repository, ref="main", issue_number=args.worker_guard_issue,
-        trusted_author=args.guard_author, heartbeat_seconds=args.heartbeat_seconds,
-    ))
     work = SshRemoteWorkload(
-        VastSshResolver("vastai"),
+        VastSshResolver(args.vast_cli),
         SshWorkloadConfig(
             user="root", identity_file=Path.home() / ".ssh/id_rsa", public_key_file=Path.home() / ".ssh/id_rsa.pub",
             known_hosts_file=Path.home() / ".ssh/known_hosts", k3s_binary=ROOT / "artifacts/tools/k3s-v1.36.4+k3s1",
@@ -117,25 +228,72 @@ def main() -> int:
         else (OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE)
     )
     launch = VastLaunchContract(*template)
+    manifest: dict[str, object] = {
+        "schema": "srecon26.two-node-run.v1",
+        "started_at": datetime.now(UTC).isoformat(),
+        "hard_deadline": deadline.isoformat(),
+        "real_run_contingent": True,
+        "guard_backend": args.guard_backend,
+        "heartbeat_seconds": args.heartbeat_seconds,
+        "vm_template": args.vm_template,
+        "launch": launch.to_json(),
+        "status": "preflighted",
+        "guards": {"server": {"status": "PENDING"}, "worker": {"status": "PENDING"}},
+        "report": {"session_preflighted_after_both_guards": False, "attempted": False, "confirmed": False},
+        "server": {"nonce": server_nonce, "offer": contract_record(server_offer)},
+        "worker": {"nonce": worker_nonce, "offer": contract_record(worker_offer)},
+    }
+    write_json(args.output / "run-manifest.json", manifest)
+
+    armed_roles: set[str] = set()
+
+    def record_guard(role: str, receipt: Mapping[str, object]) -> None:
+        guards = manifest["guards"]
+        assert isinstance(guards, dict)
+        guards[role] = dict(receipt)
+        armed_roles.add(role)
+        manifest["status"] = "guards-arming" if len(armed_roles) == 1 else "guards-armed"
+        write_json(args.output / "run-manifest.json", manifest)
+        if armed_roles == {"server", "worker"}:
+            # This is deliberately inside the second arm callback.  If the
+            # authenticated exact Report path is stale, TwoNodeLease receives
+            # the exception before it can issue the first paid create.
+            report_gate.preflight_authenticated_session()
+            report = manifest["report"]
+            assert isinstance(report, dict)
+            report["session_preflighted_after_both_guards"] = True
+            report["preflighted_at"] = datetime.now(UTC).isoformat()
+            manifest["status"] = "armed-and-report-ready"
+            write_json(args.output / "run-manifest.json", manifest)
+
+    server_guard, worker_guard = build_guards(
+        args,
+        on_server_armed=lambda receipt: record_guard("server", receipt),
+        on_worker_armed=lambda receipt: record_guard("worker", receipt),
+    )
+
+    observed_instances: dict[str, InstanceContract] = {}
+
+    def record_instance(instance: InstanceContract) -> None:
+        observed_instances[instance.label] = instance
+        role = "server" if instance.label == server_label else "worker" if instance.label == worker_label else None
+        if role is None:
+            raise LiveFactoryError("provider returned an instance outside the exact two-node labels")
+        current = manifest[role]
+        assert isinstance(current, dict)
+        manifest[role] = {**current, "instance": contract_record(instance)}
+        manifest["real_run_contingent"] = False
+        manifest["paid_create_observed"] = True
+        manifest["status"] = "instance-observed"
+        write_json(args.output / "run-manifest.json", manifest)
+
     controller = TwoNodeLease(
-        provider=provider,
+        provider=RecordingProvider(provider, record_instance),
         server=NodeLease("server", "two-node-server-" + server_nonce, server_nonce, server_offer),
         worker=NodeLease("worker", "two-node-worker-" + worker_nonce, worker_nonce, worker_offer),
         server_guard=server_guard, worker_guard=worker_guard, launch=launch, hard_deadline=deadline,
         now=lambda: datetime.now(UTC),
     )
-    manifest: dict[str, object] = {
-        "schema": "srecon26.two-node-run.v1",
-        "started_at": datetime.now(UTC).isoformat(),
-        "hard_deadline": deadline.isoformat(),
-        "heartbeat_seconds": args.heartbeat_seconds,
-        "vm_template": args.vm_template,
-        "launch": launch.to_json(),
-        "status": "preflighted",
-        "server": {"nonce": server_nonce, "offer": contract_record(server_offer)},
-        "worker": {"nonce": worker_nonce, "offer": contract_record(worker_offer)},
-    }
-    write_json(args.output / "run-manifest.json", manifest)
 
     def heartbeat() -> None:
         tick = time.monotonic_ns()
@@ -153,16 +311,92 @@ def main() -> int:
         work._copy(endpoint, work.config.nvidia_runtime_template, f"{root}/nvidia-runtime.toml", recursive=False, hard_deadline=deadline, heartbeat=heartbeat, log=args.output / f"{role}-runtime-copy.log")
         remote(endpoint, ["env", f"CANARY_EVIDENCE_DIR={root}/evidence", "bash", f"{root}/remote_host_canary.sh", "probe"], f"{role}-probe.log")
 
+    def report_fault(instance: InstanceContract, description: str, *, evidence: Path | None = None) -> None:
+        report = manifest["report"]
+        assert isinstance(report, dict)
+        if report.get("attempted") is True:
+            raise LiveFactoryError("a provider fault report was already attempted for this two-node run")
+        if datetime.now(UTC) >= deadline - REPORT_MARGIN:
+            raise LiveFactoryError("confirmed provider fault reached the immutable Report cutoff")
+        report.update(
+            {
+                "attempted": True,
+                "confirmed": False,
+                "instance_id": instance.instance_id,
+                "label": instance.label,
+                "description": description,
+                "evidence": str(evidence.relative_to(args.output)) if evidence is not None else None,
+                "started_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        manifest["status"] = "reporting-confirmed-provider-fault"
+        write_json(args.output / "run-manifest.json", manifest)
+        try:
+            receipt = report_gate.handle(
+                FaultRecord(instance.instance_id, instance.label, instance.label.rsplit("--nonce-", 1)[1], description),
+                deadline - REPORT_MARGIN,
+            )
+        except (TimeoutError, ValueError) as error:
+            report["error"] = str(error)
+            write_json(args.output / "run-manifest.json", manifest)
+            raise LiveFactoryError("confirmed provider fault Report action did not finish before teardown") from error
+        report.update(
+            {
+                "confirmed": receipt.confirmed,
+                "before": str(receipt.before_path),
+                "after": str(receipt.after_path) if receipt.after_path else None,
+                "finished_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        write_json(args.output / "run-manifest.json", manifest)
+
+    def resolve_instance(instance: InstanceContract, role: str):
+        status_log = args.output / f"{role}-provider-status.ndjson"
+        try:
+            work.resolver.attach_public_key(
+                instance,
+                work.config.public_key_file,
+                hard_deadline=deadline,
+                heartbeat=heartbeat,
+                status_log=status_log,
+            )
+            return work.resolver.resolve(
+                instance,
+                hard_deadline=deadline,
+                heartbeat=heartbeat,
+                status_log=status_log,
+            )
+        except ProviderStartupFault as error:
+            transport = args.output / f"{role}-transport"
+            artifact = work._write_startup_fault_evidence(
+                transport,
+                run_id=getattr(controller, role).run_id,
+                instance=instance,
+                fault=error,
+            )
+            declared = tuple(path for path in args.output.rglob("*") if path.is_file())
+            provider_fault = ProviderFaultEvidence("host", str(error), artifact)
+            blockers = provider_fault.report_blockers(
+                run_id=getattr(controller, role).run_id,
+                instance=instance,
+                evidence_files=declared,
+            )
+            if blockers:
+                raise LiveFactoryError("; ".join(blockers)) from error
+            report_fault(instance, provider_fault.description, evidence=artifact)
+            raise LiveFactoryError("confirmed provider startup fault was handled before teardown") from error
+
     def workload(server, worker) -> None:
         manifest["status"] = "instances-created"
         manifest["server"] = {**manifest["server"], "instance": contract_record(server)}
         manifest["worker"] = {**manifest["worker"], "instance": contract_record(worker)}
         write_json(args.output / "run-manifest.json", manifest)
-        resolver = work.resolver
-        for instance, role in ((server, "server"), (worker, "worker")):
-            resolver.attach_public_key(instance, work.config.public_key_file, hard_deadline=deadline, heartbeat=heartbeat, status_log=args.output / f"{role}-provider-status.ndjson")
-        server_ep = resolver.resolve(server, hard_deadline=deadline, heartbeat=heartbeat, status_log=args.output / "server-provider-status.ndjson")
-        worker_ep = resolver.resolve(worker, hard_deadline=deadline, heartbeat=heartbeat, status_log=args.output / "worker-provider-status.ndjson")
+        for offer, instance in ((server_offer, server), (worker_offer, worker)):
+            if classify_fault(offer, instance, ProbeOutcome.PASS) is FaultClass.PROVIDER_FAULT_CONFIRMED:
+                report_fault(instance, "confirmed provider contract mismatch immediately after create")
+                raise LiveFactoryError("confirmed provider contract fault was handled before teardown")
+        server_ep = resolve_instance(server, "server")
+        worker_ep = resolve_instance(worker, "worker")
         work._wait_for_ssh(server_ep, hard_deadline=deadline, heartbeat=heartbeat, transport=args.output / "server-transport")
         work._wait_for_ssh(worker_ep, hard_deadline=deadline, heartbeat=heartbeat, transport=args.output / "worker-transport")
         server_root, worker_root = "/var/tmp/srecon26-server", "/var/tmp/srecon26-worker"
@@ -195,20 +429,151 @@ def main() -> int:
         work._fetch(server_ep, f"{server_root}/evidence", args.output / "server-evidence", hard_deadline=deadline, heartbeat=heartbeat, log=args.output / "evidence-fetch.log")
         remote(server_ep, ["env", f"CANARY_EVIDENCE_DIR={server_root}/evidence", f"CANARY_MANIFEST_DIR={server_root}/manifests", f"CANARY_MANIFEST_SHA256={manifest_hash}", "bash", f"{server_root}/remote_host_canary.sh", "cleanup"], "cleanup.log")
 
+    def finalize_provider_evidence() -> list[str]:
+        errors: list[str] = []
+        summaries: dict[str, object] = {}
+        started = datetime.fromisoformat(str(manifest["started_at"]))
+        start_date = started.date().isoformat()
+        end_date = (datetime.now(UTC) + timedelta(days=1)).date().isoformat()
+        for role, label in (("server", server_label), ("worker", worker_label)):
+            instance = observed_instances.get(label)
+            if instance is None:
+                continue
+            role_summary: dict[str, object] = {"instance_id": instance.instance_id, "label": instance.label}
+            try:
+                absence_path = args.output / f"{role}-absence-evidence.json"
+                absence = provider.capture_absence_evidence(
+                    run_id=getattr(controller, role).run_id,
+                    instance_id=instance.instance_id,
+                    label=instance.label,
+                    artifact=absence_path,
+                )
+                role_summary["absence"] = {
+                    "status": "THREE_READS_CONFIRMED",
+                    "artifact": absence_path.name,
+                    "sha256": absence.sha256,
+                }
+            except Exception as error:
+                role_summary["absence"] = {"status": "FAILED", "error": str(error)}
+                errors.append(f"{role} three-read absence evidence failed: {error}")
+            try:
+                invoice_path = args.output / f"{role}-invoice-evidence.json"
+                invoice = provider.capture_invoice_charge(
+                    run_id=getattr(controller, role).run_id,
+                    instance_id=instance.instance_id,
+                    label=instance.label,
+                    start_date=start_date,
+                    end_date=end_date,
+                    artifact=invoice_path,
+                )
+                role_summary["billing"] = {
+                    "status": "AUTHORITATIVE_INVOICE_CAPTURED",
+                    "amount_usd": str(invoice.amount),
+                    "artifact": invoice_path.name,
+                    "sha256": invoice.sha256,
+                }
+            except Exception as error:
+                role_summary["billing"] = {"status": "PENDING", "error": str(error)}
+                errors.append(f"{role} authoritative invoice is pending: {error}")
+            summaries[role] = role_summary
+        manifest["provider_finalization"] = summaries
+        return errors
+
+    def finalize_azure_guards() -> list[str]:
+        if args.guard_backend != "azure" or not observed_instances:
+            return []
+        errors: list[str] = []
+        guard_evidence: dict[str, object] = {}
+        for role, guard in (("server", server_guard), ("worker", worker_guard)):
+            assert isinstance(guard, DynamicAzureGuard)
+            label = server_label if role == "server" else worker_label
+            if label not in observed_instances:
+                guard_evidence[role] = {"status": "NO_INSTANCE_OBSERVED"}
+                continue
+            last_status: dict[str, object] | None = None
+            stop_at = time.monotonic() + args.azure_guard_absence_timeout_seconds
+            while time.monotonic() < stop_at:
+                try:
+                    last_status = guard.status()
+                except Exception as error:
+                    errors.append(f"{role} Azure guard status failed: {error}")
+                    break
+                if last_status.get("status") == "ABSENCE_CONFIRMED":
+                    break
+                if last_status.get("status") in {"OWNERSHIP_MISMATCH", "TEARDOWN_RETRIES_EXHAUSTED", "DISARMED"}:
+                    errors.append(f"{role} Azure guard reached unsafe terminal status {last_status.get('status')}")
+                    break
+                time.sleep(5)
+            if last_status is None or last_status.get("status") != "ABSENCE_CONFIRMED":
+                errors.append(f"{role} Azure guard did not publish three-read ABSENCE_CONFIRMED")
+                guard_evidence[role] = last_status or {"status": "STATUS_UNAVAILABLE"}
+                continue
+            try:
+                root_hash = str(last_status["root_hash"])
+                exported = guard.export_evidence(root_hash)
+                journal_path = args.output / f"{role}-azure-guard-journal.ndjson"
+                journal_path.write_text(exported.journal, encoding="utf-8")
+                guard_evidence[role] = {
+                    **last_status,
+                    "journal_artifact": journal_path.name,
+                    "journal_sha256": exported.journal_sha256,
+                }
+            except Exception as error:
+                errors.append(f"{role} Azure guard evidence export failed: {error}")
+                guard_evidence[role] = {**last_status, "export_error": str(error)}
+        manifest["azure_guard_finalization"] = guard_evidence
+        return errors
+
+    result = None
+    run_error: BaseException | None = None
+    run_traceback: str | None = None
     try:
         result = controller.run(workload, heartbeat=heartbeat)
-        manifest["status"] = "completed"
+    except BaseException as error:
+        run_error = error
+        run_traceback = traceback.format_exc()
+
+    finalization_errors = finalize_provider_evidence()
+    finalization_errors.extend(finalize_azure_guards())
+    manifest["finished_at"] = datetime.now(UTC).isoformat()
+    if result is not None:
         manifest["workload_completed"] = result.workload_completed
         manifest["absence_reads"] = result.absence_reads
-        write_json(args.output / "run-manifest.json", manifest)
-    except BaseException as error:
+    if run_error is not None:
         manifest["status"] = "failed"
-        manifest["failure"] = {"error_type": type(error).__name__, "error": str(error)}
-        write_json(args.output / "run-manifest.json", manifest)
+        manifest["failure"] = {"error_type": type(run_error).__name__, "error": str(run_error)}
         write_json(args.output / "terminal-failure.json", {
-            "error_type": type(error).__name__, "error": str(error), "traceback": traceback.format_exc(),
+            "error_type": type(run_error).__name__, "error": str(run_error), "traceback": run_traceback,
         })
-        raise
+    elif finalization_errors:
+        manifest["status"] = "evidence-incomplete"
+    else:
+        manifest["status"] = "completed"
+    if finalization_errors:
+        manifest["finalization_errors"] = finalization_errors
+    write_json(args.output / "run-manifest.json", manifest)
+    if run_error is None and not finalization_errors:
+        try:
+            subprocess.run(
+                [sys.executable, str(ROOT / "scripts/build_evidence_pack.py")],
+                cwd=ROOT,
+                check=True,
+                timeout=90,
+            )
+            manifest["evidence_pack"] = {
+                "status": "REBUILT",
+                "summary": "artifacts/evidence-pack/evidence-summary.json",
+            }
+        except (OSError, subprocess.SubprocessError) as error:
+            finalization_errors.append(f"evidence pack rebuild failed: {type(error).__name__}")
+            manifest["status"] = "evidence-incomplete"
+            manifest["finalization_errors"] = finalization_errors
+            manifest["evidence_pack"] = {"status": "FAILED"}
+        write_json(args.output / "run-manifest.json", manifest)
+    if run_error is not None:
+        raise run_error
+    if finalization_errors:
+        raise LiveFactoryError("two-node resources are absent but evidence finalization is incomplete")
     return 0
 
 

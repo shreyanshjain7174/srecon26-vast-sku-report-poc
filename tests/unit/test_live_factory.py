@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from srecon26_poc.azure_guard_transport import AzureGuardSshConfig
 from srecon26_poc.contracts import InstanceContract
 from srecon26_poc.canary import VLLM_IMAGE_DIGEST
 from srecon26_poc.guard_client import GuardClient
@@ -16,6 +17,7 @@ from srecon26_poc.live_factory import (
     GitHubGuardConfig,
     GitHubGuardTransport,
     LiveFactoryError,
+    DynamicAzureGuard,
     ProviderStartupFault,
     SshRemoteWorkload,
     StartupStatusObservation,
@@ -327,6 +329,77 @@ def test_github_guard_can_adopt_exact_prearmed_dual_receipts_without_redispatch(
 
     assert receipt.host_identity == "github-runner-1+github-runner-2"
     assert not any("/dispatches" in argument for call in runner.calls for argument in call)
+
+
+class AzureBoundTransport:
+    def __init__(self) -> None:
+        self.binding: dict[str, object] | None = None
+
+    def call(self, command: str, payload: dict[str, object]) -> dict[str, object]:
+        if command == "arm":
+            self.binding = dict(payload)
+            return {
+                "status": "ARMED",
+                "root_hash": "1" * 64,
+                "nonce": payload["nonce"],
+                "label": payload["label"],
+                "hard_deadline": payload["hard_deadline"],
+            }
+        assert self.binding is not None
+        if command == "preflight":
+            return {
+                "status": "ARMED",
+                "root_hash": "2" * 64,
+                "nonce": self.binding["nonce"],
+                "label": self.binding["label"],
+                "hard_deadline": self.binding["hard_deadline"],
+                "host_identity": "azure-guard-vm",
+                "script_hash": "3" * 64,
+            }
+        if command == "status":
+            return {
+                "status": "ABSENCE_CONFIRMED",
+                "root_hash": "4" * 64,
+                "nonce": self.binding["nonce"],
+                "label": self.binding["label"],
+                "hard_deadline": self.binding["hard_deadline"],
+                "teardown_authority_at": "2026-09-23T04:21:00Z",
+                "absence_observations": [
+                    "2026-09-23T04:22:00Z",
+                    "2026-09-23T04:23:00Z",
+                    "2026-09-23T04:24:00Z",
+                ],
+            }
+        raise AssertionError(command)
+
+
+def test_dynamic_azure_guard_emits_only_a_bound_armed_receipt() -> None:
+    observed: list[dict[str, object]] = []
+    transport = AzureBoundTransport()
+    guard = DynamicAzureGuard(
+        AzureGuardSshConfig("guard.example.test", "guardrpc", Path("unused-key"), Path("unused-known-hosts")),
+        on_armed=lambda receipt: observed.append(dict(receipt)),
+        transport_factory=lambda _config: transport,
+    )
+    identity = RunIdentity("live-run", LABEL, NOW)
+
+    attestation = guard.arm(identity, NOW + timedelta(minutes=20))
+
+    assert attestation.host_identity == "azure-guard-vm"
+    assert observed == [
+        {
+            "backend": "azure",
+            "status": "ARMED",
+            "root_hash": "1" * 64,
+            "nonce": NONCE,
+            "label": LABEL,
+            "hard_deadline": "2026-09-23T04:20:00Z",
+            "last_heartbeat": None,
+            "host_identity": "azure-guard-vm",
+            "script_hash": "3" * 64,
+        }
+    ]
+    assert guard.status()["status"] == "ABSENCE_CONFIRMED"
 
 
 def test_ssh_resolver_rejects_an_instance_record_that_does_not_preserve_exact_label() -> None:
