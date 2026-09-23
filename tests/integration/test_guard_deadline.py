@@ -56,10 +56,12 @@ def test_guard_destroys_exact_owned_instance_after_heartbeat_loss(tmp_path) -> N
     clock.advance(timedelta(seconds=1))
     worker.tick(NONCE, now=clock.now())
     clock.advance(timedelta(seconds=1))
+    worker.tick(NONCE, now=clock.now())
+    clock.advance(timedelta(seconds=1))
     confirmed = worker.tick(NONCE, now=clock.now())
 
     assert provider.destroy_calls == [(INSTANCE_ID, LABEL)]
-    assert first.status == "ABSENCE_PENDING"
+    assert first.status == "TEARDOWN_REQUESTED"
     assert confirmed.status == "ABSENCE_CONFIRMED"
     assert worker.status(NONCE).status == "ABSENCE_CONFIRMED"
 

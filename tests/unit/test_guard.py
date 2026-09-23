@@ -30,6 +30,51 @@ def test_vast_raw_record_uses_exact_nonce_bound_label_without_raw_nonce(tmp_path
     assert not label_binds_nonce("srecon26-run-guard", nonce)
 
 
+@pytest.mark.parametrize("raw", ([{}], [{"id": 417}], [{"label": "run"}], ["malformed"]))
+def test_vast_label_inventory_refuses_malformed_records(tmp_path: Path, raw: object) -> None:
+    binary = tmp_path / "vastai"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    provider = VastCliGuardProvider(tmp_path / "secret", vast_bin=str(binary))
+    provider._run = lambda _args: raw  # type: ignore[method-assign]
+
+    with pytest.raises(GuardSafetyError, match="invalid"):
+        provider.find_instances("run--nonce-12345678")
+
+
+@pytest.mark.parametrize("raw", ([], {"id": 417}, {"label": "run"}, "malformed"))
+def test_vast_exact_instance_refuses_unknown_response_instead_of_claiming_absence(tmp_path: Path, raw: object) -> None:
+    binary = tmp_path / "vastai"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    provider = VastCliGuardProvider(tmp_path / "secret", vast_bin=str(binary))
+    provider._run = lambda _args: raw  # type: ignore[method-assign]
+
+    with pytest.raises(GuardSafetyError):
+        provider.get_instance(417)
+
+
+def test_vast_exact_instance_accepts_only_explicit_empty_object_as_absence(tmp_path: Path) -> None:
+    binary = tmp_path / "vastai"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    provider = VastCliGuardProvider(tmp_path / "secret", vast_bin=str(binary))
+    provider._run = lambda _args: {}  # type: ignore[method-assign]
+
+    assert provider.get_instance(417) is None
+
+
+def test_vast_listing_refuses_error_envelope_even_when_instances_field_is_empty(tmp_path: Path) -> None:
+    binary = tmp_path / "vastai"
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    provider = VastCliGuardProvider(tmp_path / "secret", vast_bin=str(binary))
+    provider._run = lambda _args: {"instances": [], "error": "unauthorized"}  # type: ignore[method-assign]
+
+    with pytest.raises(GuardSafetyError, match="unexpected response"):
+        provider.find_instances("run--nonce-12345678")
+
+
 def test_guard_refuses_missing_or_compatibility_vast_binary(tmp_path: Path) -> None:
     with pytest.raises(GuardSafetyError, match="vastai binary"):
         VastCliGuardProvider(tmp_path / "secret", vast_bin=str(tmp_path / "vastai"))
