@@ -650,11 +650,24 @@ class LiveCanaryDispatcher:
                 try:
                     if journal.state() is not RunState.DESTROYING:
                         self._append(journal, RunState.DESTROYING, "teardown.exact", {"instance_id": instance.instance_id, "label": instance.label})
-                    self.provider.destroy_exact(instance.instance_id, instance.label)
-                    destroys += 1
+                    try:
+                        self.provider.destroy_exact(instance.instance_id, instance.label)
+                        destroys += 1
+                    except VastProviderError as error:
+                        if str(error) != "current instance contract is not uniquely available":
+                            raise
+                        # The independently armed guard can win the teardown
+                        # race.  Never count that as a controller destroy, but
+                        # still prove exact ID/label absence with fresh reads.
+                        limitation = (
+                            f"{limitation + '; ' if limitation else ''}"
+                            "target became absent before controller teardown; external guard teardown not locally attributable"
+                        )
+                        status = "FAILED_SAFE"
                     absence_timestamps = self._prove_absent(instance.instance_id, instance.label)
                     absence_reads = len(absence_timestamps)
-                    self._append(journal, RunState.ABSENCE_VERIFYING, "absence.proved", {"reads": absence_reads, "timestamps": list(absence_timestamps)})
+                    event = "absence.proved" if destroys else "absence.proved_external_teardown"
+                    self._append(journal, RunState.ABSENCE_VERIFYING, event, {"reads": absence_reads, "timestamps": list(absence_timestamps)})
                 except Exception as error:
                     limitation = f"{limitation + '; ' if limitation else ''}teardown/absence failure: {error}"
                     status = "FAILED_SAFE"

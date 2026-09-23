@@ -45,7 +45,7 @@ class GitHubRunner:
         command = list(arguments)
         self.calls.append(command)
         endpoint = command[4]
-        if endpoint.endswith("/comments?per_page=100"):
+        if endpoint.endswith("/comments?per_page=100&sort=created&direction=desc"):
             return json.dumps(self.comments)
         if endpoint.endswith("/comments"):
             return json.dumps({"id": 99})
@@ -74,6 +74,29 @@ def test_github_guard_dispatch_verifies_bound_action_attestation_then_comments_h
     assert f"inputs[nonce]={NONCE}" in dispatch
     assert any(item == f"body=SRECON26_GUARD_V1 HEARTBEAT nonce={NONCE} root={'b' * 64}" for item in runner.calls[-2])
     assert any(item == f"body=SRECON26_GUARD_V1 ANCHOR nonce={NONCE} root={'c' * 64}" for item in runner.calls[-1])
+
+
+def test_github_guard_bounds_heartbeat_comment_volume() -> None:
+    runner = GitHubRunner()
+    transport = GitHubGuardTransport(
+        GitHubGuardConfig("owner/private-repo", "main", 17, "sunny", heartbeat_seconds=120),
+        runner=runner,
+        sleep=lambda _seconds: None,
+        now=lambda: NOW,
+    )
+    client = GuardClient(transport, nonce=NONCE)
+    identity = RunIdentity("live-run", LABEL, NOW)
+    client.arm(identity, NOW + timedelta(minutes=20))
+
+    client.record_heartbeat(identity, 1_000_000_000)
+    client.record_heartbeat(identity, 2_000_000_000)
+    client.record_heartbeat(identity, 61_000_000_000)
+
+    heartbeat_calls = [
+        call for call in runner.calls
+        if any("SRECON26_GUARD_V1 HEARTBEAT" in argument for argument in call)
+    ]
+    assert len(heartbeat_calls) == 2
 
 
 def test_github_guard_rejects_an_attestation_from_any_non_workflow_actor() -> None:

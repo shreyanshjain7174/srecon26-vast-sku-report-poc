@@ -24,7 +24,7 @@ from srecon26_poc.live_dispatch import (
 )
 from srecon26_poc.provider import AmbiguousCreate
 from srecon26_poc.reporting import FaultRecord, ReportGate, ReportReceipt
-from srecon26_poc.vast_provider import OFFICIAL_KVM_IMAGE, OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, VastLaunchContract
+from srecon26_poc.vast_provider import OFFICIAL_KVM_IMAGE, OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, VastLaunchContract, VastProviderError
 
 
 class Clock:
@@ -41,9 +41,9 @@ class Clock:
 
 
 class Provider:
-    def __init__(self, offer: OfferContract, events: list[str], *, ambiguous: bool = False, mismatch: bool = False) -> None:
+    def __init__(self, offer: OfferContract, events: list[str], *, ambiguous: bool = False, mismatch: bool = False, external_absence: bool = False) -> None:
         self.offer, self.events = offer, events
-        self.ambiguous, self.mismatch = ambiguous, mismatch
+        self.ambiguous, self.mismatch, self.external_absence = ambiguous, mismatch, external_absence
         self.instances: list[InstanceContract] = []
         self.create_calls = 0
 
@@ -73,6 +73,9 @@ class Provider:
 
     def destroy_exact(self, instance_id: int, expected_label: str) -> None:
         self.events.append("destroy")
+        if self.external_absence:
+            self.instances = []
+            raise VastProviderError("current instance contract is not uniquely available")
         assert [(item.instance_id, item.label) for item in self.instances] == [(instance_id, expected_label)]
         self.instances = []
 
@@ -185,9 +188,9 @@ def _request(tmp_path: Path, now: datetime, *, bad_semgrep: bool = False) -> tup
     )
 
 
-def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, remote_fault: bool = False, anchor_error: bool = False):
+def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, remote_fault: bool = False, anchor_error: bool = False, external_absence: bool = False):
     events: list[str] = []
-    provider = Provider(offer, events, ambiguous=ambiguous, mismatch=mismatch)
+    provider = Provider(offer, events, ambiguous=ambiguous, mismatch=mismatch, external_absence=external_absence)
     dispatcher = LiveCanaryDispatcher(provider=provider, guard=Guard(request.nonce, events, anchor_error=anchor_error), report_gate=ReportGate(Reporter(events)), workload=Workload(complete=complete, remote_fault=remote_fault), ledger=ExposureLedger(tmp_path / "ledger.json"), output_root=tmp_path / "runs", clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)), absence_interval_seconds=0)
     return dispatcher, provider, events
 
@@ -282,6 +285,21 @@ def test_confirmed_provider_fault_reports_before_exact_teardown(tmp_path: Path) 
     assert events.index("report-submit") < events.index("destroy")
     assert events.index("report-after") < events.index("destroy")
     assert result.absence_reads == 3
+
+
+def test_external_guard_teardown_race_proves_absence_without_claiming_controller_destroy(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    dispatcher, _provider, _events = _dispatcher(tmp_path, request, offer, external_absence=True)
+
+    result = dispatcher.run(request)
+
+    assert result.status == "FAILED_SAFE"
+    assert result.provider_destroy_calls == 0
+    assert result.absence_reads == 3
+    assert "external guard teardown not locally attributable" in (result.limitation or "")
+    journal = (result.manifest_path.parent / "journal" / "journal.ndjson").read_text()
+    assert "absence.proved_external_teardown" in journal
 
 
 def test_only_complete_live_evidence_gets_real_gpu_provenance(tmp_path: Path) -> None:

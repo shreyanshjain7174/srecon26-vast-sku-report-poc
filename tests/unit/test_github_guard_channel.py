@@ -103,7 +103,7 @@ def test_workflow_has_restricted_permissions_bounded_jobs_and_secret_only_creden
     assert "Arm independent deadline backstop before any paid create" in workflow
     assert "Destroy at immutable deadline and confirm provider absence" in workflow
     assert workflow.count("--post-deadline-window-seconds 300") == 2
-    assert 'timeout 15s gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100"' in workflow
+    assert 'comments?per_page=100&sort=created&direction=desc' in workflow
     assert "gh api --paginate" not in workflow
     assert "TEARDOWN_UNCONFIRMED" in workflow
 

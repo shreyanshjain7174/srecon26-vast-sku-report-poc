@@ -140,6 +140,7 @@ class GitHubGuardTransport(GuardTransport):
         self.now = now or (lambda: datetime.now(UTC))
         self._armed: GuardRemoteReceipt | None = None
         self._nonce: str | None = None
+        self._last_heartbeat_ns: int | None = None
 
     def _api(self, method: str, endpoint: str, *, fields: Mapping[str, str] | None = None, paginate: bool = False) -> object:
         arguments = ["gh", "api", "--method", method, endpoint]
@@ -153,7 +154,10 @@ class GitHubGuardTransport(GuardTransport):
         # The arm receipt is necessarily one of the newest comments.  Avoid
         # ``gh --paginate`` here because its multiple JSON documents are not a
         # single trustworthy parse unit.
-        raw = self._api("GET", f"repos/{self.config.repository}/issues/{self.config.issue_number}/comments?per_page=100")
+        raw = self._api(
+            "GET",
+            f"repos/{self.config.repository}/issues/{self.config.issue_number}/comments?per_page=100&sort=created&direction=desc",
+        )
         if not isinstance(raw, list) or not all(isinstance(item, Mapping) for item in raw):
             raise LiveFactoryError("GitHub issue comments have an unexpected response")
         return list(raw)
@@ -242,7 +246,15 @@ class GitHubGuardTransport(GuardTransport):
         if command == "heartbeat":
             if payload.get("nonce") != self._nonce or payload.get("label") != self._armed.label:
                 raise LiveFactoryError("heartbeat ownership differs from armed GitHub guard")
+            monotonic_ns = _integer(payload.get("monotonic_ns"), "monotonic heartbeat", minimum=0)
+            if self._last_heartbeat_ns is not None:
+                if monotonic_ns < self._last_heartbeat_ns:
+                    raise LiveFactoryError("monotonic heartbeat moved backwards")
+                minimum_interval_ns = self.config.heartbeat_seconds * 1_000_000_000 // 2
+                if monotonic_ns - self._last_heartbeat_ns < minimum_interval_ns:
+                    return _receipt_mapping(self._armed)
             self._comment(f"SRECON26_GUARD_V1 HEARTBEAT nonce={self._nonce} root={self._armed.root_hash}")
+            self._last_heartbeat_ns = monotonic_ns
             return _receipt_mapping(self._armed)
         if command == "anchor":
             root = str(payload.get("root_hash", ""))

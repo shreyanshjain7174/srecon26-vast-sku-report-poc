@@ -158,10 +158,9 @@ jobs:
         run: |
           set -euo pipefail
           while true; do
-            # This deliberately reads one bounded page.  The issue is armed
-            # empty and the owner can send a new heartbeat if comment volume
-            # ever pushes an unread one out of the page.
-            timeout 15s gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100" > "$CHANNEL_ROOT/comments.json"
+            # Read the newest bounded page.  The issue is intentionally reused,
+            # so the default oldest-first page can omit this run's heartbeats.
+            timeout 15s gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100&sort=created&direction=desc" > "$CHANNEL_ROOT/comments.json"
             timeout 50s sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 scripts/github_guard_channel.py sync \
               --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" --issue-number "$INPUT_ISSUE_NUMBER" \
               --hard-deadline "$INPUT_HARD_DEADLINE" --trusted-author "$INPUT_TRUSTED_AUTHOR" \
