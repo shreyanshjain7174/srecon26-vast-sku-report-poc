@@ -186,6 +186,10 @@ def test_direct_inference_smoke_is_a_pinned_localhost_only_non_k3s_path() -> Non
     assert "--network host" not in direct_smoke
     assert "direct inference container name is already in use" in direct_smoke
     assert "CANARY_INFERENCE_LOCAL_PORT is already listening" in direct_smoke
+    assert 'capture_inference_public_listeners "$out" "$phase_deadline" before' in direct_smoke
+    assert 'capture_inference_public_listeners "$out" "$phase_deadline" after' in direct_smoke
+    assert "assert_no_new_inference_public_listener" in direct_smoke
+    assert "direct inference introduced a new wildcard listener" in script
 
 
 def test_direct_inference_evidence_contract_retains_raw_stream_timing_tokens_queue_and_gpu_samples() -> None:

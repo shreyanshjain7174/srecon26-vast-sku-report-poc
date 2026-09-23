@@ -712,13 +712,29 @@ capture_inference_gpu_snapshot() {
     || die "cannot capture ${phase} GPU utilization and memory evidence"
 }
 
-assert_inference_ssh_only_public_listeners() {
+capture_inference_public_listeners() {
   local out="$1"
   local deadline_epoch="$2"
-  capture_inference_until_deadline "$out/inference-public-listeners.txt" "$deadline_epoch" ss -H -lntu \
+  local phase="$3"
+  capture_inference_until_deadline "$out/inference-public-listeners-${phase}.txt" "$deadline_epoch" ss -H -lntu \
     || die "cannot inspect direct-inference listening ports"
-  if awk '$5 ~ /(^\*|0\.0\.0\.0|\[::\]):/ && $5 !~ /:22$/ { found=1 } END { exit(found ? 0 : 1) }' "$out/inference-public-listeners.txt"; then
-    die "a non-SSH wildcard listener is present; refusing direct inference"
+}
+
+assert_no_new_inference_public_listener() {
+  local out="$1"
+  local before="$out/inference-public-listeners-before.txt"
+  local after="$out/inference-public-listeners-after.txt"
+  local baseline current added
+  baseline="$(mktemp)"
+  current="$(mktemp)"
+  added="$(mktemp)"
+  trap 'rm -f "$baseline" "$current" "$added"' RETURN
+  awk '$5 ~ /(^\*|0\.0\.0\.0|\[::\]):/ {print $1, $5}' "$before" | sort -u >"$baseline"
+  awk '$5 ~ /(^\*|0\.0\.0\.0|\[::\]):/ {print $1, $5}' "$after" | sort -u >"$current"
+  comm -13 "$baseline" "$current" >"$added"
+  cp -- "$added" "$out/inference-new-public-listeners.txt"
+  if [[ -s "$added" ]]; then
+    die "direct inference introduced a new wildcard listener"
   fi
 }
 
@@ -824,7 +840,7 @@ run_direct_inference_smoke() {
   prompt_repetitions="$(inference_prompt_repetitions)"
   max_tokens="$(inference_max_tokens)"
   endpoint="http://127.0.0.1:${local_port}"
-  assert_inference_ssh_only_public_listeners "$out" "$phase_deadline"
+  capture_inference_public_listeners "$out" "$phase_deadline" before
   if docker inspect "$container" >/dev/null 2>&1; then
     die "direct inference container name is already in use; refusing to touch an existing container"
   fi
@@ -875,7 +891,8 @@ run_direct_inference_smoke() {
     '{container: $container, image: $image, command: $command[0], port_bindings: $ports[0]}' \
     >"$out/inference-container-inspect.json" \
     || die "direct vLLM container inspection was not valid JSON"
-  assert_inference_ssh_only_public_listeners "$out" "$phase_deadline"
+  capture_inference_public_listeners "$out" "$phase_deadline" after
+  assert_no_new_inference_public_listener "$out"
 
   local base_prompt="${CANARY_PROMPT:-Reply with the word ready.}"
   local pressure_prompt="$base_prompt"

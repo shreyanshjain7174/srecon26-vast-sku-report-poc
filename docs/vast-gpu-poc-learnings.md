@@ -20,6 +20,12 @@ performance claim.
 - A hardware-only smoke is not enough for the talk. The accepted success
   condition now includes a real non-empty response plus raw timing/token and
   GPU telemetry tied to the exact rented instance.
+- The first inference attempt on RTX 4090 machine `57783` reached SSH but was
+  halted before model startup because the base Vast KVM image already exposed
+  provider-managed wildcard listeners. A blanket "SSH only" assertion was too
+  strict for an unmodified provider image. The corrected gate records the
+  before/after listener sets and rejects only a newly introduced wildcard
+  listener; the vLLM port remains independently required to bind to loopback.
 
 ## Current experiment design
 
