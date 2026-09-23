@@ -144,7 +144,7 @@ def test_direct_inference_smoke_rejects_a_reservation_over_fifty_cents(tmp_path)
     ledger = ExposureLedger(tmp_path / "ledger.json")
 
     with pytest.raises(BudgetExceeded):
-        ledger.reserve("inference-attempt", Decimal("0.750001"), "gpu-inference-smoke")
+        ledger.reserve("inference-attempt", Decimal("1.000001"), "gpu-inference-smoke")
 
 
 def test_direct_inference_machine_binding_is_atomic_and_distinct(tmp_path):

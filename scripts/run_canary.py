@@ -288,8 +288,8 @@ def run_fixture(
         raise ValueError("reserve must be a positive Decimal")
     if reserve > Decimal("1.00"):
         raise ValueError("reserve exceeds the stage ceiling")
-    if stage == "inference-smoke" and reserve > Decimal("0.75"):
-        raise ValueError("inference-smoke reserve exceeds the 0.75 entitlement")
+    if stage == "inference-smoke" and reserve > Decimal("1.00"):
+        raise ValueError("inference-smoke reserve exceeds the 1.00 entitlement")
     started = (now or datetime.now(UTC)).astimezone(UTC)
     clock = FixtureClock(started)
     label = f"srecon26-{stage}--nonce-fixture-nonce-01234567"

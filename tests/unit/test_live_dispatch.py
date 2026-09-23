@@ -267,7 +267,7 @@ def test_inference_smoke_is_a_separate_half_dollar_entitlement(tmp_path: Path) -
     request = replace(request, stage="inference-smoke", reserve=Decimal("0.50"), budget_category="gpu-inference-smoke")
     assert not request.validate(now=now)
     assert "inference-smoke requires the gpu-inference-smoke budget category" in replace(request, budget_category=None).validate(now=now)
-    assert "direct inference smoke reserve must be no greater than 0.75" in replace(request, reserve=Decimal("0.750001")).validate(now=now)
+    assert "direct inference smoke reserve must be no greater than 1.00" in replace(request, reserve=Decimal("1.000001")).validate(now=now)
 
 
 def test_inference_smoke_completes_only_with_direct_inference_measurement(tmp_path: Path) -> None:

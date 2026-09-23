@@ -35,7 +35,7 @@ PROJECT_CAP = Decimal("5.00")
 REPORT_MARGIN = timedelta(seconds=420)  # report 180s + teardown 180s + absence 60s
 MAX_GATE_AGE = timedelta(minutes=5)
 MAX_STAGE_RUNTIME = timedelta(minutes=45)
-INFERENCE_SMOKE_RESERVATION_CAP = Decimal("0.75")
+INFERENCE_SMOKE_RESERVATION_CAP = Decimal("1.00")
 INFERENCE_SMOKE_EXCLUDED_MACHINE_IDS = frozenset({99239, 17545, 150513, 147086})
 APPROVED_GPU_PROFILES = frozenset(
     {
@@ -303,7 +303,7 @@ class LiveCanaryRequest:
             failures.append("reserve must be a positive Decimal no greater than 1.00")
         if self.stage == "inference-smoke":
             if self.reserve > INFERENCE_SMOKE_RESERVATION_CAP:
-                failures.append("direct inference smoke reserve must be no greater than 0.75")
+                failures.append("direct inference smoke reserve must be no greater than 1.00")
             if self.budget_category != "gpu-inference-smoke":
                 failures.append("inference-smoke requires the gpu-inference-smoke budget category")
             if len({item.run_id for item in self.inference_history}) != len(self.inference_history) or any(not item.valid() for item in self.inference_history):

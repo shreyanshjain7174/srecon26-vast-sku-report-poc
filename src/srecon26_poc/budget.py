@@ -19,7 +19,7 @@ CATEGORY_CAPS = {
     # reserved for a contract correction proven by retained live evidence.
     # This is not
     # a retry of (or prerequisite for) the KVM smoke entitlement.
-    "gpu-inference-smoke": Decimal("3.00"),
+    "gpu-inference-smoke": Decimal("3.25"),
     # One durable retry entitlement while exactly one original smoke invoice
     # remains pending.  It cannot be split across multiple retry reservations.
     "gpu-smoke-retry": Decimal("0.90"),
@@ -256,8 +256,8 @@ class ExposureLedger:
                 inference_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
                 if len(inference_smokes) >= 4:
                     raise BudgetExceeded("direct inference smoke allows at most four reservation attempts")
-                if amount > Decimal("0.75"):
-                    raise BudgetExceeded("direct inference smoke reservation must be no greater than 0.75")
+                if amount > Decimal("1.00"):
+                    raise BudgetExceeded("direct inference smoke reservation must be no greater than 1.00")
                 if machine_id is not None and any(entry.get("machine_id") == machine_id for entry in inference_smokes):
                     raise BudgetExceeded("direct inference smoke machine is already reserved by another attempt")
             category_total = self._category_exposure(data, category)

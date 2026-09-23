@@ -77,7 +77,7 @@ recorded in unit tests; provider CLI calls use an argument vector, never a
 shell string. The earlier one-attempt scope is exhausted. On 2026-09-23 the
 user explicitly authorized up to three new, distinct `inference-smoke`
 attempts when needed for a credible conference PoC. Each attempt uses budget
-category `gpu-inference-smoke`, reserves at most `$0.75`, and still requires a
+category `gpu-inference-smoke`, reserves at most `$1.00`, and still requires a
 fresh read-only CLI/schema preflight because the corrected direct route has not
 yet been live-validated.
 

@@ -68,8 +68,8 @@ def test_inference_smoke_fixture_accepts_the_distinct_half_dollar_stage(tmp_path
 
 
 def test_inference_smoke_fixture_refuses_to_exceed_its_entitlement(tmp_path) -> None:
-    with pytest.raises(ValueError, match="0.75 entitlement"):
-        _run(tmp_path, stage="inference-smoke", reserve=Decimal("0.750001"))
+    with pytest.raises(ValueError, match="stage ceiling"):
+        _run(tmp_path, stage="inference-smoke", reserve=Decimal("1.000001"))
 
 
 def test_metric_path_blocks_until_smoke_is_finalized(tmp_path) -> None:
