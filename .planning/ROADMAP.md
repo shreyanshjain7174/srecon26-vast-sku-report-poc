@@ -41,7 +41,17 @@ Plans:
   3. Custom-metrics API surfaces at least one vLLM-derived metric readable by the HPA controller
   4. The full observation path (vLLM → Prometheus → custom-metrics adapter → HPA) is documented in a single artifact with hop-level timestamps
   5. Paired comparison produces three complete A/B blocks with real-GPU artifacts, or is labeled exploratory with fewer blocks and cannot support a slide conclusion
-**Plans**: TBD
+**Plans**: 8 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Add a read-only, current-contract Vast CLI adapter and preflight
+- [ ] 02-02-PLAN.md — Implement the concrete independently hosted deadline guard
+- [ ] 02-03-PLAN.md — Prove exact-target provider reporting with a non-submitting fixture
+- [ ] 02-04-PLAN.md — Define and validate the KVM k3s GPU metric-path gate offline
+- [ ] 02-05-PLAN.md — Exercise the canary lifecycle entirely in offline simulation
+- [ ] 02-06-PLAN.md — Run paid GPU smoke and metric path only through fresh passing gates
+- [ ] 02-07-PLAN.md — Validate matched three-block comparison eligibility offline
+- [ ] 02-08-PLAN.md — Run the conditional paid paired comparison or record its limitation
 **UI hint**: no
 
 ### Phase 3: Evidence, Charts, and Deck
@@ -63,5 +73,5 @@ Phases execute in numeric order: 1 → 2 → 3
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Safety Foundation and Local Evidence | 5/5 | Complete   | 2026-09-23 |
-| 2. Live GPU Canary and Paired Comparison | 0/? | Not started | - |
+| 2. Live GPU Canary and Paired Comparison | 0/8 | Planned; paid execution blocked pending Phase 1 re-verification | - |
 | 3. Evidence, Charts, and Deck | 0/? | Not started | - |
