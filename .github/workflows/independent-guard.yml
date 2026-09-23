@@ -1,0 +1,149 @@
+name: Independent Vast deadline guard
+
+on:
+  workflow_dispatch:
+    inputs:
+      nonce:
+        description: "Pre-generated nonce bound to the provider label"
+        required: true
+        type: string
+      label:
+        description: "Exact provider instance label"
+        required: true
+        type: string
+      issue_number:
+        description: "Private repository issue used as the control channel"
+        required: true
+        type: string
+      hard_deadline:
+        description: "Fixed ISO-8601 UTC deadline, within 60 minutes"
+        required: true
+        type: string
+      trusted_author:
+        description: "Repository OWNER allowed to submit exact control comments"
+        required: true
+        type: string
+      heartbeat_seconds:
+        description: "Heartbeat-loss timeout in seconds (30-600)"
+        required: false
+        default: "120"
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: independent-guard-${{ inputs.nonce }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      INPUT_NONCE: ${{ inputs.nonce }}
+      INPUT_LABEL: ${{ inputs.label }}
+      INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
+      INPUT_HARD_DEADLINE: ${{ inputs.hard_deadline }}
+      INPUT_TRUSTED_AUTHOR: ${{ inputs.trusted_author }}
+      INPUT_HEARTBEAT_SECONDS: ${{ inputs.heartbeat_seconds }}
+      GUARD_ROOT: /var/lib/srecon26-github-guard
+      GUARD_SECRET_FILE: /etc/srecon26-github-guard/vast-api-key
+      CHANNEL_ROOT: ${{ runner.temp }}/srecon26-github-guard
+    steps:
+      - name: Checkout pinned guard source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Validate bounded dispatch inputs before any provider operation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/github_guard_channel.py validate \
+            --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" \
+            --issue-number "$INPUT_ISSUE_NUMBER" --hard-deadline "$INPUT_HARD_DEADLINE" \
+            --trusted-author "$INPUT_TRUSTED_AUTHOR" --heartbeat-seconds "$INPUT_HEARTBEAT_SECONDS" >/dev/null
+
+      - name: Verify private issue control channel
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/${GITHUB_REPOSITORY}" --jq .private)" = "true"
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}" --jq 'has("pull_request") | not')" = "true"
+
+      - name: Install encrypted Actions secret as a root-only file
+        shell: bash
+        env:
+          VAST_API_KEY: ${{ secrets.VAST_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$VAST_API_KEY"
+          sudo install -d -m 700 "$GUARD_ROOT" "$(dirname "$GUARD_SECRET_FILE")"
+          printf '%s' "$VAST_API_KEY" | sudo tee "$GUARD_SECRET_FILE" >/dev/null
+          sudo chmod 600 "$GUARD_SECRET_FILE"
+          unset VAST_API_KEY
+
+      - name: Arm the independent guard before any paid create
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$CHANNEL_ROOT"
+          sudo python3 scripts/github_guard_channel.py arm \
+            --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" --issue-number "$INPUT_ISSUE_NUMBER" \
+            --hard-deadline "$INPUT_HARD_DEADLINE" --trusted-author "$INPUT_TRUSTED_AUTHOR" \
+            --heartbeat-seconds "$INPUT_HEARTBEAT_SECONDS" --worker guard/guard_worker.py \
+            --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" \
+            --channel-state "$CHANNEL_ROOT/channel-state.json" --journal "$CHANNEL_ROOT/channel.ndjson"
+
+      - name: Publish exact private-issue comment protocol
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments" \
+            -f "body=SRECon26 guard armed. Only ${INPUT_TRUSTED_AUTHOR} with OWNER association may send exactly: SRECON26_GUARD_V1 HEARTBEAT nonce=${INPUT_NONCE} root=<64 lowercase hex>; or SRECON26_GUARD_V1 ANCHOR nonce=${INPUT_NONCE} root=<64 lowercase hex>."
+
+      - name: Watch owner-authored heartbeats and autonomously tick guard
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          while true; do
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100" > "$CHANNEL_ROOT/comments.json"
+            sudo python3 scripts/github_guard_channel.py sync \
+              --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" --issue-number "$INPUT_ISSUE_NUMBER" \
+              --hard-deadline "$INPUT_HARD_DEADLINE" --trusted-author "$INPUT_TRUSTED_AUTHOR" \
+              --heartbeat-seconds "$INPUT_HEARTBEAT_SECONDS" --worker guard/guard_worker.py \
+              --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" \
+              --channel-state "$CHANNEL_ROOT/channel-state.json" --journal "$CHANNEL_ROOT/channel.ndjson" \
+              --comments-json "$CHANNEL_ROOT/comments.json" > "$CHANNEL_ROOT/last-sync.json"
+            if grep -Eq '"status": "(TEARDOWN_CONFIRMED|ABSENT_OBSERVED|OWNERSHIP_MISMATCH|TEARDOWN_ERROR|DISARMED)"' "$CHANNEL_ROOT/last-sync.json"; then
+              break
+            fi
+            sleep 20
+          done
+
+      - name: Upload durable guard journals
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chmod -R a+rX "$GUARD_ROOT" || true
+          sudo chmod -R a+rX "$CHANNEL_ROOT" || true
+
+      - name: Preserve worker and channel evidence
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: independent-guard-${{ inputs.nonce }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/srecon26-github-guard
+            /var/lib/srecon26-github-guard
