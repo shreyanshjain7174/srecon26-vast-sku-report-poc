@@ -1,0 +1,12 @@
+[Unit]
+Description=SRECon26 independent deadline guard timer for @NONCE@
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+Persistent=true
+Unit=srecon26-guard-@NONCE@.service
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

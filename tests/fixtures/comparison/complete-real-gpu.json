@@ -1,0 +1,21 @@
+{
+  "remaining": "3.00",
+  "plan": {
+    "canary": {"reference": "canary-validated-sha256", "validated": true, "provenance": "real-gpu"},
+    "capacities": [
+      {"capacity_id": "current-capacity-a", "gpu_class": "RTX-3090", "ready": true, "current": true},
+      {"capacity_id": "current-capacity-b", "gpu_class": "RTX-3090", "ready": true, "current": true}
+    ],
+    "controls": {
+      "model_revision": "model-rev-fixture", "image_digest": "sha256:fixture", "gpu_class": "RTX-3090",
+      "trace_hash": "sha256:trace-fixture", "prompt_schedule": ["p1", "p2"], "token_schedule": [32, 64],
+      "seed": 17, "warmup_seconds": 30, "window_seconds": 120, "replica_limit": 2, "readiness_policy": "all-metrics-fresh"
+    },
+    "order": ["AB", "BA", "AB"]
+  },
+  "blocks": [
+    {"order": "AB", "runs": []},
+    {"order": "BA", "runs": []},
+    {"order": "AB", "runs": []}
+  ]
+}

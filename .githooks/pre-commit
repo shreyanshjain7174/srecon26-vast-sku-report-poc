@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+branch=$(git branch --show-current)
+if [ "$branch" = "feat/vast-sku-report-poc" ]; then
+  if ! command -v semgrep >/dev/null 2>&1; then
+    echo "semgrep is required; refusing commit" >&2
+    exit 1
+  fi
+  semgrep --config .semgrep.yml --error src tests scripts
+  if git diff --cached -- . ':!*.md' | grep -E -i '(vast|provider).{0,24}(api[_-]?key|token|secret)[[:space:]]*=' >/dev/null; then
+    echo "possible provider credential staged; refusing commit" >&2
+    exit 1
+  fi
+fi

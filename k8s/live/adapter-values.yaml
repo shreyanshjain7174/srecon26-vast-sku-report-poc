@@ -1,0 +1,12 @@
+prometheus: {url: http://prometheus.srecon26-local.svc, port: 9090}
+rules:
+  default: false
+  custom:
+    - seriesQuery: 'vllm:num_requests_waiting{namespace!="",pod!=""}'
+      resources: {overrides: {namespace: {resource: namespace}, pod: {resource: pod}}}
+      name: {matches: '^vllm:num_requests_waiting$', as: vllm_num_requests_waiting}
+      metricsQuery: 'max(vllm:num_requests_waiting{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+    - seriesQuery: 'vllm:kv_cache_usage_perc{namespace!="",pod!=""}'
+      resources: {overrides: {namespace: {resource: namespace}, pod: {resource: pod}}}
+      name: {matches: '^vllm:kv_cache_usage_perc$', as: vllm_kv_cache_usage}
+      metricsQuery: 'max(vllm:kv_cache_usage_perc{<<.LabelMatchers>>}) by (<<.GroupBy>>)'

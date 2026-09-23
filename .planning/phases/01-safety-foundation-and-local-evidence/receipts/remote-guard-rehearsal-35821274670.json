@@ -1,0 +1,1 @@
+{"exact_instance_id": 417, "exact_label": "rehearsal-35821274670--nonce-e98c3ce091b78ed0c21eb03e5ee53c6c", "fake_destroy_count": 1, "guard_root_hash": "6822f50c96a4ecd0c47c646b39205e83b2c2d1c65a2036f866d301492318ea86", "guard_status": "TEARDOWN_CONFIRMED", "idempotent_second_tick": true, "mode": "credential_free_fake_provider_rehearsal", "real_provider_calls": 0}
