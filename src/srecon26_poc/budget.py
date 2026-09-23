@@ -45,6 +45,10 @@ INFERENCE_STARTUP_RETRY_RUN_ID = "inference-infer20260923154131"
 INFERENCE_STARTUP_RETRY_JOURNAL_SHA256 = "f1f384770f2962efbbd9814d5f3f7ebbd7d1ad1a6469b03e5da3e7ec7abe0c23"
 INFERENCE_STARTUP_RETRY_EVIDENCE_SHA256 = "b04821f538dba046d791e08002de2748efe5f9bfd7a7f629d0af3bc0e4ac2565"
 INFERENCE_STARTUP_RETRY_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "inference-infer20260923154131-startup-retry-entitlement.json"
+INFERENCE_REPORT_SESSION_RETRY_RUN_ID = "inference-infer20260923174935"
+INFERENCE_REPORT_SESSION_RETRY_JOURNAL_SHA256 = "23b52819f536ccf84f7cc90fbdf554f038a0e4e6db3adae77c7d927365f70fed"
+INFERENCE_REPORT_SESSION_RETRY_EVIDENCE_SHA256 = "718e750bcc09e0a00016f4c24c1867652134fd7cb9a3545d7691060e2bcf7920"
+INFERENCE_REPORT_SESSION_RETRY_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "inference-infer20260923174935-report-session-retry-entitlement.json"
 ALTERNATE_TEMPLATE_HASH = "10d921fdff3c0d2a794897d81ae870c5"
 ALTERNATE_TEMPLATE_IMAGE = "docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21"
 ALTERNATE_TEMPLATE_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "vast-template-ubuntu-desktop-vm-20260923.json"
@@ -413,6 +417,47 @@ class ExposureLedger:
             and evidence.get("actual_usd") == "0.008"
         )
 
+    def _has_pinned_report_session_retry_entitlement(self, reservations: Mapping[str, object]) -> bool:
+        entry = reservations.get(INFERENCE_REPORT_SESSION_RETRY_RUN_ID)
+        if not isinstance(entry, Mapping) or entry.get("category") != "gpu-inference-smoke":
+            return False
+        run_path = self.path.parent / INFERENCE_REPORT_SESSION_RETRY_RUN_ID
+        journal_path = run_path / "journal" / "journal.ndjson"
+        try:
+            if hashlib.sha256(journal_path.read_bytes()).hexdigest() != INFERENCE_REPORT_SESSION_RETRY_JOURNAL_SHA256:
+                return False
+            journal = RunJournal.open(journal_path.parent)
+            evidence_raw = INFERENCE_REPORT_SESSION_RETRY_EVIDENCE_PATH.read_bytes()
+            if hashlib.sha256(evidence_raw).hexdigest() != INFERENCE_REPORT_SESSION_RETRY_EVIDENCE_SHA256:
+                return False
+            evidence = json.loads(evidence_raw)
+            request_paths = list((run_path / "desktop-report").glob(".external-report-*/01-preflight-authenticated-session.request.json"))
+            if len(request_paths) != 1:
+                return False
+        except (OSError, InvalidJournal, json.JSONDecodeError):
+            return False
+        events = journal.events()
+        terminal = [event for event in events if event.event_type == "terminal.safe"]
+        reads = evidence.get("provider_absence_reads") if isinstance(evidence, Mapping) else None
+        expected = "external desktop did not answer preflight-authenticated-session within 60 seconds"
+        return (
+            bool(events)
+            and all(event.run_id == INFERENCE_REPORT_SESSION_RETRY_RUN_ID for event in events)
+            and journal.state().value == "TERMINAL"
+            and not any(event.event_type in {"provider.create_intent", "provider.create_observed"} for event in events)
+            and len(terminal) == 1
+            and terminal[0].payload.get("limitation") == expected
+            and terminal[0].payload.get("status") == "FAILED_SAFE"
+            and evidence.get("schema") == "srecon26-inference-report-session-retry-entitlement/v1"
+            and evidence.get("run_id") == INFERENCE_REPORT_SESSION_RETRY_RUN_ID
+            and evidence.get("journal_sha256") == INFERENCE_REPORT_SESSION_RETRY_JOURNAL_SHA256
+            and evidence.get("authenticated_session_request_sha256") == hashlib.sha256(request_paths[0].read_bytes()).hexdigest()
+            and evidence.get("provider_command") == ["show", "instances", "--raw"]
+            and isinstance(reads, list)
+            and len(reads) == 3
+            and all(isinstance(read, Mapping) and read.get("matching_instances") == 0 and read.get("raw") == [] for read in reads)
+        )
+
     @staticmethod
     def _has_alternate_template_authorization(template_hash: str | None, image_contract: str | None) -> bool:
         if template_hash != ALTERNATE_TEMPLATE_HASH or image_contract != ALTERNATE_TEMPLATE_IMAGE:
@@ -473,8 +518,8 @@ class ExposureLedger:
                     raise BudgetExceeded("distinct-machine smoke requires one pending original, one settled retry, and one unused entitlement")
             if category == "gpu-inference-smoke":
                 inference_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
-                if len(inference_smokes) >= 8:
-                    raise BudgetExceeded("direct inference smoke allows at most eight reservations")
+                if len(inference_smokes) >= 9:
+                    raise BudgetExceeded("direct inference smoke allows at most nine reservations")
                 if len(inference_smokes) == 4 and not self._has_pinned_inference_replacement_entitlement(reservations):
                     raise BudgetExceeded("fifth inference reservation requires pinned no-create replacement evidence")
                 if len(inference_smokes) == 5 and not self._has_pinned_measurement_retry_entitlement(reservations):
@@ -483,6 +528,11 @@ class ExposureLedger:
                     raise BudgetExceeded("seventh inference reservation requires pinned provider-startup retry evidence")
                 if len(inference_smokes) == 7 and not self._has_alternate_template_authorization(template_hash, image_contract):
                     raise BudgetExceeded("eighth inference reservation requires pinned alternate-template authorization")
+                if len(inference_smokes) == 8 and (
+                    not self._has_pinned_report_session_retry_entitlement(reservations)
+                    or not self._has_alternate_template_authorization(template_hash, image_contract)
+                ):
+                    raise BudgetExceeded("ninth inference reservation requires pinned no-create report-session evidence and alternate-template authorization")
                 if amount > Decimal("1.00"):
                     raise BudgetExceeded("direct inference smoke reservation must be no greater than 1.00")
                 if machine_id is not None and any(entry.get("machine_id") == machine_id for entry in inference_smokes):
