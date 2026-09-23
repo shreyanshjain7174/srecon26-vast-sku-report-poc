@@ -19,7 +19,7 @@ CATEGORY_CAPS = {
     # reserved for a contract correction proven by retained live evidence.
     # This is not
     # a retry of (or prerequisite for) the KVM smoke entitlement.
-    "gpu-inference-smoke": Decimal("3.25"),
+    "gpu-inference-smoke": Decimal("4.25"),
     # One durable retry entitlement while exactly one original smoke invoice
     # remains pending.  It cannot be split across multiple retry reservations.
     "gpu-smoke-retry": Decimal("0.90"),
@@ -29,6 +29,14 @@ CATEGORY_CAPS = {
     "canary": Decimal("1.00"),
     "paired-comparison": Decimal("3.00"),
 }
+
+# One reviewed, hash-pinned replacement entitlement for a preserved run that failed before
+# provider.create_intent.  The canonical journal is hash-pinned so a different
+# local timeout cannot silently expand the paid-attempt envelope.
+INFERENCE_REPLACEMENT_RUN_ID = "inference-infer202609231456"
+INFERENCE_REPLACEMENT_JOURNAL_SHA256 = "0a66d7bd0ad2693db76a0e02327ed9a1c9ff61425c792130a2191742979407be"
+INFERENCE_REPLACEMENT_EVIDENCE_SHA256 = "1c193985949a91adfaa7646de3cf9afb8f3aaa1c0e257fefbb7d28f10466d927"
+INFERENCE_REPLACEMENT_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "inference-infer202609231456-replacement-entitlement.json"
 
 
 class BudgetExceeded(ValueError):
@@ -216,6 +224,43 @@ class ExposureLedger:
             Decimal("0.00"),
         )
 
+    def _has_pinned_inference_replacement_entitlement(self, reservations: Mapping[str, object]) -> bool:
+        entry = reservations.get(INFERENCE_REPLACEMENT_RUN_ID)
+        if not isinstance(entry, Mapping) or entry.get("category") != "gpu-inference-smoke":
+            return False
+        journal_path = self.path.parent / INFERENCE_REPLACEMENT_RUN_ID / "journal" / "journal.ndjson"
+        evidence_path = INFERENCE_REPLACEMENT_EVIDENCE_PATH
+        try:
+            if hashlib.sha256(journal_path.read_bytes()).hexdigest() != INFERENCE_REPLACEMENT_JOURNAL_SHA256:
+                return False
+            journal = RunJournal.open(journal_path.parent)
+            evidence_raw = evidence_path.read_bytes()
+            if hashlib.sha256(evidence_raw).hexdigest() != INFERENCE_REPLACEMENT_EVIDENCE_SHA256:
+                return False
+            evidence = json.loads(evidence_raw)
+        except (OSError, InvalidJournal, json.JSONDecodeError):
+            return False
+        events = journal.events()
+        expected = "external desktop did not answer preflight-authenticated-session within 60 seconds"
+        terminal = [event for event in events if event.event_type == "terminal.safe"]
+        reads = evidence.get("provider_absence_reads") if isinstance(evidence, Mapping) else None
+        return (
+            bool(events)
+            and all(event.run_id == INFERENCE_REPLACEMENT_RUN_ID for event in events)
+            and journal.state().value == "TERMINAL"
+            and not any(event.event_type in {"provider.create_intent", "provider.create_observed"} for event in events)
+            and len(terminal) == 1
+            and terminal[0].payload.get("limitation") == expected
+            and terminal[0].payload.get("status") == "FAILED_SAFE"
+            and evidence.get("schema") == "srecon26-inference-replacement-entitlement/v1"
+            and evidence.get("run_id") == INFERENCE_REPLACEMENT_RUN_ID
+            and evidence.get("journal_sha256") == INFERENCE_REPLACEMENT_JOURNAL_SHA256
+            and evidence.get("provider_command") == ["show", "instances", "--raw"]
+            and isinstance(reads, list)
+            and len(reads) == 3
+            and all(isinstance(read, Mapping) and read.get("matching_instances") == 0 and read.get("raw") == [] for read in reads)
+        )
+
     def reserve(self, run_id: str, amount: Decimal, category: str, *, machine_id: int | None = None) -> Decimal:
         amount = self._decimal(amount)
         if amount <= 0 or category not in CATEGORY_CAPS:
@@ -254,8 +299,10 @@ class ExposureLedger:
                     raise BudgetExceeded("distinct-machine smoke requires one pending original, one settled retry, and one unused entitlement")
             if category == "gpu-inference-smoke":
                 inference_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
-                if len(inference_smokes) >= 4:
-                    raise BudgetExceeded("direct inference smoke allows at most four reservation attempts")
+                if len(inference_smokes) >= 5:
+                    raise BudgetExceeded("direct inference smoke allows at most five reservations including one pinned no-create replacement")
+                if len(inference_smokes) == 4 and not self._has_pinned_inference_replacement_entitlement(reservations):
+                    raise BudgetExceeded("fifth inference reservation requires pinned no-create replacement evidence")
                 if amount > Decimal("1.00"):
                     raise BudgetExceeded("direct inference smoke reservation must be no greater than 1.00")
                 if machine_id is not None and any(entry.get("machine_id") == machine_id for entry in inference_smokes):

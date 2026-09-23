@@ -76,7 +76,14 @@ fields across routes or guesses a port. The exact create argument order is
 recorded in unit tests; provider CLI calls use an argument vector, never a
 shell string. The earlier one-attempt scope is exhausted. On 2026-09-23 the
 user explicitly authorized up to three new, distinct `inference-smoke`
-attempts when needed for a credible conference PoC. Each attempt uses budget
+attempts when needed for a credible conference PoC. One additional replacement
+reservation is permitted only for hash-pinned run `inference-infer202609231456`,
+which terminated before `provider.create_intent` after its external desktop
+authentication response missed the 60-second window. Its canonical journal and
+three fresh zero-inventory provider reads are checked in as entitlement evidence.
+The `$4.25` inference category cap retains the four historical reservations
+(`$0.75 + $0.75 + $0.75 + $1.00`) and allows one final `$1.00` replacement under
+the unchanged `$5.00` global exposure ceiling. Each attempt uses budget
 category `gpu-inference-smoke`, reserves at most `$1.00`, and still requires a
 fresh read-only CLI/schema preflight because the corrected direct route has not
 yet been live-validated.

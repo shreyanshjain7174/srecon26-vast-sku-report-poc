@@ -136,8 +136,83 @@ def test_direct_inference_smoke_allows_three_bounded_reservations(tmp_path):
         "inference-attempt-3",
     )
     ledger.reserve("inference-attempt-4", Decimal("0.50"), "gpu-inference-smoke")
-    with pytest.raises(BudgetExceeded, match="at most four reservation attempts"):
+    with pytest.raises(BudgetExceeded, match="requires pinned no-create replacement evidence"):
         ledger.reserve("inference-attempt-5", Decimal("0.01"), "gpu-inference-smoke")
+
+
+def test_fifth_inference_reservation_requires_exact_pinned_no_create_journal(tmp_path, monkeypatch):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    for index in range(1, 5):
+        ledger.reserve(f"inference-attempt-{index}", Decimal("0.50"), "gpu-inference-smoke", machine_id=145337 + index)
+
+    run_id = "inference-attempt-4"
+    label = "srecon26-inference--nonce-timeout"
+    journal = RunJournal.create(tmp_path / run_id / "journal", RunIdentity(run_id, label, datetime.now(UTC)))
+    now = datetime.now(UTC)
+    states = [
+        (RunState.OFFLINE_VALIDATED, "gates.passed", {}),
+        (RunState.BUDGET_RESERVED, "budget.reserved", {}),
+        (RunState.OFFER_PINNED, "offer.pinned", {}),
+        (RunState.REPORT_ADAPTER_READY, "report.adapter_ready", {}),
+        (RunState.GUARD_ARMED, "guard.armed", {}),
+        (RunState.TERMINAL, "terminal.safe", {"limitation": "external desktop did not answer preflight-authenticated-session within 60 seconds", "status": "FAILED_SAFE"}),
+    ]
+    for index, (state, event, payload) in enumerate(states, start=1):
+        journal.append(state, event, payload, now + timedelta(microseconds=index), index)
+
+    journal_hash = hashlib.sha256(journal.path.read_bytes()).hexdigest()
+    evidence = tmp_path / "replacement.json"
+    evidence.write_text(json.dumps({
+        "schema": "srecon26-inference-replacement-entitlement/v1",
+        "run_id": run_id,
+        "journal_sha256": journal_hash,
+        "provider_command": ["show", "instances", "--raw"],
+        "provider_absence_reads": [{"matching_instances": 0, "raw": []} for _ in range(3)],
+    }))
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_RUN_ID", run_id)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_JOURNAL_SHA256", journal_hash)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_EVIDENCE_PATH", evidence)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_EVIDENCE_SHA256", hashlib.sha256(evidence.read_bytes()).hexdigest())
+    ledger.reserve("inference-attempt-5", Decimal("0.50"), "gpu-inference-smoke", machine_id=145400)
+    with pytest.raises(BudgetExceeded, match="at most five reservations"):
+        ledger.reserve("inference-attempt-6", Decimal("0.01"), "gpu-inference-smoke", machine_id=145401)
+
+
+def test_fifth_inference_reservation_rejects_pinned_journal_with_create_intent(tmp_path, monkeypatch):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    run_id = "inference-attempt-4"
+    label = "srecon26-inference--nonce-created"
+    for index in range(1, 5):
+        ledger.reserve(f"inference-attempt-{index}", Decimal("0.50"), "gpu-inference-smoke", machine_id=145337 + index)
+    journal = RunJournal.create(tmp_path / run_id / "journal", RunIdentity(run_id, label, datetime.now(UTC)))
+    now = datetime.now(UTC)
+    states = [
+        (RunState.OFFLINE_VALIDATED, "gates.passed", {}),
+        (RunState.BUDGET_RESERVED, "budget.reserved", {}),
+        (RunState.OFFER_PINNED, "offer.pinned", {}),
+        (RunState.REPORT_ADAPTER_READY, "report.adapter_ready", {}),
+        (RunState.GUARD_ARMED, "guard.armed", {}),
+        (RunState.CREATE_REQUESTED, "provider.create_intent", {}),
+        (RunState.TERMINAL, "terminal.safe", {"limitation": "external desktop did not answer preflight-authenticated-session within 60 seconds", "status": "FAILED_SAFE"}),
+    ]
+    for index, (state, event, payload) in enumerate(states, start=1):
+        journal.append(state, event, payload, now + timedelta(microseconds=index), index)
+
+    journal_hash = hashlib.sha256(journal.path.read_bytes()).hexdigest()
+    evidence = tmp_path / "replacement.json"
+    evidence.write_text(json.dumps({
+        "schema": "srecon26-inference-replacement-entitlement/v1",
+        "run_id": run_id,
+        "journal_sha256": journal_hash,
+        "provider_command": ["show", "instances", "--raw"],
+        "provider_absence_reads": [{"matching_instances": 0, "raw": []} for _ in range(3)],
+    }))
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_RUN_ID", run_id)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_JOURNAL_SHA256", journal_hash)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_EVIDENCE_PATH", evidence)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_EVIDENCE_SHA256", hashlib.sha256(evidence.read_bytes()).hexdigest())
+    with pytest.raises(BudgetExceeded, match="pinned no-create replacement evidence"):
+        ledger.reserve("inference-attempt-5", Decimal("0.50"), "gpu-inference-smoke", machine_id=145400)
 
 
 def test_direct_inference_smoke_rejects_a_reservation_over_fifty_cents(tmp_path):
