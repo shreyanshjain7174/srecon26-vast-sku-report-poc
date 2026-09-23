@@ -63,9 +63,9 @@ jobs:
           "${worker[@]}" heartbeat > "$REHEARSAL_DIR/artifact/heartbeat.json"
           sleep "$((INPUT_HEARTBEAT_TIMEOUT + 1))"
           "${worker[@]}" tick > "$REHEARSAL_DIR/artifact/first-tick.json"
-          before_second="$(wc -l < "$REHEARSAL_DIR/fake-bin/calls.ndjson")"
+          before_second="$(sudo wc -l "$REHEARSAL_DIR/fake-bin/calls.ndjson" | awk '{print $1}')"
           "${worker[@]}" tick > "$REHEARSAL_DIR/artifact/second-tick.json"
-          after_second="$(wc -l < "$REHEARSAL_DIR/fake-bin/calls.ndjson")"
+          after_second="$(sudo wc -l "$REHEARSAL_DIR/fake-bin/calls.ndjson" | awk '{print $1}')"
           sudo python3 - "$REHEARSAL_DIR/artifact" "$REHEARSAL_DIR/fake-bin" "$label" "$before_second" "$after_second" <<'PY'
           import json
           import sys
