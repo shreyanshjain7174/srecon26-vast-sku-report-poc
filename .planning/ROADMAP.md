@@ -6,7 +6,7 @@ Three phases enforced by a hard dependency chain: build the safety envelope and 
 
 ## Phases
 
-- [ ] **Phase 1: Safety Foundation and Local Evidence** - Safety envelope (budget, guard, journal, semgrep gate) complete; all three local HPA arm independence proofs validated and anchored
+- [x] **Phase 1: Safety Foundation and Local Evidence** - Safety envelope (budget, guard, journal, semgrep gate) complete; all three local HPA arm independence proofs validated and anchored (completed 2026-09-23)
 - [ ] **Phase 2: Live GPU Canary and Paired Comparison** - Real GPU metric-path canary end-to-end on Vast.ai; conditional A/B/A paired comparison if budget and topology allow
 - [ ] **Phase 3: Evidence, Charts, and Deck** - All artifacts analyzed, charts generated from validated results, 16-slide deck assembled and validated for Google Slides import
 
@@ -26,10 +26,10 @@ Three phases enforced by a hard dependency chain: build the safety envelope and 
 
 Plans:
 - [x] 01-01-PLAN.md — Establish the tested package scaffold, typed lifecycle contracts, and crash-safe hash-chained journal
-- [ ] 01-02-PLAN.md — Enforce Decimal-only exposure accounting and provider ownership contracts
-- [ ] 01-03-PLAN.md — Implement the independent guard, report-first lifecycle, and idempotent controller fakes
-- [ ] 01-04-PLAN.md — Prove CPU, queue, and synthetic-KV local HPA signal independence
-- [ ] 01-05-PLAN.md — Anchor local evidence and enforce automatic no-spend security gates
+- [x] 01-02-PLAN.md — Enforce Decimal-only exposure accounting and provider ownership contracts
+- [x] 01-03-PLAN.md — Implement the independent guard, report-first lifecycle, and idempotent controller fakes
+- [x] 01-04-PLAN.md — Prove CPU, queue, and synthetic-KV local HPA signal independence
+- [x] 01-05-PLAN.md — Anchor local evidence and enforce automatic no-spend security gates
 
 ### Phase 2: Live GPU Canary and Paired Comparison
 **Goal**: Real GPU metric-path is proven end-to-end on Vast.ai hardware; paired comparison either produces three complete A/B blocks or is correctly labeled exploratory
@@ -62,6 +62,6 @@ Phases execute in numeric order: 1 → 2 → 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Safety Foundation and Local Evidence | 1/5 | In Progress|  |
+| 1. Safety Foundation and Local Evidence | 5/5 | Complete   | 2026-09-23 |
 | 2. Live GPU Canary and Paired Comparison | 0/? | Not started | - |
 | 3. Evidence, Charts, and Deck | 0/? | Not started | - |

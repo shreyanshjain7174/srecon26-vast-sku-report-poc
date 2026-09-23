@@ -7,52 +7,52 @@
 
 ### Budget & Cost Safety
 
-- [ ] **BUDG-01**: Budget ledger rejects any reservation that would cause total project exposure to exceed $5.00 using `decimal.Decimal` arithmetic — no floating-point on the budget path
-- [ ] **BUDG-02**: Budget ledger persists across process restarts; uncommitted reservations are re-checked at resume
-- [ ] **BUDG-03**: Budget ledger exposes a read-only query interface that returns remaining headroom as a `Decimal` value
-- [ ] **BUDG-04**: Budget sub-allocations are enforced per run category: $1.00 for GPU/CUDA smoke, $1.00 for vLLM canary, up to $3.00 for paired comparison
-- [ ] **BUDG-05**: Any code path that converts budget values to or from JSON uses `Decimal`; `float` is prohibited on the budget path
+- [x] **BUDG-01**: Budget ledger rejects any reservation that would cause total project exposure to exceed $5.00 using `decimal.Decimal` arithmetic — no floating-point on the budget path
+- [x] **BUDG-02**: Budget ledger persists across process restarts; uncommitted reservations are re-checked at resume
+- [x] **BUDG-03**: Budget ledger exposes a read-only query interface that returns remaining headroom as a `Decimal` value
+- [x] **BUDG-04**: Budget sub-allocations are enforced per run category: $1.00 for GPU/CUDA smoke, $1.00 for vLLM canary, up to $3.00 for paired comparison
+- [x] **BUDG-05**: Any code path that converts budget values to or from JSON uses `Decimal`; `float` is prohibited on the budget path
 
 ### Teardown Guard
 
-- [ ] **GUARD-01**: An independent teardown guard process runs on a separately-reachable always-on host and is armed (acknowledgement received) before any paid provider `create` call is issued
-- [ ] **GUARD-02**: Guard activates teardown only after heartbeat loss from the controller or expiry of the hard TTL deadline — never before either condition
-- [ ] **GUARD-03**: Guard authority cannot be extended by the report window or any controller action; the hard deadline is immovable once armed
-- [ ] **GUARD-04**: Guard journal receives a copy of every run's SHA256SUMS + ROOT-HASH after each integrity bundle is produced
-- [ ] **GUARD-05**: Loss of the controller host (laptop sleep, network partition) does not prevent the guard from executing teardown
+- [x] **GUARD-01**: An independent teardown guard process runs on a separately-reachable always-on host and is armed (acknowledgement received) before any paid provider `create` call is issued
+- [x] **GUARD-02**: Guard activates teardown only after heartbeat loss from the controller or expiry of the hard TTL deadline — never before either condition
+- [x] **GUARD-03**: Guard authority cannot be extended by the report window or any controller action; the hard deadline is immovable once armed
+- [x] **GUARD-04**: Guard journal receives a copy of every run's SHA256SUMS + ROOT-HASH after each integrity bundle is produced
+- [x] **GUARD-05**: Loss of the controller host (laptop sleep, network partition) does not prevent the guard from executing teardown
 
 ### Experiment Controller
 
 - [x] **CTRL-01**: Controller uses a hash-chained append-only run journal; each event record carries a monotone sequence number and `previous_hash` field
 - [x] **CTRL-02**: Controller resumes idempotently after a crash by replaying the journal from the last valid hash-chain entry without re-issuing any already-recorded create call
-- [ ] **CTRL-03**: Ambiguous provider `create` responses are never retried; controller reconciles instance state by label, records the ambiguity event, and halts until resolved
-- [ ] **CTRL-04**: Controller enforces the report-before-destroy ordering: qualifying `PROVIDER_FAULT_CONFIRMED` events trigger the report adapter before teardown; destroy is not issued until the report step completes or the hard deadline forces it
-- [ ] **CTRL-05**: `DIAGNOSIS_UNRESOLVED` status never triggers the provider report adapter; only `PROVIDER_FAULT_CONFIRMED` does
-- [ ] **CTRL-06**: Controller reads provider credentials from a root-owned `0600` secret file; credentials never appear in repo files, run artifacts, process arguments, environment exports, or logs
+- [x] **CTRL-03**: Ambiguous provider `create` responses are never retried; controller reconciles instance state by label, records the ambiguity event, and halts until resolved
+- [x] **CTRL-04**: Controller enforces the report-before-destroy ordering: qualifying `PROVIDER_FAULT_CONFIRMED` events trigger the report adapter before teardown; destroy is not issued until the report step completes or the hard deadline forces it
+- [x] **CTRL-05**: `DIAGNOSIS_UNRESOLVED` status never triggers the provider report adapter; only `PROVIDER_FAULT_CONFIRMED` does
+- [x] **CTRL-06**: Controller reads provider credentials from a root-owned `0600` secret file; credentials never appear in repo files, run artifacts, process arguments, environment exports, or logs
 
 ### Security & Pre-flight
 
-- [ ] **SEC-01**: Semgrep scan with no unresolved high-severity findings must pass before any paid provider `create` call is issued
-- [ ] **SEC-02**: Semgrep scan runs automatically on every commit on branch `feat/vast-sku-report-poc`
-- [ ] **SEC-03**: Provider credentials are never committed to the repository; CI rejects commits containing secrets patterns
-- [ ] **SEC-04**: All commits are signed off with `git commit -s`; no Codex co-author trailer is included
+- [x] **SEC-01**: Semgrep scan with no unresolved high-severity findings must pass before any paid provider `create` call is issued
+- [x] **SEC-02**: Semgrep scan runs automatically on every commit on branch `feat/vast-sku-report-poc`
+- [x] **SEC-03**: Provider credentials are never committed to the repository; CI rejects commits containing secrets patterns
+- [x] **SEC-04**: All commits are signed off with `git commit -s`; no Codex co-author trailer is included
 
 ### Local HPA Arms (Independence Proofs)
 
-- [ ] **HPA-01**: CPU arm: a synthetic CPU load drives a 1→2 replica transition in local k3s; queue-depth and synthetic-KV metrics remain below their configured thresholds throughout the run, documented in the captured artifact
-- [ ] **HPA-02**: Queue-depth arm: synthetic queue depth drives a 1→2 replica transition; CPU utilization and synthetic-KV metrics remain below their configured thresholds throughout the run
-- [ ] **HPA-03**: Synthetic-KV arm: synthetic KV-cache-pressure metric drives a 1→2 replica transition; CPU and queue metrics remain below their configured thresholds throughout the run
-- [ ] **HPA-04**: Each local arm run produces a timestamped artifact bundle containing: raw metric samples, HPA event log, replica count timeline, and a provenance label identifying the signal type
-- [ ] **HPA-05**: The synthetic-KV artifact is labeled `provenance=local-synthetic`; the analyzer rejects any artifact bundle in which a KV metric is labeled `provenance=real-gpu` without a corresponding canary run
-- [ ] **HPA-06**: Each local arm independence proof declares the non-target signal maxima and asserts they stayed below margin; the analyzer verifies these values against the captured samples
+- [x] **HPA-01**: CPU arm: a synthetic CPU load drives a 1→2 replica transition in local k3s; queue-depth and synthetic-KV metrics remain below their configured thresholds throughout the run, documented in the captured artifact
+- [x] **HPA-02**: Queue-depth arm: synthetic queue depth drives a 1→2 replica transition; CPU utilization and synthetic-KV metrics remain below their configured thresholds throughout the run
+- [x] **HPA-03**: Synthetic-KV arm: synthetic KV-cache-pressure metric drives a 1→2 replica transition; CPU and queue metrics remain below their configured thresholds throughout the run
+- [x] **HPA-04**: Each local arm run produces a timestamped artifact bundle containing: raw metric samples, HPA event log, replica count timeline, and a provenance label identifying the signal type
+- [x] **HPA-05**: The synthetic-KV artifact is labeled `provenance=local-synthetic`; the analyzer rejects any artifact bundle in which a KV metric is labeled `provenance=real-gpu` without a corresponding canary run
+- [x] **HPA-06**: Each local arm independence proof declares the non-target signal maxima and asserts they stayed below margin; the analyzer verifies these values against the captured samples
 
 ### Integrity & Evidence Chain
 
-- [ ] **INT-01**: Every run produces a `SHA256SUMS` file covering all artifacts and a `ROOT-HASH.txt` derived from it; both are included in the integrity bundle
-- [ ] **INT-02**: The integrity bundle is anchored in a signed Git commit (`git commit -s`) on `feat/vast-sku-report-poc` immediately after the run completes
-- [ ] **INT-03**: The analyzer rejects any artifact bundle with: missing files, mixed or absent provenance labels, out-of-window timestamps, non-monotonic event ordering, checksum mismatch, or a root hash that does not match the external anchor
-- [ ] **INT-04**: Root hash is copied to the independent guard journal as a second external anchor within the same run lifecycle
-- [ ] **INT-05**: Artifact timestamps are validated to fall within the declared run window; artifacts created outside the window are rejected, not warned
+- [x] **INT-01**: Every run produces a `SHA256SUMS` file covering all artifacts and a `ROOT-HASH.txt` derived from it; both are included in the integrity bundle
+- [x] **INT-02**: The integrity bundle is anchored in a signed Git commit (`git commit -s`) on `feat/vast-sku-report-poc` immediately after the run completes
+- [x] **INT-03**: The analyzer rejects any artifact bundle with: missing files, mixed or absent provenance labels, out-of-window timestamps, non-monotonic event ordering, checksum mismatch, or a root hash that does not match the external anchor
+- [x] **INT-04**: Root hash is copied to the independent guard journal as a second external anchor within the same run lifecycle
+- [x] **INT-05**: Artifact timestamps are validated to fall within the declared run window; artifacts created outside the window are rejected, not warned
 
 ### Real GPU Metric-Path Canary (Milestone 2)
 
@@ -99,8 +99,8 @@
 
 - [x] **ERR-01**: All experiment controller state transitions are logged to the journal with ISO-8601 timestamps and structured key-value fields; no unstructured log lines on the critical path
 - [x] **ERR-02**: Any exception that causes the controller to halt produces a `HALT` journal event with the exception class, message, and traceback hash before process exit
-- [ ] **ERR-03**: Budget ledger write failures are fatal and produce a `BUDGET_WRITE_FAIL` halt event; the controller never continues past a failed budget write
-- [ ] **ERR-04**: Guard heartbeat failures are logged with timestamp and retry count; the guard treats three consecutive missed heartbeats as controller loss
+- [x] **ERR-03**: Budget ledger write failures are fatal and produce a `BUDGET_WRITE_FAIL` halt event; the controller never continues past a failed budget write
+- [x] **ERR-04**: Guard heartbeat failures are logged with timestamp and retry count; the guard treats three consecutive missed heartbeats as controller loss
 - [ ] **ERR-05**: Analyzer run produces a machine-readable verdict file (`verdict.json`) in addition to human-readable output; deck generator consumes `verdict.json`, not log output
 
 ## v2 Requirements
@@ -140,41 +140,41 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BUDG-01 | Phase 1 | Pending |
-| BUDG-02 | Phase 1 | Pending |
-| BUDG-03 | Phase 1 | Pending |
-| BUDG-04 | Phase 1 | Pending |
-| BUDG-05 | Phase 1 | Pending |
-| GUARD-01 | Phase 1 | Pending |
-| GUARD-02 | Phase 1 | Pending |
-| GUARD-03 | Phase 1 | Pending |
-| GUARD-04 | Phase 1 | Pending |
-| GUARD-05 | Phase 1 | Pending |
+| BUDG-01 | Phase 1 | Complete |
+| BUDG-02 | Phase 1 | Complete |
+| BUDG-03 | Phase 1 | Complete |
+| BUDG-04 | Phase 1 | Complete |
+| BUDG-05 | Phase 1 | Complete |
+| GUARD-01 | Phase 1 | Complete |
+| GUARD-02 | Phase 1 | Complete |
+| GUARD-03 | Phase 1 | Complete |
+| GUARD-04 | Phase 1 | Complete |
+| GUARD-05 | Phase 1 | Complete |
 | CTRL-01 | Phase 1 | Complete |
 | CTRL-02 | Phase 1 | Complete |
-| CTRL-03 | Phase 1 | Pending |
-| CTRL-04 | Phase 1 | Pending |
-| CTRL-05 | Phase 1 | Pending |
-| CTRL-06 | Phase 1 | Pending |
-| SEC-01 | Phase 1 | Pending |
-| SEC-02 | Phase 1 | Pending |
-| SEC-03 | Phase 1 | Pending |
-| SEC-04 | Phase 1 | Pending |
-| HPA-01 | Phase 1 | Pending |
-| HPA-02 | Phase 1 | Pending |
-| HPA-03 | Phase 1 | Pending |
-| HPA-04 | Phase 1 | Pending |
-| HPA-05 | Phase 1 | Pending |
-| HPA-06 | Phase 1 | Pending |
-| INT-01 | Phase 1 | Pending |
-| INT-02 | Phase 1 | Pending |
-| INT-03 | Phase 1 | Pending |
-| INT-04 | Phase 1 | Pending |
-| INT-05 | Phase 1 | Pending |
+| CTRL-03 | Phase 1 | Complete |
+| CTRL-04 | Phase 1 | Complete |
+| CTRL-05 | Phase 1 | Complete |
+| CTRL-06 | Phase 1 | Complete |
+| SEC-01 | Phase 1 | Complete |
+| SEC-02 | Phase 1 | Complete |
+| SEC-03 | Phase 1 | Complete |
+| SEC-04 | Phase 1 | Complete |
+| HPA-01 | Phase 1 | Complete |
+| HPA-02 | Phase 1 | Complete |
+| HPA-03 | Phase 1 | Complete |
+| HPA-04 | Phase 1 | Complete |
+| HPA-05 | Phase 1 | Complete |
+| HPA-06 | Phase 1 | Complete |
+| INT-01 | Phase 1 | Complete |
+| INT-02 | Phase 1 | Complete |
+| INT-03 | Phase 1 | Complete |
+| INT-04 | Phase 1 | Complete |
+| INT-05 | Phase 1 | Complete |
 | ERR-01 | Phase 1 | Complete |
 | ERR-02 | Phase 1 | Complete |
-| ERR-03 | Phase 1 | Pending |
-| ERR-04 | Phase 1 | Pending |
+| ERR-03 | Phase 1 | Complete |
+| ERR-04 | Phase 1 | Complete |
 | GPU-01 | Phase 2 | Pending |
 | GPU-02 | Phase 2 | Pending |
 | GPU-03 | Phase 2 | Pending |
