@@ -102,6 +102,19 @@ def test_healthy_prearmed_guard_stays_awaiting_when_no_exact_instance_exists(tmp
     assert receipt.instance_id is None
 
 
+def test_prearmed_backstop_confirms_label_absence_at_its_deadline(tmp_path) -> None:
+    provider = FakeProvider()
+    provider.instance = None
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(minutes=2), require_root_owner=False)
+    deadline = NOW + timedelta(minutes=10)
+    worker.arm(None, LABEL, NONCE, deadline, now=NOW)
+
+    receipt = worker.tick(NONCE, now=deadline)
+
+    assert receipt.status == "ABSENT_OBSERVED"
+    assert provider.destroy_calls == []
+
+
 def test_prearmed_bound_target_can_later_observe_absence_and_disarm(tmp_path) -> None:
     provider = FakeProvider()
     worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
@@ -139,3 +152,79 @@ def test_reopened_disarmed_guard_stays_disarmed(tmp_path) -> None:
     reopened = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
 
     assert reopened.status(NONCE).status == "DISARMED"
+
+
+def test_teardown_error_reconciles_and_retries_only_the_exact_owned_target(tmp_path) -> None:
+    class TransientDestroyProvider(FakeProvider):
+        def destroy_exact(self, instance_id: int, expected_label: str) -> None:
+            self.destroy_calls.append((instance_id, expected_label))
+            if len(self.destroy_calls) == 1:
+                raise TimeoutError("provider response lost after request")
+            assert self.instance == GuardedInstance(INSTANCE_ID, LABEL)
+            self.instance = None
+
+    provider = TransientDestroyProvider()
+    worker = GuardWorker(
+        tmp_path,
+        provider,
+        heartbeat_timeout=timedelta(seconds=1),
+        post_deadline_window=timedelta(seconds=30),
+        require_root_owner=False,
+    )
+    worker.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(seconds=10), now=NOW)
+
+    first = worker.tick(NONCE, now=NOW + timedelta(seconds=11))
+    second = worker.tick(NONCE, now=NOW + timedelta(seconds=12))
+
+    assert first.status == "TEARDOWN_ERROR"
+    assert second.status == "TEARDOWN_CONFIRMED"
+    assert provider.destroy_calls == [(INSTANCE_ID, LABEL), (INSTANCE_ID, LABEL)]
+
+
+def test_destroy_success_requires_provider_confirmed_absence_before_terminal_receipt(tmp_path) -> None:
+    class DelayedAbsenceProvider(FakeProvider):
+        def destroy_exact(self, instance_id: int, expected_label: str) -> None:
+            self.destroy_calls.append((instance_id, expected_label))
+            # The provider accepted the request but its read model is stale.
+            if len(self.destroy_calls) == 2:
+                self.instance = None
+
+    provider = DelayedAbsenceProvider()
+    worker = GuardWorker(
+        tmp_path,
+        provider,
+        heartbeat_timeout=timedelta(seconds=1),
+        post_deadline_window=timedelta(seconds=30),
+        require_root_owner=False,
+    )
+    worker.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(seconds=10), now=NOW)
+
+    first = worker.tick(NONCE, now=NOW + timedelta(seconds=11))
+    second = worker.tick(NONCE, now=NOW + timedelta(seconds=12))
+
+    assert first.status == "TEARDOWN_ERROR"
+    assert second.status == "TEARDOWN_CONFIRMED"
+    assert provider.destroy_calls == [(INSTANCE_ID, LABEL), (INSTANCE_ID, LABEL)]
+
+
+def test_no_destroy_is_issued_after_bounded_post_deadline_window(tmp_path) -> None:
+    class NeverAbsentProvider(FakeProvider):
+        def destroy_exact(self, instance_id: int, expected_label: str) -> None:
+            self.destroy_calls.append((instance_id, expected_label))
+
+    provider = NeverAbsentProvider()
+    worker = GuardWorker(
+        tmp_path,
+        provider,
+        heartbeat_timeout=timedelta(seconds=1),
+        post_deadline_window=timedelta(seconds=30),
+        require_root_owner=False,
+    )
+    deadline = NOW + timedelta(seconds=10)
+    worker.arm(INSTANCE_ID, LABEL, NONCE, deadline, now=NOW)
+
+    worker.tick(NONCE, now=deadline)
+    receipt = worker.tick(NONCE, now=deadline + timedelta(seconds=31))
+
+    assert receipt.status == "TEARDOWN_UNCONFIRMED"
+    assert provider.destroy_calls == [(INSTANCE_ID, LABEL)]
