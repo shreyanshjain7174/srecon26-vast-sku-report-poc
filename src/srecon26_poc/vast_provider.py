@@ -235,6 +235,13 @@ class VastCliProvider:
             response = self._run_json(["create", "instance", str(contract.offer_id), *launch.create_args(label=contract.label)])
         except VastProviderError as error:
             raise AmbiguousCreate("create outcome is ambiguous and must be reconciled by label") from error
+        # Vast CLI 1.7/1.8 commonly acknowledges a successful create as
+        # {"success": true, "new_contract": <id>} without returning the label
+        # or frozen hardware contract.  Treat that as acknowledged-but-not-yet-
+        # observable and reconcile only through the unique nonce-bound label;
+        # never fabricate an InstanceContract from the numeric acknowledgement.
+        if isinstance(response, Mapping) and response.get("success") is True and response.get("new_contract") is not None:
+            raise AmbiguousCreate("create acknowledged; reconcile the nonce-bound label")
         records = self._records(response)
         if len(records) != 1:
             raise AmbiguousCreate("create outcome is ambiguous and must be reconciled by label")

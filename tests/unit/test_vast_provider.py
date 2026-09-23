@@ -10,6 +10,7 @@ import pytest
 
 from srecon26_poc.contracts import OfferContract
 from srecon26_poc.provider import AccountSnapshot
+from srecon26_poc.provider import AmbiguousCreate
 from srecon26_poc.vast_provider import (
     OFFICIAL_KVM_IMAGE,
     OFFICIAL_UBUNTU_2204_TEMPLATE_HASH,
@@ -124,6 +125,14 @@ def test_create_response_may_be_a_single_json_record() -> None:
     contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
 
     assert provider.create_once(contract, "run-id", VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE)).instance_id == 77
+
+
+def test_create_acknowledgement_requires_label_reconciliation() -> None:
+    provider = VastCliProvider("fixture", runner=lambda _args, _timeout: '{"success": true, "new_contract": 77}')
+    contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
+
+    with pytest.raises(AmbiguousCreate, match="reconcile"):
+        provider.create_once(contract, "run-id", VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE))
 
 
 def test_create_requires_explicit_frozen_kvm_launch_contract_and_exact_arguments() -> None:
