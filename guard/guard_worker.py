@@ -460,15 +460,18 @@ def _main() -> int:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--secret-file", type=Path, required=True)
     parser.add_argument("--vast-bin", default="vastai")
+    parser.add_argument("--heartbeat-timeout-seconds", type=int, default=120)
     parser.add_argument("--nonce")
     parser.add_argument("--label")
     parser.add_argument("--instance-id", type=int)
     parser.add_argument("--hard-deadline")
     parser.add_argument("--root-hash")
     args = parser.parse_args()
+    if not 1 <= args.heartbeat_timeout_seconds <= 600:
+        parser.error("--heartbeat-timeout-seconds must be between 1 and 600")
     now = datetime.now(UTC)
     provider = VastCliGuardProvider(args.secret_file, vast_bin=args.vast_bin)
-    worker = GuardWorker(args.root, provider)
+    worker = GuardWorker(args.root, provider, heartbeat_timeout=timedelta(seconds=args.heartbeat_timeout_seconds))
     if args.command == "preflight":
         payload: object = worker.preflight()
     else:

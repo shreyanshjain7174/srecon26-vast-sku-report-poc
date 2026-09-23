@@ -1,0 +1,113 @@
+name: Credential-free remote guard rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      nonce:
+        description: "New 8-128 character rehearsal nonce"
+        required: true
+        type: string
+      heartbeat_timeout_seconds:
+        description: "Short rehearsal timeout, 1-30 seconds"
+        required: false
+        default: "2"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      INPUT_NONCE: ${{ inputs.nonce }}
+      INPUT_HEARTBEAT_TIMEOUT: ${{ inputs.heartbeat_timeout_seconds }}
+      REHEARSAL_DIR: /tmp/srecon26-remote-guard-rehearsal
+      PYTHONPATH: .
+    steps:
+      - name: Checkout pinned guard source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Prepare label-only fake Vast CLI and root-owned guard state
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$INPUT_HEARTBEAT_TIMEOUT" =~ ^[0-9]+$ ]]
+          (( INPUT_HEARTBEAT_TIMEOUT >= 1 && INPUT_HEARTBEAT_TIMEOUT <= 30 ))
+          sudo install -d -m 700 "$REHEARSAL_DIR/guard" "$REHEARSAL_DIR/fake-bin" "$REHEARSAL_DIR/artifact"
+          sudo install -m 600 /dev/null "$REHEARSAL_DIR/fake-provider-credential"
+          printf '%s' 'rehearsal-not-a-secret' | sudo tee "$REHEARSAL_DIR/fake-provider-credential" >/dev/null
+          sudo chmod 600 "$REHEARSAL_DIR/fake-provider-credential"
+          sudo chmod 755 guard/fake_vastai_cli.py
+          sudo ln -s "$GITHUB_WORKSPACE/guard/fake_vastai_cli.py" "$REHEARSAL_DIR/fake-bin/vastai"
+          label="rehearsal-${GITHUB_RUN_ID}--nonce-${INPUT_NONCE}"
+          sudo python3 - "$REHEARSAL_DIR/fake-bin/state.json" "$label" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          Path(sys.argv[1]).write_text(json.dumps({"instance": {"id": 417, "label": sys.argv[2]}}) + "\n", encoding="utf-8")
+          PY
+
+      - name: Arm, stop heartbeats, and prove one exact fake destroy
+        shell: bash
+        run: |
+          set -euo pipefail
+          label="rehearsal-${GITHUB_RUN_ID}--nonce-${INPUT_NONCE}"
+          deadline="$(date -u -d '+5 minutes' '+%Y-%m-%dT%H:%M:%SZ')"
+          worker=(sudo python3 guard/guard_worker.py --root "$REHEARSAL_DIR/guard" --secret-file "$REHEARSAL_DIR/fake-provider-credential" --vast-bin "$REHEARSAL_DIR/fake-bin/vastai" --heartbeat-timeout-seconds "$INPUT_HEARTBEAT_TIMEOUT" --nonce "$INPUT_NONCE")
+          "${worker[@]}" arm --label "$label" --instance-id 417 --hard-deadline "$deadline" > "$REHEARSAL_DIR/artifact/arm.json"
+          "${worker[@]}" heartbeat > "$REHEARSAL_DIR/artifact/heartbeat.json"
+          sleep "$((INPUT_HEARTBEAT_TIMEOUT + 1))"
+          "${worker[@]}" tick > "$REHEARSAL_DIR/artifact/first-tick.json"
+          before_second="$(wc -l < "$REHEARSAL_DIR/fake-bin/calls.ndjson")"
+          "${worker[@]}" tick > "$REHEARSAL_DIR/artifact/second-tick.json"
+          after_second="$(wc -l < "$REHEARSAL_DIR/fake-bin/calls.ndjson")"
+          sudo python3 - "$REHEARSAL_DIR/artifact" "$REHEARSAL_DIR/fake-bin" "$label" "$before_second" "$after_second" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          artifact = Path(sys.argv[1])
+          fake_bin = Path(sys.argv[2])
+          label = sys.argv[3]
+          before_second = int(sys.argv[4])
+          after_second = int(sys.argv[5])
+          calls = [json.loads(line) for line in (fake_bin / "calls.ndjson").read_text(encoding="utf-8").splitlines()]
+          destroys = [call for call in calls if call["operation"] == "destroy"]
+          first = json.loads((artifact / "first-tick.json").read_text(encoding="utf-8"))
+          second = json.loads((artifact / "second-tick.json").read_text(encoding="utf-8"))
+          state = json.loads((fake_bin / "state.json").read_text(encoding="utf-8"))
+          assert destroys == [{"instance_id": 417, "label": label, "operation": "destroy"}]
+          assert first["status"] == second["status"] == "TEARDOWN_CONFIRMED"
+          assert first["root_hash"] == second["root_hash"]
+          assert before_second == after_second
+          assert state["instance"] is None
+          (artifact / "rehearsal-receipt.json").write_text(json.dumps({
+              "mode": "credential_free_fake_provider_rehearsal",
+              "real_provider_calls": 0,
+              "fake_destroy_count": len(destroys),
+              "exact_instance_id": 417,
+              "exact_label": label,
+              "idempotent_second_tick": before_second == after_second,
+              "guard_status": second["status"],
+              "guard_root_hash": second["root_hash"],
+          }, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+      - name: Make evidence readable for artifact upload
+        if: always()
+        shell: bash
+        run: sudo chmod -R a+rX "$REHEARSAL_DIR" || true
+
+      - name: Upload remote rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: remote-guard-rehearsal-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30
+          path: /tmp/srecon26-remote-guard-rehearsal

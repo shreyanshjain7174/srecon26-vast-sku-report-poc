@@ -56,3 +56,20 @@ from the GitHub run identity and nonce, and records all three through the real
 guard worker's hash-chained journal. It takes no provider secret, creates no
 provider target, and never ticks or claims a live teardown. Download its
 `phase1-anchor-<run-id>` artifact for the receipt and guard journal.
+
+## Credential-free remote teardown rehearsal
+
+`Credential-free remote guard rehearsal` is a manual GitHub-runner proof of
+the guard's runtime path with no Vast spend. Dispatch it with a new nonce and a
+short `heartbeat_timeout_seconds` value from 1 to 30 (the default is 2). The
+workflow supplies a label-only local `vastai` double, arms exact ID `417` with a
+nonce-bound label, sends one heartbeat, then deliberately stops heartbeats. It
+requires the resulting timeout tick to perform exactly one fake destroy and
+requires a second tick to make no further fake provider call.
+
+The uploaded `remote-guard-rehearsal-<run-id>` artifact contains the real guard
+journal and receipts, fake provider state, and its call log. Its credential file
+contains the literal `rehearsal-not-a-secret` only because the real CLI adapter
+enforces a root-only file; it is neither an Actions secret nor a provider
+credential. The fake CLI has no network code, so the receipt's
+`real_provider_calls: 0` is a rehearsal assertion, not a live teardown claim.

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -120,3 +123,31 @@ def test_anchor_only_workflow_is_credential_free_and_pinned() -> None:
     assert "contents: read" in workflow
     assert "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in workflow
     assert "actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08" in workflow
+
+
+def test_remote_rehearsal_workflow_is_bounded_fake_only_and_pinned() -> None:
+    workflow = Path(".github/workflows/remote-guard-rehearsal.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in workflow
+    assert "timeout-minutes: 10" in workflow
+    assert "secrets." not in workflow
+    assert "VAST_API_KEY" not in workflow
+    assert "fake_vastai_cli.py" in workflow
+    assert "--heartbeat-timeout-seconds" in workflow
+    assert "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in workflow
+    assert "actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08" in workflow
+    worker = Path("guard/guard_worker.py").read_text(encoding="utf-8")
+    assert "--heartbeat-timeout-seconds" in worker
+    assert "between 1 and 600" in worker
+
+
+def test_fake_label_only_vast_cli_records_one_exact_destroy(tmp_path: Path) -> None:
+    binary = tmp_path / "vastai"
+    binary.symlink_to(Path.cwd() / "guard/fake_vastai_cli.py")
+    state = {"instance": {"id": 417, "label": "run--nonce-nonce_12345678"}}
+    (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    result = subprocess.run([sys.executable, str(binary), "show", "instances", "--raw"], check=True, capture_output=True, text=True)
+    assert json.loads(result.stdout) == [state["instance"]]
+    subprocess.run([sys.executable, str(binary), "destroy", "instance", "417"], check=True)
+    calls = [json.loads(line) for line in (tmp_path / "calls.ndjson").read_text(encoding="utf-8").splitlines()]
+    assert calls[-1] == {"instance_id": 417, "label": "run--nonce-nonce_12345678", "operation": "destroy"}
