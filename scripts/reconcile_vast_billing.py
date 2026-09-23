@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,30 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from srecon26_poc.budget import ExposureLedger
 from srecon26_poc.vast_provider import VastCliProvider
+
+
+def _reserve_fresh_outputs(*, ledger: Path, reconciliation: Path, journal: Path, invoice: Path, absence: Path) -> None:
+    """Exclusively reserve new evidence paths without touching any input."""
+
+    inputs = {ledger.resolve(), reconciliation.resolve(), journal.resolve()}
+    outputs = (invoice.resolve(), absence.resolve())
+    if len(set(outputs)) != len(outputs) or inputs.intersection(outputs):
+        raise ValueError("reconciliation evidence outputs must be distinct from each other and every input")
+    ledger_root = ledger.parent.resolve()
+    if any(ledger_root not in path.parents for path in outputs):
+        raise ValueError("reconciliation evidence outputs must stay under the ledger directory")
+    created: list[Path] = []
+    try:
+        for path in outputs:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(descriptor)
+            created.append(path)
+    except OSError as error:
+        for path in created:
+            if path.is_file() and not path.is_symlink() and path.stat().st_size == 0:
+                path.unlink()
+        raise ValueError("reconciliation evidence outputs must be fresh, exclusively created paths") from error
 
 
 def main() -> int:
@@ -27,10 +52,19 @@ def main() -> int:
     parser.add_argument("--vast-cli", default="vastai")
     args = parser.parse_args()
 
+    ledger = ExposureLedger(args.ledger)
+    ledger.headroom()  # Fully validate ledger and every bound artifact before any evidence write.
     receipt = json.loads(args.reconciliation.read_text())
     run_id = str(receipt["run_id"])
     instance_id = int(receipt["instance_id"])
     label = str(receipt["label"])
+    _reserve_fresh_outputs(
+        ledger=args.ledger,
+        reconciliation=args.reconciliation,
+        journal=args.journal,
+        invoice=args.invoice_artifact,
+        absence=args.absence_artifact,
+    )
     provider = VastCliProvider(args.vast_cli)
     absence = provider.capture_absence_evidence(run_id=run_id, instance_id=instance_id, label=label, artifact=args.absence_artifact)
     evidence = provider.capture_invoice_charge(
@@ -57,7 +91,6 @@ def main() -> int:
             },
         }
     )
-    ledger = ExposureLedger(args.ledger)
     ledger.commit_actual(run_id, evidence.amount, proof)
     print(json.dumps({"run_id": run_id, "amount_usd": str(evidence.amount), "invoice_sha256": evidence.sha256, "headroom": str(ledger.headroom())}, sort_keys=True))
     return 0
