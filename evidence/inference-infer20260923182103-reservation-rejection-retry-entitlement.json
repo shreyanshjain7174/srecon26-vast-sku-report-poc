@@ -1,0 +1,30 @@
+{
+  "schema": "srecon26-inference-reservation-rejection-retry-entitlement/v1",
+  "run_id": "inference-infer20260923182103",
+  "label": "srecon26-inference--nonce-d27b6fd478c47bf2004c58fa",
+  "nonce": "d27b6fd478c47bf2004c58fa",
+  "journal_sha256": "f235d618103c257bff82a58b9341c60c3e08e539e88522ce2e5a45c091b6b729",
+  "terminal_limitation": "frozen offer plus billing and teardown buffer can exceed the stage reservation",
+  "provider_create_calls": 0,
+  "offer": {
+    "offer_id": 48702994,
+    "machine_id": 28666,
+    "gpu_name": "RTX 5090",
+    "dph_total": "1.3694444444444445",
+    "template_hash": "b7942f6bbc4374893ff66eb78145bbac",
+    "image_contract": "docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16"
+  },
+  "authenticated_session_request_sha256": "cfffaed9bec3970860f506e0971d170ede76b2d3ada882162715024448413536",
+  "authenticated_session_response_sha256": "97d56f1d4653d5e681a7afdba337f02712fca06c2f66cafc31a8fc1170156308",
+  "pre_anchor_root": "cf26cc84ebd86f5f2c4a21541a66ddedbb7434c6faf82910b5e91cd9db86ecfd",
+  "pre_anchor_manifest_sha256": "7ac77d80e761f2038020fbabe7131c55b6d024af24e376fb76e2090c802b6a39",
+  "pre_anchor_limitation_sha256": "ac66ef19d56dd221b3f661b7576bf8e49992cb3d77df5daca895fa16181123c7",
+  "guard_anchor_acknowledged": false,
+  "guard_anchor_limitation": "independent GitHub guard did not acknowledge the bundle anchor",
+  "provider_command": ["show", "instances", "--raw"],
+  "provider_absence_reads": [
+    {"observed_at": "2026-09-23T18:29:41Z", "matching_instances": 0, "raw": []},
+    {"observed_at": "2026-09-23T18:29:48Z", "matching_instances": 0, "raw": []},
+    {"observed_at": "2026-09-23T18:29:54Z", "matching_instances": 0, "raw": []}
+  ]
+}

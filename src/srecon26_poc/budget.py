@@ -19,7 +19,7 @@ CATEGORY_CAPS = {
     # reserved for a contract correction proven by retained live evidence.
     # This is not
     # a retry of (or prerequisite for) the KVM smoke entitlement.
-    "gpu-inference-smoke": Decimal("4.25"),
+    "gpu-inference-smoke": Decimal("4.40"),
     # One durable retry entitlement while exactly one original smoke invoice
     # remains pending.  It cannot be split across multiple retry reservations.
     "gpu-smoke-retry": Decimal("0.90"),
@@ -57,6 +57,10 @@ ALTERNATE_TEMPLATE_LIVE_FAILURE_RUN_ID = "inference-infer20260923175832"
 PRIMARY_TEMPLATE_HASH = "b7942f6bbc4374893ff66eb78145bbac"
 PRIMARY_TEMPLATE_IMAGE = "docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16"
 PRIMARY_TEMPLATE_TERMINAL_FAILURE_RUN_ID = "inference-infer20260923180850"
+INFERENCE_RESERVATION_REJECTION_RUN_ID = "inference-infer20260923182103"
+INFERENCE_RESERVATION_REJECTION_JOURNAL_SHA256 = "f235d618103c257bff82a58b9341c60c3e08e539e88522ce2e5a45c091b6b729"
+INFERENCE_RESERVATION_REJECTION_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "inference-infer20260923182103-reservation-rejection-retry-entitlement.json"
+INFERENCE_RESERVATION_REJECTION_EVIDENCE_SHA256 = "352df74268dfa9e4ca32c3c7a02a8bf92d6cd22c85d256da6646fb68ea4203b9"
 
 
 class BudgetExceeded(ValueError):
@@ -510,6 +514,96 @@ class ExposureLedger:
             and proof.get("reads") == 3
         )
 
+    def _has_pinned_reservation_rejection_retry_entitlement(self, reservations: Mapping[str, object]) -> bool:
+        entry = reservations.get(INFERENCE_RESERVATION_REJECTION_RUN_ID)
+        if (
+            not isinstance(entry, Mapping)
+            or entry.get("category") != "gpu-inference-smoke"
+            or self._decimal(entry.get("amount")) != Decimal("1.00")
+            or entry.get("actual") is not None
+            or entry.get("absence_proof") is not None
+            or entry.get("machine_id") != 28666
+            or entry.get("template_hash") != PRIMARY_TEMPLATE_HASH
+            or entry.get("image_contract") != PRIMARY_TEMPLATE_IMAGE
+        ):
+            return False
+        run_path = self.path.parent / INFERENCE_RESERVATION_REJECTION_RUN_ID
+        journal_path = run_path / "journal" / "journal.ndjson"
+        try:
+            journal_raw = journal_path.read_bytes()
+            if hashlib.sha256(journal_raw).hexdigest() != INFERENCE_RESERVATION_REJECTION_JOURNAL_SHA256:
+                return False
+            journal = RunJournal.open(journal_path.parent)
+            evidence_raw = INFERENCE_RESERVATION_REJECTION_EVIDENCE_PATH.read_bytes()
+            if hashlib.sha256(evidence_raw).hexdigest() != INFERENCE_RESERVATION_REJECTION_EVIDENCE_SHA256:
+                return False
+            evidence = json.loads(evidence_raw)
+            request_paths = list((run_path / "desktop-report").glob(".external-report-*/01-preflight-authenticated-session.request.json"))
+            response_paths = list((run_path / "desktop-report").glob(".external-report-*/01-preflight-authenticated-session.request.response.json"))
+            if len(request_paths) != 1 or len(response_paths) != 1:
+                return False
+            request_raw = request_paths[0].read_bytes()
+            response_raw = response_paths[0].read_bytes()
+            request = json.loads(request_raw)
+            response = json.loads(response_raw)
+            pre_anchor_sums = (run_path / "pre-anchor" / "SHA256SUMS").read_bytes()
+            pre_anchor_root = (run_path / "pre-anchor" / "ROOT-HASH.txt").read_text(encoding="utf-8").strip()
+            pre_anchor_manifest = (run_path / "pre-anchor" / "run-manifest.json").read_bytes()
+            pre_anchor_limitation = (run_path / "pre-anchor" / "limitation.json").read_bytes()
+        except (OSError, UnicodeError, InvalidJournal, json.JSONDecodeError, TypeError):
+            return False
+        events = journal.events()
+        terminal = [event for event in events if event.event_type == "terminal.safe"]
+        offer = [event for event in events if event.event_type == "offer.pinned"]
+        reads = evidence.get("provider_absence_reads") if isinstance(evidence, Mapping) else None
+        expected = "frozen offer plus billing and teardown buffer can exceed the stage reservation"
+        return (
+            [event.event_type for event in events]
+            == ["gates.passed", "budget.reserved", "offer.pinned", "report.adapter_ready", "guard.armed", "terminal.safe"]
+            and all(event.run_id == INFERENCE_RESERVATION_REJECTION_RUN_ID for event in events)
+            and journal.state().value == "TERMINAL"
+            and not any(event.event_type in {"provider.create_intent", "provider.create_observed"} for event in events)
+            and len(terminal) == 1
+            and terminal[0].payload.get("limitation") == expected
+            and terminal[0].payload.get("status") == "FAILED_SAFE"
+            and len(offer) == 1
+            and offer[0].payload.get("offer_id") == 48702994
+            and offer[0].payload.get("machine_id") == 28666
+            and offer[0].payload.get("dph_total") == "1.3694444444444445"
+            and evidence.get("schema") == "srecon26-inference-reservation-rejection-retry-entitlement/v1"
+            and evidence.get("run_id") == INFERENCE_RESERVATION_REJECTION_RUN_ID
+            and evidence.get("label") == "srecon26-inference--nonce-d27b6fd478c47bf2004c58fa"
+            and evidence.get("nonce") == "d27b6fd478c47bf2004c58fa"
+            and evidence.get("journal_sha256") == INFERENCE_RESERVATION_REJECTION_JOURNAL_SHA256
+            and evidence.get("terminal_limitation") == expected
+            and evidence.get("provider_create_calls") == 0
+            and evidence.get("guard_anchor_acknowledged") is False
+            and evidence.get("authenticated_session_request_sha256") == hashlib.sha256(request_raw).hexdigest()
+            and evidence.get("authenticated_session_response_sha256") == hashlib.sha256(response_raw).hexdigest()
+            and request.get("schema") == "srecon26-external-report-request/v1"
+            and request.get("operation") == "preflight-authenticated-session"
+            and request.get("run_id") == INFERENCE_RESERVATION_REJECTION_RUN_ID
+            and request.get("nonce") == evidence.get("nonce")
+            and response.get("schema") == "srecon26-external-report-response/v1"
+            and response.get("authenticated") is True
+            and all(response.get(key) == request.get(key) for key in ("operation", "request_id", "run_id", "nonce"))
+            and evidence.get("pre_anchor_root") == pre_anchor_root
+            and hashlib.sha256(pre_anchor_sums).hexdigest() == pre_anchor_root
+            and evidence.get("pre_anchor_manifest_sha256") == hashlib.sha256(pre_anchor_manifest).hexdigest()
+            and evidence.get("pre_anchor_limitation_sha256") == hashlib.sha256(pre_anchor_limitation).hexdigest()
+            and evidence.get("provider_command") == ["show", "instances", "--raw"]
+            and isinstance(reads, list)
+            and len(reads) == 3
+            and all(
+                isinstance(read, Mapping)
+                and read.get("matching_instances") == 0
+                and read.get("raw") == []
+                and isinstance(read.get("observed_at"), str)
+                and str(read.get("observed_at")).endswith("Z")
+                for read in reads
+            )
+        )
+
     def reserve(self, run_id: str, amount: Decimal, category: str, *, machine_id: int | None = None, template_hash: str | None = None, image_contract: str | None = None) -> Decimal:
         amount = self._decimal(amount)
         if amount <= 0 or category not in CATEGORY_CAPS:
@@ -550,8 +644,8 @@ class ExposureLedger:
                     raise BudgetExceeded("distinct-machine smoke requires one pending original, one settled retry, and one unused entitlement")
             if category == "gpu-inference-smoke":
                 inference_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
-                if len(inference_smokes) >= 11:
-                    raise BudgetExceeded("direct inference smoke allows at most eleven reservations")
+                if len(inference_smokes) >= 12:
+                    raise BudgetExceeded("direct inference smoke allows at most twelve reservations")
                 if len(inference_smokes) == 4 and not self._has_pinned_inference_replacement_entitlement(reservations):
                     raise BudgetExceeded("fifth inference reservation requires pinned no-create replacement evidence")
                 if len(inference_smokes) == 5 and not self._has_pinned_measurement_retry_entitlement(reservations):
@@ -577,6 +671,12 @@ class ExposureLedger:
                     or image_contract != PRIMARY_TEMPLATE_IMAGE
                 ):
                     raise BudgetExceeded("eleventh inference reservation requires settled terminal-startup failure and exact primary-template recovery")
+                if len(inference_smokes) == 11 and (
+                    not self._has_pinned_reservation_rejection_retry_entitlement(reservations)
+                    or template_hash != PRIMARY_TEMPLATE_HASH
+                    or image_contract != PRIMARY_TEMPLATE_IMAGE
+                ):
+                    raise BudgetExceeded("twelfth inference reservation requires pinned no-create reservation-rejection evidence and exact primary-template recovery")
                 if amount > Decimal("1.00"):
                     raise BudgetExceeded("direct inference smoke reservation must be no greater than 1.00")
                 if machine_id is not None and any(entry.get("machine_id") == machine_id for entry in inference_smokes):
