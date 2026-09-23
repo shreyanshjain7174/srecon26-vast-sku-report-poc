@@ -445,6 +445,18 @@ class SshRemoteWorkload:
         remote = shlex.join(["timeout", "--foreground", str(seconds), *command])
         self._stream([*self._ssh_prefix(endpoint), remote], hard_deadline=hard_deadline, heartbeat=heartbeat, log=log)
 
+    def _wait_for_ssh(self, endpoint: SshEndpoint, *, hard_deadline: datetime, heartbeat: Callable[[], None], transport: Path) -> None:
+        for attempt in range(1, 25):
+            try:
+                self._remote(endpoint, ["true"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / f"ssh-ready-{attempt:02d}.log")
+                return
+            except LiveFactoryError:
+                if attempt == 24:
+                    break
+                heartbeat()
+                time.sleep(5)
+        raise LiveFactoryError("SSH listener did not become ready within the bounded wait")
+
     @staticmethod
     def _manifest_hash(directory: Path) -> str:
         records = []
@@ -474,6 +486,7 @@ class SshRemoteWorkload:
         cleanup_needed = False
         evidence_files: tuple[Path, ...] = ()
         try:
+            self._wait_for_ssh(endpoint, hard_deadline=hard_deadline, heartbeat=heartbeat, transport=transport)
             self._remote(endpoint, ["install", "-d", "-m", "0700", root], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "mkdir.log")
             self._copy(endpoint, self.config.local_script, f"{root}/remote_host_canary.sh", recursive=False, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-script.log")
             self._copy(endpoint, self.config.local_manifest_dir, f"{root}/manifests", recursive=True, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-manifests.log")

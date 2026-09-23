@@ -224,7 +224,7 @@ class VastCliProvider:
         # endpoint can return an empty result for an otherwise visible offer-ID
         # filter.  Machine ID is stable and supported; the exact offer ID is
         # still selected and required uniquely from that machine's records.
-        records = self._records(self._run_json(["search", "offers", f"machine_id=={machine_id}", "--limit", "25"]))
+        records = self._records(self._run_json(["search", "offers", f"machine_id=={machine_id}", "--storage", "130", "--limit", "25"]))
         matches = [record for record in records if self._integer(record.get("id", record.get("offer_id")), "offer id") == offer_id]
         if len(matches) != 1:
             raise VastProviderError("current KVM offer contract is not uniquely available")
@@ -296,15 +296,17 @@ class VastCliProvider:
                 raise VastPreflightError("legacy autobill field disagrees with balance-threshold setting")
         return canonical
 
-    def read_only_preflight(self, search_query: str, *, limit: int, require_ready: bool = False) -> VastPreflight:
+    def read_only_preflight(self, search_query: str, *, limit: int, require_ready: bool = False, storage_gib: int = 5) -> VastPreflight:
         if not 1 <= limit <= 25:
             raise VastPreflightError("offer inspection limit must be between 1 and 25")
+        if not 5 <= storage_gib <= 1000:
+            raise VastPreflightError("offer storage pricing must be between 5 and 1000 GiB")
         account = self._run_json(["show", "user"])
         if not isinstance(account, Mapping):
             raise VastPreflightError("account snapshot is not an object")
         balance_threshold_enabled = self._auto_recharge_enabled(account)
         instances = self.list_instances()
-        offers = self._records(self._run_json(["search", "offers", search_query, "--limit", str(limit)]))
+        offers = self._records(self._run_json(["search", "offers", search_query, "--storage", str(storage_gib), "--limit", str(limit)]))
         summaries = tuple(
             {
                 "offer_id": self._integer(record.get("id", record.get("offer_id")), "offer id"),
