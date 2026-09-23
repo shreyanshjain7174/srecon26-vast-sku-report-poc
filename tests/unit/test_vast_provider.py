@@ -46,12 +46,14 @@ def test_account_snapshot_and_preflight_redact_secrets(fixture_cli: Path) -> Non
     snapshot = provider.read_only_preflight("external=false rentable=true verified=true", limit=5)
 
     encoded = json.dumps(snapshot.to_json(), sort_keys=True)
-    assert snapshot.autobill_enabled is False
+    assert snapshot.balance_threshold_enabled is False
     assert snapshot.instance_count == 0
     assert snapshot.offer_count == 1
+    assert set(snapshot.to_json()) == {"balance_threshold_enabled", "instance_count", "offer_count", "offers"}
     assert "api_key" not in encoded
     assert "must-not-escape-fixture" not in encoded
     assert "operator@example.test" not in encoded
+    assert "must-not-escape-user-metadata" not in encoded
 
 
 def test_offer_contract_is_normalized_from_current_search_result(fixture_cli: Path) -> None:
@@ -63,10 +65,20 @@ def test_offer_contract_is_normalized_from_current_search_result(fixture_cli: Pa
     assert str(contract.dph_total) == "0.30"
 
 
-def test_preflight_rejects_enabled_or_unknown_autobilling(fixture_cli: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "account_payload",
+    [
+        {},
+        {"balance_threshold_enabled": True},
+        {"balance_threshold_enabled": False, "autobill": True},
+    ],
+)
+def test_preflight_rejects_enabled_unknown_or_disagreeing_autorecharge(
+    fixture_cli: Path, tmp_path: Path, account_payload: dict[str, object]
+) -> None:
     provider = VastCliProvider(fixture_cli, timeout_seconds=1)
     account = tmp_path / "account.json"
-    account.write_text('{"autobill": true}', encoding="utf-8")
+    account.write_text(json.dumps(account_payload), encoding="utf-8")
     original = provider._run_json
 
     def account_with_autobill(args: list[str]) -> object:
@@ -75,7 +87,21 @@ def test_preflight_rejects_enabled_or_unknown_autobilling(fixture_cli: Path, tmp
         return original(args)
 
     provider._run_json = account_with_autobill  # type: ignore[method-assign]
-    with pytest.raises(VastPreflightError, match="autobilling"):
+    with pytest.raises(VastPreflightError, match="auto-recharge|disagrees"):
+        provider.read_only_preflight("rentable=true", limit=1, require_ready=True)
+
+
+def test_legacy_disabled_autobill_cannot_authorize_preflight(fixture_cli: Path) -> None:
+    provider = VastCliProvider(fixture_cli, timeout_seconds=1)
+    original = provider._run_json
+
+    def legacy_only_account(args: list[str]) -> object:
+        if args == ["show", "user"]:
+            return {"autobill": False}
+        return original(args)
+
+    provider._run_json = legacy_only_account  # type: ignore[method-assign]
+    with pytest.raises(VastPreflightError, match="auto-recharge"):
         provider.read_only_preflight("rentable=true", limit=1, require_ready=True)
 
 

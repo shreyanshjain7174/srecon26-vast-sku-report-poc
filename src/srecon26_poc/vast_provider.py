@@ -25,14 +25,14 @@ Runner = Callable[[list[str], int], str]
 
 @dataclass(frozen=True, slots=True)
 class VastPreflight:
-    autobill_enabled: bool | None
+    balance_threshold_enabled: bool | None
     instance_count: int
     offer_count: int
     offers: tuple[Mapping[str, object], ...]
 
     def to_json(self) -> dict[str, object]:
         return {
-            "autobill_enabled": self.autobill_enabled,
+            "balance_threshold_enabled": self.balance_threshold_enabled,
             "instance_count": self.instance_count,
             "offer_count": self.offer_count,
             "offers": [dict(item) for item in self.offers],
@@ -190,14 +190,30 @@ class VastCliProvider:
             raise VastProviderError("refusing to destroy an instance with a mismatched label")
         self._run_json(["destroy", "instance", str(instance_id)])
 
+    @staticmethod
+    def _auto_recharge_enabled(account: Mapping[str, object]) -> bool | None:
+        """Normalize only Vast's current balance-threshold auto-recharge control.
+
+        Older CLI/user payload fields are neither authoritative nor sufficient
+        to permit a paid run.  A boolean disagreement is unsafe because it
+        makes the account's recharge behavior ambiguous.
+        """
+        canonical = account.get("balance_threshold_enabled")
+        if not isinstance(canonical, bool):
+            return None
+        for legacy_name in ("autobill_enabled", "autobill", "auto_billing"):
+            legacy = account.get(legacy_name)
+            if isinstance(legacy, bool) and legacy != canonical:
+                raise VastPreflightError("legacy autobill field disagrees with balance-threshold setting")
+        return canonical
+
     def read_only_preflight(self, search_query: str, *, limit: int, require_ready: bool = False) -> VastPreflight:
         if not 1 <= limit <= 25:
             raise VastPreflightError("offer inspection limit must be between 1 and 25")
         account = self._run_json(["show", "user"])
         if not isinstance(account, Mapping):
             raise VastPreflightError("account snapshot is not an object")
-        autobill_value = account.get("autobill_enabled", account.get("autobill", account.get("auto_billing")))
-        autobill_enabled = autobill_value if isinstance(autobill_value, bool) else None
+        balance_threshold_enabled = self._auto_recharge_enabled(account)
         instances = self.list_instances()
         offers = self._records(self._run_json(["search", "offers", search_query, "--limit", str(limit)]))
         summaries = tuple(
@@ -215,9 +231,9 @@ class VastCliProvider:
             }
             for record in offers
         )
-        result = VastPreflight(autobill_enabled, len(instances), len(summaries), summaries)
-        if require_ready and result.autobill_enabled is not False:
-            raise VastPreflightError("autobilling must be confirmed disabled")
+        result = VastPreflight(balance_threshold_enabled, len(instances), len(summaries), summaries)
+        if require_ready and result.balance_threshold_enabled is not False:
+            raise VastPreflightError("auto-recharge must be explicitly disabled")
         if require_ready and result.instance_count != 0:
             raise VastPreflightError("provider inventory must be empty before a new run")
         return result

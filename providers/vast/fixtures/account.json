@@ -1,6 +1,8 @@
 {
   "id": 7,
-  "autobill": false,
+  "balance_threshold_enabled": false,
+  "auto_billing": null,
   "api_key": "must-not-escape-fixture",
-  "email": "operator@example.test"
+  "email": "operator@example.test",
+  "billing_address": "must-not-escape-user-metadata"
 }
