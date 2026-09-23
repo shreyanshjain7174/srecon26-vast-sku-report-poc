@@ -32,7 +32,6 @@ from .live_dispatch import (
     LiveCanaryDispatcher,
     LiveDispatchError,
     LiveEvidence,
-    ProviderFaultEvidence,
     WorkloadContract,
 )
 from .reporting import ReportGate
@@ -295,22 +294,30 @@ class SshEndpoint:
 class VastSshResolver:
     """Resolve SSH only from the exact created instance's current record."""
 
-    def __init__(self, cli_path: Path | str, *, runner: CommandRunner | None = None) -> None:
+    def __init__(self, cli_path: Path | str, *, runner: CommandRunner | None = None, attempts: int = 24, interval_seconds: float = 5.0, sleep: Callable[[float], None] = time.sleep) -> None:
+        if not 1 <= attempts <= 30 or not 0 <= interval_seconds <= 15:
+            raise ValueError("SSH resolution retry bounds are invalid")
         self.cli_path, self.runner = str(cli_path), runner or _run
+        self.attempts, self.interval_seconds, self.sleep = attempts, interval_seconds, sleep
 
     def resolve(self, instance: InstanceContract) -> SshEndpoint:
-        raw = _json(self.runner([self.cli_path, "--raw", "--no-color", "show", "instance", str(instance.instance_id)], timeout=20), context="Vast instance lookup")
-        if not isinstance(raw, Mapping):
-            raise LiveFactoryError("exact instance SSH lookup did not return an object")
-        current_id = _integer(raw.get("id", raw.get("instance_id")), "instance id")
-        label = raw.get("label")
-        if current_id != instance.instance_id or label != instance.label:
-            raise LiveFactoryError("exact instance SSH lookup changed ID or nonce-bound label")
-        host = raw.get("ssh_host", raw.get("public_ipaddr", raw.get("public_ip", raw.get("ipaddr"))))
-        port = raw.get("ssh_port", raw.get("port"))
-        if not isinstance(host, str) or not _safe_host(host):
-            raise LiveFactoryError("exact instance has no safe SSH host")
-        return SshEndpoint(host, _integer(port, "SSH port", minimum=1, maximum=65535))
+        for attempt in range(self.attempts):
+            try:
+                raw = _json(self.runner([self.cli_path, "--raw", "--no-color", "show", "instance", str(instance.instance_id)], timeout=20), context="Vast instance lookup")
+            except LiveFactoryError:
+                raw = None
+            if isinstance(raw, Mapping):
+                current_id = _integer(raw.get("id", raw.get("instance_id")), "instance id")
+                label = raw.get("label")
+                if current_id != instance.instance_id or label != instance.label:
+                    raise LiveFactoryError("exact instance SSH lookup changed ID or nonce-bound label")
+                host = raw.get("ssh_host", raw.get("public_ipaddr", raw.get("public_ip", raw.get("ipaddr"))))
+                port = raw.get("ssh_port", raw.get("port"))
+                if isinstance(host, str) and _safe_host(host) and port is not None:
+                    return SshEndpoint(host, _integer(port, "SSH port", minimum=1, maximum=65535))
+            if attempt + 1 < self.attempts:
+                self.sleep(self.interval_seconds)
+        raise LiveFactoryError("exact instance did not publish a safe SSH endpoint within the bounded wait")
 
 
 def _integer(value: object, field: str, *, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -374,7 +381,7 @@ class SshRemoteWorkload:
         self.resolver, self.config, self.popen = resolver, config, popen
 
     def _ssh_prefix(self, endpoint: SshEndpoint) -> list[str]:
-        return ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={self.config.known_hosts_file}", "-o", "ConnectTimeout=20", "-i", str(self.config.identity_file), "-p", str(endpoint.port), endpoint.destination(self.config.user)]
+        return ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={self.config.known_hosts_file}", "-o", "ConnectTimeout=20", "-i", str(self.config.identity_file), "-p", str(endpoint.port), endpoint.destination(self.config.user)]
 
     def _deadline_seconds(self, hard_deadline: datetime) -> int:
         # Never let workload work consume the existing report+teardown margin.
@@ -420,13 +427,13 @@ class SshRemoteWorkload:
     def _manifest_hash(directory: Path) -> str:
         records = []
         for path in sorted(directory.glob("*.yaml")):
-            records.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
+            records.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  ./{path.name}")
         if not records:
             raise LiveFactoryError("manifest bundle has no YAML files")
         return hashlib.sha256(("\n".join(records) + "\n").encode()).hexdigest()
 
     def _copy(self, endpoint: SshEndpoint, local: Path, remote: str, *, recursive: bool, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> None:
-        arguments = ["scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={self.config.known_hosts_file}", "-i", str(self.config.identity_file), "-P", str(endpoint.port)]
+        arguments = ["scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={self.config.known_hosts_file}", "-i", str(self.config.identity_file), "-P", str(endpoint.port)]
         if recursive:
             arguments.append("-r")
         arguments.extend((str(local), f"{endpoint.destination(self.config.user)}:{remote}"))
@@ -434,7 +441,7 @@ class SshRemoteWorkload:
 
     def _fetch(self, endpoint: SshEndpoint, remote: str, local: Path, *, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> None:
         local.parent.mkdir(parents=True, exist_ok=True)
-        arguments = ["scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={self.config.known_hosts_file}", "-i", str(self.config.identity_file), "-P", str(endpoint.port), "-r", f"{endpoint.destination(self.config.user)}:{remote}", str(local)]
+        arguments = ["scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={self.config.known_hosts_file}", "-i", str(self.config.identity_file), "-P", str(endpoint.port), "-r", f"{endpoint.destination(self.config.user)}:{remote}", str(local)]
         self._stream(arguments, hard_deadline=hard_deadline, heartbeat=heartbeat, log=log)
 
     def run(self, *, stage: str, workload: WorkloadContract, instance: InstanceContract, run_directory: Path, hard_deadline: datetime, heartbeat: Callable[[], None]) -> LiveEvidence:
@@ -455,6 +462,7 @@ class SshRemoteWorkload:
                 f"CANARY_MANIFEST_SHA256={self._manifest_hash(self.config.local_manifest_dir)}",
                 f"CANARY_VLLM_IMAGE=docker.io/vllm/vllm-openai@{workload.vllm_image_digest}",
                 f"CANARY_MODEL={workload.model_id}", f"CANARY_MODEL_REVISION={workload.model_revision}",
+                f"CANARY_HARD_DEADLINE={_stamp(hard_deadline)}",
                 "CANARY_WAIT_SECONDS=600", "CANARY_COMMAND_TIMEOUT_SECONDS=120",
             ]
             script = f"{root}/remote_host_canary.sh"
@@ -472,10 +480,13 @@ class SshRemoteWorkload:
             evidence_files = tuple(path for path in local_evidence.rglob("*") if path.is_file()) + tuple(path for path in transport.rglob("*") if path.is_file())
             return self._evidence(local_evidence, transport, workload, evidence_files)
         except Exception as error:
-            fault = ProviderFaultEvidence("host", str(error), transport / "failure.txt")
-            fault.artifact.parent.mkdir(parents=True, exist_ok=True)
-            fault.artifact.write_text(str(error) + "\n", encoding="utf-8")
-            return LiveEvidence(None, None, None, provider_fault=fault, probe_outcome=ProbeOutcome.INCONCLUSIVE, evidence_files=tuple(path for path in transport.rglob("*") if path.is_file()))
+            # SSH readiness, controller networking, local staging, model pulls,
+            # and Kubernetes bootstrap errors are unresolved diagnoses.  They
+            # are never enough to justify clicking the provider report button.
+            failure = transport / "failure.txt"
+            failure.parent.mkdir(parents=True, exist_ok=True)
+            failure.write_text(str(error) + "\n", encoding="utf-8")
+            return LiveEvidence(None, None, None, provider_fault=None, probe_outcome=ProbeOutcome.INCONCLUSIVE, evidence_files=tuple(path for path in transport.rglob("*") if path.is_file()))
         finally:
             if cleanup_needed:
                 try:
@@ -508,7 +519,7 @@ class SshRemoteWorkload:
         metric = MetricSample(Decimal("1"), now)
         snapshot = CanarySnapshot(
             1 if "nvidia.com/gpu" in text("node-describe.txt") else 0,
-            "readyReplicas: 1" in text("device-plugin.txt"),
+            "numberReady: 1" in text("device-plugin.txt"),
             '"phase": "Running"' in pods and '"ready": true' in pods,
             1 if '"nvidia.com/gpu": "1"' in pods or '"nvidia.com/gpu": 1' in pods else 0,
             status("collection-status.json") and '"activeTargets"' in text("prometheus-targets.json"),
@@ -581,7 +592,7 @@ def create_dispatcher() -> LiveCanaryDispatcher:
         local_manifest_dir=root / "infra/k3s", heartbeat_seconds=github.heartbeat_seconds,
     )
     return LiveCanaryDispatcher(
-        provider=VastCliProvider(cli), guard=DynamicGitHubGuard(github),
+        provider=VastCliProvider(cli, reconcile_attempts=24, reconcile_interval_seconds=5), guard=DynamicGitHubGuard(github),
         report_gate=_load_report_gate(_required_env("SRECON26_REPORT_ADAPTER_FACTORY")),
         workload=SshRemoteWorkload(VastSshResolver(cli), ssh), ledger=ExposureLedger(output_root / "exposure-ledger.json"), output_root=output_root,
     )

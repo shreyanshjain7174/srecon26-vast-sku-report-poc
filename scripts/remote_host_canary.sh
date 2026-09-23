@@ -248,6 +248,7 @@ verify_k3s_binary() {
 install_k3s() {
   require_root
   require_command install
+  require_command ln
   require_command systemctl
   require_command nvidia-container-runtime
   verify_k3s_binary
@@ -260,6 +261,7 @@ install_k3s() {
   local actual_version
   actual_version="$(/usr/local/bin/k3s --version | awk 'NR == 1 {print $3}')"
   [[ "$actual_version" == "$K3S_VERSION" ]] || die "pre-staged k3s binary version does not match $K3S_VERSION"
+  ln -sfn /usr/local/bin/k3s /usr/local/bin/kubectl
   install -D -m 0644 -- "$runtime_template" /etc/rancher/k3s/containerd/config.toml.tmpl
   install -d -m 0755 /etc/rancher/k3s
   cat >/etc/rancher/k3s/config.yaml <<'CONFIG'
@@ -302,7 +304,10 @@ UNIT
 
 manifest_hash() {
   local directory="$1"
-  find "$directory" -type f -name '*.yaml' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+  (
+    cd "$directory"
+    find . -type f -name '*.yaml' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+  )
 }
 
 require_manifest_bundle() {

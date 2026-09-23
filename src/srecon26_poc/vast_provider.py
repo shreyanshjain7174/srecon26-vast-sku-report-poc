@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -89,10 +90,15 @@ class VastLaunchContract:
 class VastCliProvider:
     """Normalizes Vast CLI JSON and never retries a paid create request."""
 
-    def __init__(self, cli_path: Path | str = "vastai", *, timeout_seconds: int = 20, runner: Runner | None = None) -> None:
+    def __init__(self, cli_path: Path | str = "vastai", *, timeout_seconds: int = 20, runner: Runner | None = None, reconcile_attempts: int = 1, reconcile_interval_seconds: float = 5.0, sleeper: Callable[[float], None] = time.sleep) -> None:
+        if not 1 <= reconcile_attempts <= 30 or not 0 <= reconcile_interval_seconds <= 15:
+            raise ValueError("reconcile retry bounds are invalid")
         self._cli_path = str(cli_path)
         self._timeout_seconds = timeout_seconds
         self._runner = runner or self._subprocess_runner
+        self._reconcile_attempts = reconcile_attempts
+        self._reconcile_interval_seconds = reconcile_interval_seconds
+        self._sleeper = sleeper
 
     @staticmethod
     def _subprocess_runner(args: list[str], timeout: int) -> str:
@@ -222,11 +228,15 @@ class VastCliProvider:
         return matches[0]
 
     def reconcile_label(self, label: str) -> InstanceContract:
-        matches = [item for item in self.list_instances() if item.label == label]
-        if len(matches) != 1:
-            detail = "zero" if not matches else "multiple"
-            raise AmbiguousCreate(f"ambiguous create reconciliation found {detail} label matches")
-        return matches[0]
+        for attempt in range(self._reconcile_attempts):
+            matches = [item for item in self.list_instances() if item.label == label]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise AmbiguousCreate("ambiguous create reconciliation found multiple label matches")
+            if attempt + 1 < self._reconcile_attempts:
+                self._sleeper(self._reconcile_interval_seconds)
+        raise AmbiguousCreate("ambiguous create reconciliation found zero label matches")
 
     def create_once(self, contract: OfferContract, request_key: str, launch: VastLaunchContract) -> InstanceContract:
         del request_key
