@@ -32,8 +32,8 @@ jobs:
       INPUT_CPU_ROOT: ${{ inputs.cpu_root }}
       INPUT_QUEUE_ROOT: ${{ inputs.queue_root }}
       INPUT_KV_ROOT: ${{ inputs.kv_root }}
-      ANCHOR_ROOT: ${{ runner.temp }}/phase1-anchor-guard
-      ANCHOR_RECEIPT: ${{ runner.temp }}/phase1-anchor-receipt.json
+      ANCHOR_ROOT: /tmp/phase1-anchor-guard
+      ANCHOR_RECEIPT: /tmp/phase1-anchor-receipt.json
     steps:
       - name: Checkout pinned guard source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -59,5 +59,5 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           path: |
-            ${{ runner.temp }}/phase1-anchor-guard
-            ${{ runner.temp }}/phase1-anchor-receipt.json
+            /tmp/phase1-anchor-guard
+            /tmp/phase1-anchor-receipt.json

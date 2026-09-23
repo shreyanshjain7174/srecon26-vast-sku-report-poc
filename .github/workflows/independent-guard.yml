@@ -50,7 +50,7 @@ jobs:
       INPUT_HEARTBEAT_SECONDS: ${{ inputs.heartbeat_seconds }}
       GUARD_ROOT: /var/lib/srecon26-github-guard
       GUARD_SECRET_FILE: /etc/srecon26-github-guard/vast-api-key
-      CHANNEL_ROOT: ${{ runner.temp }}/srecon26-github-guard
+      CHANNEL_ROOT: /tmp/srecon26-github-guard
     steps:
       - name: Checkout pinned guard source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -145,5 +145,5 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           path: |
-            ${{ runner.temp }}/srecon26-github-guard
+            /tmp/srecon26-github-guard
             /var/lib/srecon26-github-guard
