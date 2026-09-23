@@ -1,0 +1,10 @@
+{
+  "provenance": "local-synthetic",
+  "cpu_run": "local-evidence/phase1-live-202609d03531790135589z/cpu",
+  "queue_run": "local-evidence/phase1-live-202609d03531790135589z/queue",
+  "kv_run": "local-evidence/phase1-live-202609d04031790136227z/kv",
+  "validation": {"cpu": true, "queue": true, "kv": true},
+  "negative_control_seconds": 90,
+  "cleanup_verified": true,
+  "provider_activity": false
+}
