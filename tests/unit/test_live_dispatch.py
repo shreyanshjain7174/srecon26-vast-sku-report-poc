@@ -15,6 +15,7 @@ from srecon26_poc.canary import CanarySnapshot, KvmFacts, MetricSample, VLLM_IMA
 from srecon26_poc.contracts import InstanceContract, OfferContract, ProbeOutcome
 from srecon26_poc.guard import GuardAttestation
 from srecon26_poc.live_dispatch import (
+    APPROVED_GPU_PROFILES,
     GateArtifactPaths,
     InferenceAttemptHistory,
     InferenceMeasurementEvidence,
@@ -45,6 +46,11 @@ class Clock:
     def monotonic_ns(self) -> int:
         self.tick += 1
         return self.tick
+
+
+def test_verified_blackwell_profile_is_exactly_pinned() -> None:
+    assert ("RTX 5090", 32607, "12") in APPROVED_GPU_PROFILES
+    assert ("RTX 5090", 32608, "12") not in APPROVED_GPU_PROFILES
 
 
 class Provider:

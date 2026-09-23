@@ -45,6 +45,10 @@ APPROVED_GPU_PROFILES = frozenset(
         # The exact memory value is retained in evidence and is never relabeled
         # as a standard 24 GB board.
         ("RTX 4090", 49140, "8.9"),
+        # Verified Vast Blackwell capacity used only with the pinned vLLM
+        # image and direct runtime probes. Any CUDA/image incompatibility is
+        # recorded as workload evidence, never relabeled as a provider fault.
+        ("RTX 5090", 32607, "12"),
         # Capacity fallback for the same small-model metric-path PoC.  This is
         # never presented as 3090 evidence; the frozen offer and manifest retain
         # the observed SKU verbatim.
