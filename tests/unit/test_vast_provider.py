@@ -173,6 +173,47 @@ def test_destroy_uses_noninteractive_yes_after_exact_label_check() -> None:
     assert calls[-1][-4:] == ["destroy", "instance", "77", "--yes"]
 
 
+def test_invoice_capture_requires_and_records_exact_instance_and_label(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    response = json.dumps([
+        {"amount": 0.004, "source": "instance-77", "type": "instance", "metadata": {"label": "run-nonce-label"}},
+        {"amount": 1.0, "source": "instance-88", "type": "instance", "metadata": {"label": "other"}},
+    ])
+    provider = VastCliProvider("fixture", runner=lambda args, _timeout: calls.append(args) or response)
+    artifact = tmp_path / "invoice.json"
+
+    evidence = provider.capture_invoice_charge(run_id="run-id", instance_id=77, label="run-nonce-label", start_date="2026-09-23", end_date="2026-09-24", artifact=artifact)
+
+    payload = json.loads(artifact.read_text())
+    assert evidence.amount == Decimal("0.004")
+    assert payload["source"] == "VastCliProvider.capture_invoice_charge/v1"
+    assert payload["provider_charge"]["source"] == "instance-77"
+    assert payload["provider_charge"]["metadata"]["label"] == "run-nonce-label"
+    assert calls[0][:3] == ["fixture", "--raw", "--no-color"]
+
+
+def test_invoice_capture_refuses_label_mismatch(tmp_path: Path) -> None:
+    response = '[{"amount":0.004,"source":"instance-77","type":"instance","metadata":{"label":"other"}}]'
+    provider = VastCliProvider("fixture", runner=lambda _args, _timeout: response)
+
+    with pytest.raises(VastProviderError, match="exact"):
+        provider.capture_invoice_charge(run_id="run-id", instance_id=77, label="run-nonce-label", start_date="2026-09-23", end_date="2026-09-24", artifact=tmp_path / "invoice.json")
+
+
+def test_absence_capture_persists_three_fresh_zero_match_reads(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    provider = VastCliProvider("fixture", runner=lambda args, _timeout: calls.append(args) or "[]", sleeper=lambda _seconds: None)
+    artifact = tmp_path / "absence.json"
+
+    evidence = provider.capture_absence_evidence(run_id="run-id", instance_id=77, label="run-nonce-label", artifact=artifact, interval_seconds=0)
+
+    payload = json.loads(artifact.read_text())
+    assert evidence.sha256
+    assert len(payload["reads"]) == 3
+    assert [read["matching_instances"] for read in payload["reads"]] == [0, 0, 0]
+    assert len(calls) == 3
+
+
 @pytest.mark.parametrize(
     "launch",
     [

@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
-from .budget import BudgetExceeded, ExposureLedger
+from .budget import ExposureLedger
 from .canary import VLLM_IMAGE_DIGEST, CanarySnapshot, KvmFacts, evaluate_canary_readiness, evaluate_kvm_capabilities
 from .contracts import InstanceContract, OfferContract, ProbeOutcome, classify_fault
 from .guard import Guard, GuardAttestation, validate_attestation
@@ -425,7 +425,7 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> Path:
     return path
 
 
-def _seal_bundle(run_directory: Path, declared: tuple[Path, ...]) -> str:
+def _seal_bundle(run_directory: Path, declared: tuple[Path, ...], *, sums_relative: str = "SHA256SUMS", root_relative: str = "ROOT-HASH.txt") -> str:
     """Checksum named records without including mutable receipts in their root."""
 
     root = run_directory.resolve()
@@ -437,9 +437,13 @@ def _seal_bundle(run_directory: Path, declared: tuple[Path, ...]) -> str:
         normalized.append(resolved)
     lines = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root).as_posix()}" for path in sorted(set(normalized))]
     sums = "\n".join(lines) + "\n"
-    (run_directory / "SHA256SUMS").write_text(sums, encoding="utf-8")
+    sums_path = run_directory / sums_relative
+    root_path = run_directory / root_relative
+    sums_path.parent.mkdir(parents=True, exist_ok=True)
+    root_path.parent.mkdir(parents=True, exist_ok=True)
+    sums_path.write_text(sums, encoding="utf-8")
     digest = hashlib.sha256(sums.encode("utf-8")).hexdigest()
-    (run_directory / "ROOT-HASH.txt").write_text(digest + "\n", encoding="utf-8")
+    root_path.write_text(digest + "\n", encoding="utf-8")
     return digest
 
 
@@ -471,7 +475,7 @@ class LiveCanaryDispatcher:
         self.sleeper = sleeper
         self.absence_interval_seconds = absence_interval_seconds
 
-    def _manifest(self, request: LiveCanaryRequest, *, status: str, limitation: str | None, provider_create_calls: int, provider_destroy_calls: int, absence_reads: int, provenance: str, real_gpu_claim: bool, gate_hashes: Mapping[str, str] | None = None, offer: OfferContract | None = None, report: Mapping[str, object] | None = None, guard_root: str | None = None, evidence_blockers: tuple[str, ...] = ()) -> Path:
+    def _manifest(self, request: LiveCanaryRequest, *, status: str, limitation: str | None, provider_create_calls: int, provider_destroy_calls: int, absence_reads: int, provenance: str, real_gpu_claim: bool, gate_hashes: Mapping[str, str] | None = None, offer: OfferContract | None = None, report: Mapping[str, object] | None = None, guard_root: str | None = None, evidence_blockers: tuple[str, ...] = (), relative_path: str = "run-manifest.json") -> Path:
         run_directory = self.output_root / request.run_id
         payload: dict[str, object] = {
             "run_id": request.run_id,
@@ -509,7 +513,7 @@ class LiveCanaryDispatcher:
             payload["report"] = dict(report)
         if guard_root is not None:
             payload["guard_anchor_root"] = guard_root
-        return _write_json(run_directory / "run-manifest.json", payload)
+        return _write_json(run_directory / relative_path, payload)
 
     def _blocked(self, request: LiveCanaryRequest, limitation: str, *, gate_hashes: Mapping[str, str] | None = None) -> LiveDispatchResult:
         manifest = self._manifest(request, status="BLOCKED", limitation=limitation, provider_create_calls=0, provider_destroy_calls=0, absence_reads=0, provenance=LIMITATION_PROVENANCE, real_gpu_claim=False, gate_hashes=gate_hashes)
@@ -566,11 +570,10 @@ class LiveCanaryDispatcher:
         evidence_blockers: tuple[str, ...] = ()
         evidence_files: tuple[Path, ...] = ()
         guard_root: str | None = None
-        reserved = False
+        guard_armed = False
         try:
             self._append(journal, RunState.OFFLINE_VALIDATED, "gates.passed", {"gate_hashes": dict(gate_hashes)})
             self.ledger.reserve(request.run_id, request.reserve, "gpu-smoke" if request.stage == "gpu-smoke" else "canary")
-            reserved = True
             self._append(journal, RunState.BUDGET_RESERVED, "budget.reserved", {"reserve": str(request.reserve), "project_cap": str(PROJECT_CAP)})
             self._append(journal, RunState.OFFER_PINNED, "offer.pinned", {"offer_id": current_offer.offer_id, "label": current_offer.label, "vms_enabled": True})
             if self.report_gate is None:
@@ -580,6 +583,7 @@ class LiveCanaryDispatcher:
             validate_attestation(identity, attestation)
             if attestation.nonce != request.nonce or attestation.hard_deadline.astimezone(UTC) != request.hard_deadline.astimezone(UTC):
                 raise LiveDispatchError("live guard arm receipt does not bind exact nonce and immutable deadline")
+            guard_armed = True
             self._append(journal, RunState.GUARD_ARMED, "guard.armed", {"hard_deadline": _stamp(request.hard_deadline), "report_start_by": _stamp(request.report_start_by), "host_identity": attestation.host_identity})
 
             if self.clock.now() >= request.report_start_by:
@@ -656,21 +660,26 @@ class LiveCanaryDispatcher:
                     # retry may happen because create intent was durable.
                     status = "FAILED_SAFE"
                     limitation = f"{limitation + '; ' if limitation else ''}journal terminal transition failed"
-            if reserved and absence_reads == 3:
-                try:
-                    elapsed_seconds = max(Decimal("0"), Decimal(str((self.clock.now() - identity.created_at).total_seconds())))
-                    estimated_actual = (current_offer.dph_total * elapsed_seconds / Decimal("3600")).quantize(Decimal("0.000001"))
-                    self.ledger.commit_actual(request.run_id, estimated_actual, {"reads": 3, "timestamps": list(absence_timestamps), "instance_id": instance.instance_id if instance else None, "basis": "dph_total_x_elapsed_wall_time"})
-                except (BudgetExceeded, ValueError) as error:
-                    limitation = f"{limitation + '; ' if limitation else ''}ledger finalization failure: {error}"
-                    status = "FAILED_SAFE"
+            # The full reservation remains charged after teardown. It may be
+            # reconciled only from provider credit evidence plus this run's
+            # three-read absence proof; a local elapsed-time estimate cannot
+            # release the project or stage cap.
 
-        real_gpu_claim = status == "COMPLETED" and absence_reads == 3 and not evidence_blockers
-        provenance = REAL_GPU_PROVENANCE if real_gpu_claim else LIMITATION_PROVENANCE
-        manifest = self._manifest(request, status=status, limitation=limitation, provider_create_calls=creates, provider_destroy_calls=destroys, absence_reads=absence_reads, provenance=provenance, real_gpu_claim=real_gpu_claim, gate_hashes=gate_hashes, offer=current_offer, report=report_data, evidence_blockers=evidence_blockers)
-        limitation_record = _write_json(run_directory / "limitation.json", {"status": status, "limitation": limitation, "provenance": provenance, "real_gpu_claim": real_gpu_claim})
+        evidence_complete = status == "COMPLETED" and absence_reads == 3 and not evidence_blockers
+        if not guard_armed:
+            manifest = self._manifest(request, status=status, limitation=limitation, provider_create_calls=creates, provider_destroy_calls=destroys, absence_reads=absence_reads, provenance=LIMITATION_PROVENANCE, real_gpu_claim=False, gate_hashes=gate_hashes, offer=current_offer, report=report_data, evidence_blockers=evidence_blockers)
+            limitation_record = _write_json(run_directory / "limitation.json", {"status": status, "limitation": limitation, "provenance": LIMITATION_PROVENANCE, "real_gpu_claim": False})
+            _seal_bundle(run_directory, (manifest, limitation_record, *(path for path in evidence_files if path.is_file())))
+            return LiveDispatchResult(status, limitation, manifest, creates, destroys, absence_reads, LIMITATION_PROVENANCE, False)
+
+        pre_anchor_status = "PENDING_ANCHOR" if evidence_complete else status
+        pre_anchor_limitation = "awaiting independent guard anchor" if evidence_complete else limitation
+        pre_anchor_manifest = self._manifest(request, status=pre_anchor_status, limitation=pre_anchor_limitation, provider_create_calls=creates, provider_destroy_calls=destroys, absence_reads=absence_reads, provenance=LIMITATION_PROVENANCE, real_gpu_claim=False, gate_hashes=gate_hashes, offer=current_offer, report=report_data, evidence_blockers=evidence_blockers, relative_path="pre-anchor/run-manifest.json")
+        pre_anchor_limitation_record = _write_json(run_directory / "pre-anchor/limitation.json", {"status": pre_anchor_status, "limitation": pre_anchor_limitation, "provenance": LIMITATION_PROVENANCE, "real_gpu_claim": False})
+        pre_anchor_sums = run_directory / "pre-anchor/SHA256SUMS"
+        pre_anchor_root = run_directory / "pre-anchor/ROOT-HASH.txt"
         try:
-            root_hash = _seal_bundle(run_directory, (manifest, limitation_record, *(path for path in evidence_files if path.is_file())))
+            root_hash = _seal_bundle(run_directory, (pre_anchor_manifest, pre_anchor_limitation_record, *(path for path in evidence_files if path.is_file())), sums_relative="pre-anchor/SHA256SUMS", root_relative="pre-anchor/ROOT-HASH.txt")
         except Exception as error:
             limitation = f"{limitation + '; ' if limitation else ''}integrity bundle failure: {error}"
             status = "FAILED_SAFE"
@@ -681,14 +690,20 @@ class LiveCanaryDispatcher:
             guard_root = self.guard.anchor(root_hash)
             if guard_root != root_hash:
                 raise LiveDispatchError("guard acknowledged a different bundle root")
-            _write_json(run_directory / "guard-anchor.json", {"root_hash": root_hash, "acknowledged": guard_root})
+            anchor_record = _write_json(run_directory / "guard-anchor.json", {"root_hash": root_hash, "acknowledged": guard_root, "pre_anchor_sums": "pre-anchor/SHA256SUMS", "pre_anchor_manifest": "pre-anchor/run-manifest.json"})
+            provenance = REAL_GPU_PROVENANCE if evidence_complete else LIMITATION_PROVENANCE
+            real_gpu_claim = evidence_complete
+            manifest = self._manifest(request, status=status, limitation=limitation, provider_create_calls=creates, provider_destroy_calls=destroys, absence_reads=absence_reads, provenance=provenance, real_gpu_claim=real_gpu_claim, gate_hashes=gate_hashes, offer=current_offer, report=report_data, guard_root=guard_root, evidence_blockers=evidence_blockers)
+            limitation_record = _write_json(run_directory / "limitation.json", {"status": status, "limitation": limitation, "provenance": provenance, "real_gpu_claim": real_gpu_claim, "guard_anchor_root": guard_root})
+            _seal_bundle(run_directory, (manifest, limitation_record, anchor_record, pre_anchor_manifest, pre_anchor_limitation_record, pre_anchor_sums, pre_anchor_root, *(path for path in evidence_files if path.is_file())))
         except Exception as error:
             limitation = f"{limitation + '; ' if limitation else ''}guard anchor failure: {error}"
             status = "FAILED_SAFE"
             manifest = self._manifest(request, status=status, limitation=limitation, provider_create_calls=creates, provider_destroy_calls=destroys, absence_reads=absence_reads, provenance=LIMITATION_PROVENANCE, real_gpu_claim=False, gate_hashes=gate_hashes, offer=current_offer, report=report_data, evidence_blockers=evidence_blockers)
-            _write_json(run_directory / "limitation.json", {"status": status, "limitation": limitation, "provenance": LIMITATION_PROVENANCE, "real_gpu_claim": False})
+            limitation_record = _write_json(run_directory / "limitation.json", {"status": status, "limitation": limitation, "provenance": LIMITATION_PROVENANCE, "real_gpu_claim": False})
             try:
-                _seal_bundle(run_directory, (manifest, run_directory / "limitation.json", *(path for path in evidence_files if path.is_file())))
+                _seal_bundle(run_directory, (manifest, limitation_record, pre_anchor_manifest, pre_anchor_limitation_record, pre_anchor_sums, pre_anchor_root, *(path for path in evidence_files if path.is_file())))
             except Exception:
                 pass
-        return LiveDispatchResult(status, limitation, manifest, creates, destroys, absence_reads, REAL_GPU_PROVENANCE if status == "COMPLETED" and absence_reads == 3 and not evidence_blockers and guard_root else LIMITATION_PROVENANCE, status == "COMPLETED" and absence_reads == 3 and not evidence_blockers and guard_root)
+        real_gpu_claim = status == "COMPLETED" and evidence_complete and guard_root is not None
+        return LiveDispatchResult(status, limitation, manifest, creates, destroys, absence_reads, REAL_GPU_PROVENANCE if real_gpu_claim else LIMITATION_PROVENANCE, real_gpu_claim)

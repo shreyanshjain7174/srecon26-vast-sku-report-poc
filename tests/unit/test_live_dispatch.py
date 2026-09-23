@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -81,8 +82,9 @@ class Provider:
 
 
 class Guard:
-    def __init__(self, nonce: str, events: list[str]) -> None:
+    def __init__(self, nonce: str, events: list[str], *, anchor_error: bool = False) -> None:
         self.nonce, self.events = nonce, events
+        self.anchor_error = anchor_error
         self.identity = None
         self.deadline = None
 
@@ -101,6 +103,8 @@ class Guard:
 
     def anchor(self, root_hash: str) -> str:
         self.events.append("anchor")
+        if self.anchor_error:
+            raise RuntimeError("anchor unavailable")
         return root_hash
 
 
@@ -181,10 +185,10 @@ def _request(tmp_path: Path, now: datetime, *, bad_semgrep: bool = False) -> tup
     )
 
 
-def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, remote_fault: bool = False):
+def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, remote_fault: bool = False, anchor_error: bool = False):
     events: list[str] = []
     provider = Provider(offer, events, ambiguous=ambiguous, mismatch=mismatch)
-    dispatcher = LiveCanaryDispatcher(provider=provider, guard=Guard(request.nonce, events), report_gate=ReportGate(Reporter(events)), workload=Workload(complete=complete, remote_fault=remote_fault), ledger=ExposureLedger(tmp_path / "ledger.json"), output_root=tmp_path / "runs", clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)), absence_interval_seconds=0)
+    dispatcher = LiveCanaryDispatcher(provider=provider, guard=Guard(request.nonce, events, anchor_error=anchor_error), report_gate=ReportGate(Reporter(events)), workload=Workload(complete=complete, remote_fault=remote_fault), ledger=ExposureLedger(tmp_path / "ledger.json"), output_root=tmp_path / "runs", clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)), absence_interval_seconds=0)
     return dispatcher, provider, events
 
 
@@ -203,6 +207,21 @@ def test_missing_current_gate_never_reads_or_mutates_provider(tmp_path: Path) ->
     assert manifest["provenance"] == "live-limitation"
 
 
+def test_budget_failure_before_guard_arm_does_not_attempt_guard_anchor(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    dispatcher, provider, events = _dispatcher(tmp_path, request, offer)
+    dispatcher.ledger.reserve("prior-run", Decimal("1.00"), "gpu-smoke")
+
+    result = dispatcher.run(request)
+
+    assert result.status == "FAILED_SAFE"
+    assert result.limitation == "reservation would exceed approved exposure"
+    assert provider.create_calls == 0
+    assert "arm" not in events
+    assert "anchor" not in events
+
+
 def test_dispatcher_reconciles_ambiguous_create_without_a_second_create(tmp_path: Path) -> None:
     now = datetime.now(UTC)
     request, offer = _request(tmp_path, now)
@@ -216,6 +235,30 @@ def test_dispatcher_reconciles_ambiguous_create_without_a_second_create(tmp_path
     assert events.index("reconcile") > events.index("create")
     assert events.count("list") == 3
     assert result.absence_reads == 3
+    manifest = json.loads(result.manifest_path.read_text())
+    receipt = json.loads((result.manifest_path.parent / "guard-anchor.json").read_text())
+    assert manifest["guard_anchor_root"] == receipt["acknowledged"]
+    assert "guard-anchor.json" in (result.manifest_path.parent / "SHA256SUMS").read_text()
+    pre_anchor_sums = result.manifest_path.parent / receipt["pre_anchor_sums"]
+    assert hashlib.sha256(pre_anchor_sums.read_bytes()).hexdigest() == receipt["acknowledged"]
+    for line in pre_anchor_sums.read_text().splitlines():
+        expected, relative = line.split("  ", 1)
+        assert hashlib.sha256((result.manifest_path.parent / relative).read_bytes()).hexdigest() == expected
+
+
+def test_anchor_failure_never_publishes_real_gpu_claim(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    dispatcher, _provider, events = _dispatcher(tmp_path, request, offer, anchor_error=True)
+
+    result = dispatcher.run(request)
+
+    assert result.status == "FAILED_SAFE"
+    assert result.real_gpu_claim is False
+    assert events.count("anchor") == 1
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["real_gpu_claim"] is False
+    assert manifest["provenance"] != REAL_GPU_PROVENANCE
 
 
 def test_confirmed_provider_fault_reports_before_exact_teardown(tmp_path: Path) -> None:

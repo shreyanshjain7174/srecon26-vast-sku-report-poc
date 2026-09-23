@@ -405,7 +405,8 @@ def run_fixture(
             absence_reads = len(proof.reads)
             _append(journal, clock, RunState.ABSENCE_VERIFYING, "absence.proved", {"reads": absence_reads})
             _append(journal, clock, RunState.TERMINAL, "terminal.safe", {"status": status, "limitation": limitation})
-            ledger.commit_actual(run_id, Decimal("0.00"), {"reads": absence_reads, "fixture": True})
+            # Fixture reservations stay conservative. Only a live provider
+            # credit delta may release a persisted reservation.
     except (BudgetExceeded, LifecycleHalted, TimeoutError, ValueError) as exc:
         limitation, status = str(exc), "FAILED_SAFE"
         if journal.state() is not RunState.TERMINAL:

@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -41,6 +44,19 @@ class VastPreflight:
             "offer_count": self.offer_count,
             "offers": [dict(item) for item in self.offers],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class VastInvoiceEvidence:
+    amount: Decimal
+    artifact: Path
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class VastAbsenceEvidence:
+    artifact: Path
+    sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +294,83 @@ class VastCliProvider:
         if instance.label != expected_label:
             raise VastProviderError("refusing to destroy an instance with a mismatched label")
         self._run_mutation(["destroy", "instance", str(instance_id), "--yes"])
+
+    def capture_invoice_charge(self, *, run_id: str, instance_id: int, label: str, start_date: str, end_date: str, artifact: Path) -> VastInvoiceEvidence:
+        """Capture one authoritative Vast charge bound to the exact run target."""
+
+        if not run_id or instance_id <= 0 or not label:
+            raise VastProviderError("invoice capture requires an exact run, instance, and label")
+        args = ["show", "invoices-v1", "--charges", "--charge-type", "instance", "--start-date", start_date, "--end-date", end_date, "--limit", "100", "--latest-first", "--format", "tree", "--verbose"]
+        records = self._records(self._run_json(args))
+        expected_source = f"instance-{instance_id}"
+        matches = [
+            record
+            for record in records
+            if record.get("type") == "instance"
+            and record.get("source") == expected_source
+            and isinstance(record.get("metadata"), Mapping)
+            and record["metadata"].get("label") == label
+        ]
+        if len(matches) != 1:
+            raise VastProviderError("authoritative invoice did not contain one exact instance-and-label charge")
+        amount = self._decimal(matches[0].get("amount"), "invoice amount")
+        if not amount.is_finite() or amount < 0:
+            raise VastProviderError("invoice amount is invalid")
+        payload = {
+            "schema": "srecon26-vast-invoice-evidence/v1",
+            "source": "VastCliProvider.capture_invoice_charge/v1",
+            "observed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "run_id": run_id,
+            "instance_id": instance_id,
+            "label": label,
+            "amount_usd": str(amount),
+            "command": args,
+            "provider_charge": matches[0],
+        }
+        encoded = json.dumps(payload, indent=2, sort_keys=True, default=str).encode() + b"\n"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        temporary = artifact.with_suffix(artifact.suffix + ".tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, encoded)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, artifact)
+        return VastInvoiceEvidence(amount, artifact, hashlib.sha256(encoded).hexdigest())
+
+    def capture_absence_evidence(self, *, run_id: str, instance_id: int, label: str, artifact: Path, interval_seconds: float = 5.0) -> VastAbsenceEvidence:
+        """Persist three fresh provider reads proving the exact target absent."""
+
+        if not run_id or instance_id <= 0 or not label or not 0 <= interval_seconds <= 15:
+            raise VastProviderError("absence capture requires an exact target and bounded interval")
+        reads: list[dict[str, object]] = []
+        for index in range(3):
+            matches = [item for item in self.list_instances() if item.instance_id == instance_id or item.label == label]
+            reads.append({"observed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"), "matching_instances": len(matches)})
+            if matches:
+                raise VastProviderError("exact target remains present during absence reconciliation")
+            if index < 2 and interval_seconds:
+                self._sleeper(interval_seconds)
+        payload = {
+            "schema": "srecon26-vast-absence-evidence/v1",
+            "source": "VastCliProvider.capture_absence_evidence/v1",
+            "run_id": run_id,
+            "instance_id": instance_id,
+            "label": label,
+            "reads": reads,
+        }
+        encoded = json.dumps(payload, indent=2, sort_keys=True, default=str).encode() + b"\n"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        temporary = artifact.with_suffix(artifact.suffix + ".tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, encoded)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, artifact)
+        return VastAbsenceEvidence(artifact, hashlib.sha256(encoded).hexdigest())
 
     @staticmethod
     def _auto_recharge_enabled(account: Mapping[str, object]) -> bool | None:
