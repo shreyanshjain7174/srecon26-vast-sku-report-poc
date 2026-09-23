@@ -112,12 +112,12 @@ def queue_cpu_control() -> None:
 
 def evidence_boundary() -> None:
     image, draw = canvas(
-        "Evidence boundary: what is demonstrated versus what remains open",
-        "The deck separates verified local signal plumbing from the incomplete live GPU path.",
+        "Final paid canary: safe lifecycle proved, GPU path still open",
+        "One $0.025 Vast attempt on distinct machine 147086; provider SSH never became usable.",
     )
     columns = [
-        (112, "VERIFIED", TEAL, ["Local CPU, queue, and", "synthetic-KV HPA arms", "independent 1→2 transitions", "anchored evidence roots"]),
-        (844, "NOT DEMONSTRATED", CORAL, ["GPU identity / CUDA", "KVM capability", "real vLLM metrics", "TTFT or A/B performance"]),
+        (112, "VERIFIED", TEAL, ["Provider contract: RTX 4000Ada", "machine 147086 / $0.025", "guarded exact-ID teardown", "three zero-match inventory reads"]),
+        (844, "NOT DEMONSTRATED", CORAL, ["SSH never became ready", "36 bounded attempts", "direct GPU / CUDA probe", "vLLM or A/B metrics"]),
     ]
     for x, label, accent, lines in columns:
         rounded(draw, (x, 244, x + 644, 718), CARD)
@@ -128,7 +128,7 @@ def evidence_boundary() -> None:
             draw.ellipse((x + 54, yy + 6, x + 70, yy + 22), fill=color(accent))
             draw.text((x + 94, yy), line, font=font(25), fill=color(TEXT))
     rounded(draw, (112, 760, 1488, 836), "1D2430", radius=18)
-    draw.text((144, 782), "Current live run status: FAILED_SAFE; exact teardown and absence evidence preserved.", font=font(23, True), fill=color(TEXT))
+    draw.text((144, 782), "Instance 52212017 • report not attempted • sealed + guard-anchored FAILED_SAFE evidence", font=font(23, True), fill=color(TEXT))
     save(image, "evidence-boundary.png")
 
 

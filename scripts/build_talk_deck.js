@@ -240,15 +240,16 @@ const resultBadge = (slide, x, y, label, color) => {
     if (i < stages.length - 1) arrow(s, x + 2.16, 3.20, 0.33, C.muted);
   });
   tx(s, 'The provider report path is ordered before destroy only when a genuine, evidence-backed provider/SKU fault is established.', { x: 1.07, y: 5.45, w: 11.10, h: 0.48, fontSize: 17, color: C.muted, align: 'center' });
-  notes(s, 'A paid run is not a permission to make a claim. The guard is independent, destroys by exact ID, and requires absence evidence. If a real SKU issue is proved, the report workflow precedes normal teardown—without holding a failed machine just to gather a claim.');
+  tx(s, 'Final attempt: $0.025 charged • exact instance 52212017 • three zero-match reads', { x: 1.07, y: 6.05, w: 11.10, h: 0.25, fontSize: 13, bold: true, color: C.gold, align: 'center' });
+  notes(s, 'A paid run is not a permission to make a claim. The final attempt reserved $0.25, incurred an authoritative $0.025 invoice charge, and ended with exact-ID teardown plus three zero-match inventory reads. The guard is independent. If a real SKU issue is proved, the report workflow precedes normal teardown—without holding a failed machine just to gather a claim.');
 }
 
 // 12
 {
   const s = base('live GPU path • limitation');
-  heading(s, 'Current live GPU result: a bounded limitation, not a demonstration', 'honest outcome');
+  heading(s, 'Final live GPU result: bounded FAILED_SAFE, not a demonstration', 'honest outcome');
   s.addImage({ path: chart('evidence-boundary.png'), x: 0.50, y: 1.25, w: 12.33, h: 5.85 });
-  notes(s, 'Be explicit: the live attempts were safely torn down and absence-verified, but did not observe GPU identity, CUDA, KVM capability, real vLLM metrics, or a request. Therefore they do not support a GPU result or an A/B comparison.');
+  notes(s, 'Be explicit: the final paid attempt used provider offer 52180811 on distinct machine 147086 and exact instance 52212017. SSH closed all 36 bounded readiness attempts, so no direct GPU, CUDA, KVM, vLLM, or request evidence exists. The controller did not click Report because this was an unresolved access failure, not a confirmed provider or SKU contract fault. Exact teardown, three absence reads, invoice evidence, sealed hashes, and the independent guard anchor are retained.');
 }
 
 // 13
@@ -257,7 +258,7 @@ const resultBadge = (slide, x, y, label, color) => {
   heading(s, 'Claim ledger: speak only to the evidence that exists', 'guardrail');
   const rows = [
     ['Local HPA signal plumbing', 'VERIFIED', C.teal],
-    ['Independent guard and exact teardown mechanics', 'VERIFIED / scoped', C.teal],
+    ['Guard, exact teardown, invoice + absence binding', 'VERIFIED / scoped', C.teal],
     ['Real GPU / CUDA / KVM capability', 'NOT DEMONSTRATED', C.coral],
     ['vLLM TTFT or queue/KV behavior', 'NOT MEASURED', C.coral],
     ['CPU-only vs aware-HPA A/B outcome', 'NOT RUN', C.coral],
