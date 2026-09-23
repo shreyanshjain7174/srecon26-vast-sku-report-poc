@@ -48,6 +48,7 @@ jobs:
       INPUT_HARD_DEADLINE: ${{ inputs.hard_deadline }}
       INPUT_TRUSTED_AUTHOR: ${{ inputs.trusted_author }}
       INPUT_HEARTBEAT_SECONDS: ${{ inputs.heartbeat_seconds }}
+      PYTHONPATH: .
       GUARD_ROOT: /var/lib/srecon26-github-guard
       GUARD_SECRET_FILE: /etc/srecon26-github-guard/vast-api-key
       CHANNEL_ROOT: /tmp/srecon26-github-guard

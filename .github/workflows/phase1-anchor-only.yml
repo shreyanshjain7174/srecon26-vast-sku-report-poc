@@ -32,6 +32,7 @@ jobs:
       INPUT_CPU_ROOT: ${{ inputs.cpu_root }}
       INPUT_QUEUE_ROOT: ${{ inputs.queue_root }}
       INPUT_KV_ROOT: ${{ inputs.kv_root }}
+      PYTHONPATH: .
       ANCHOR_ROOT: /tmp/phase1-anchor-guard
       ANCHOR_RECEIPT: /tmp/phase1-anchor-receipt.json
     steps:
