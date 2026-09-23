@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -140,7 +141,7 @@ def main() -> int:
         controller.run(workload, heartbeat=heartbeat)
     except BaseException as error:
         (args.output / "terminal-failure.json").write_text(
-            json.dumps({"error_type": type(error).__name__, "error": str(error)}, indent=2) + "\n",
+            json.dumps({"error_type": type(error).__name__, "error": str(error), "traceback": traceback.format_exc()}, indent=2) + "\n",
             encoding="utf-8",
         )
         raise

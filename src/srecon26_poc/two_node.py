@@ -130,7 +130,13 @@ class TwoNodeLease:
                     self.provider.destroy_exact(instance.instance_id, instance.label)
                     absence[instance.label] = self._prove_absent(instance)
                 except BaseException as caught:
-                    cleanup_error = cleanup_error or caught
+                    # An independently armed guard may win the teardown race.
+                    # Fresh three-read absence is still required, but that race
+                    # must not erase the original workload failure diagnosis.
+                    if not any(current.instance_id == instance.instance_id or current.label == instance.label for current in self.provider.list_instances()):
+                        absence[instance.label] = self._prove_absent(instance)
+                    else:
+                        cleanup_error = cleanup_error or caught
             if cleanup_error is not None:
                 raise TwoNodeError("two-node teardown or absence proof failed") from cleanup_error
         if error is not None:

@@ -83,6 +83,20 @@ def test_worker_failure_cleans_server_and_never_retries_create() -> None:
     assert len(provider.destroyed) == 2
 
 
+def test_external_guard_teardown_race_preserves_workload_failure() -> None:
+    controller, provider = lease()
+    original_destroy = provider.destroy_exact
+
+    def guard_wins(instance_id, expected_label):
+        provider.live.clear()
+        raise RuntimeError("already absent")
+
+    provider.destroy_exact = guard_wins  # type: ignore[method-assign]
+    with pytest.raises(TwoNodeError, match="workload failed"):
+        controller.run(lambda server, worker: (_ for _ in ()).throw(RuntimeError("startup failed")))
+    provider.destroy_exact = original_destroy  # type: ignore[method-assign]
+
+
 def test_duplicate_machine_or_nonce_is_rejected_before_any_create() -> None:
     controller, provider = lease()
     controller.worker = NodeLease("worker", "two-node-worker", controller.server.nonce, offer("worker", controller.server.nonce, 12, 101))
