@@ -2,7 +2,7 @@
   "schema": "srecon26-inference-startup-retry-entitlement/v1",
   "run_id": "inference-infer20260923154131",
   "label": "srecon26-inference--nonce-8e886e93ecf9943ff9e70232",
-  "reason": "provider never advanced the exact VM from created to running across 60 bounded status reads",
+  "reason": "controller entered its canary phase, but 60 exact-instance provider reads never observed actual_status=running",
   "instance_id": 52254086,
   "machine_id": 49553,
   "journal_sha256": "f1f384770f2962efbbd9814d5f3f7ebbd7d1ad1a6469b03e5da3e7ec7abe0c23",

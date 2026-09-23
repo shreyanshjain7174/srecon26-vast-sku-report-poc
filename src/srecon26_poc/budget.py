@@ -43,7 +43,7 @@ INFERENCE_MEASUREMENT_RETRY_EVIDENCE_SHA256 = "bfefa7f8548cf0766d1f843b4cc344340
 INFERENCE_MEASUREMENT_RETRY_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "inference-infer20260923150917-measurement-retry-entitlement.json"
 INFERENCE_STARTUP_RETRY_RUN_ID = "inference-infer20260923154131"
 INFERENCE_STARTUP_RETRY_JOURNAL_SHA256 = "f1f384770f2962efbbd9814d5f3f7ebbd7d1ad1a6469b03e5da3e7ec7abe0c23"
-INFERENCE_STARTUP_RETRY_EVIDENCE_SHA256 = "e49ae986b8d891ddbf9fb2c11dfc286d58bc2d621c1258f78b0009d250b7d376"
+INFERENCE_STARTUP_RETRY_EVIDENCE_SHA256 = "b04821f538dba046d791e08002de2748efe5f9bfd7a7f629d0af3bc0e4ac2565"
 INFERENCE_STARTUP_RETRY_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "inference-infer20260923154131-startup-retry-entitlement.json"
 
 
@@ -319,11 +319,12 @@ class ExposureLedger:
         if (
             not isinstance(entry, Mapping)
             or entry.get("category") != "gpu-inference-smoke"
-            or entry.get("actual") != "0.008"
+            or self._decimal(entry.get("actual")) != Decimal("0.008")
             or not isinstance(entry.get("absence_proof"), Mapping)
         ):
             return False
         journal_path = self.path.parent / INFERENCE_STARTUP_RETRY_RUN_ID / "journal" / "journal.ndjson"
+        run_path = journal_path.parents[1]
         status_path = self.path.parent / INFERENCE_STARTUP_RETRY_RUN_ID / "remote-transport" / "provider-status.ndjson"
         try:
             if hashlib.sha256(journal_path.read_bytes()).hexdigest() != INFERENCE_STARTUP_RETRY_JOURNAL_SHA256:
@@ -335,10 +336,30 @@ class ExposureLedger:
             evidence = json.loads(evidence_raw)
             status_raw = status_path.read_bytes()
             status_records = [json.loads(line) for line in status_raw.splitlines() if line]
-        except (OSError, InvalidJournal, json.JSONDecodeError):
+            if not status_records or any(not isinstance(record, Mapping) for record in status_records):
+                return False
+            provider_reads = [record for record in status_records if "event" not in record]
+            sums_raw = (run_path / "SHA256SUMS").read_bytes()
+            root_raw = (run_path / "ROOT-HASH.txt").read_bytes()
+            root_hash = root_raw.decode("utf-8").strip()
+            if hashlib.sha256(sums_raw).hexdigest() != root_hash:
+                return False
+            sealed: dict[str, str] = {}
+            for raw_line in sums_raw.decode("utf-8").splitlines():
+                digest, relative = raw_line.split("  ", 1)
+                artifact = (run_path / relative).resolve()
+                if run_path.resolve() not in artifact.parents or hashlib.sha256(artifact.read_bytes()).hexdigest() != digest:
+                    return False
+                sealed[relative] = digest
+            anchor_raw = (run_path / "guard-anchor.json").read_bytes()
+            anchor = json.loads(anchor_raw)
+            pre_anchor_sums = (run_path / "pre-anchor" / "SHA256SUMS").read_bytes()
+            pre_anchor_root = (run_path / "pre-anchor" / "ROOT-HASH.txt").read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError, InvalidJournal, json.JSONDecodeError, ValueError):
             return False
         events = journal.events()
         creates = [event for event in events if event.event_type == "provider.create_observed"]
+        starts = [event for event in events if event.event_type == "canary.started"]
         teardowns = [event for event in events if event.event_type == "teardown.exact"]
         absence = [event for event in events if event.event_type == "absence.proved"]
         terminal = [event for event in events if event.event_type == "terminal.safe"]
@@ -347,6 +368,7 @@ class ExposureLedger:
             and all(event.run_id == INFERENCE_STARTUP_RETRY_RUN_ID for event in events)
             and journal.state().value == "TERMINAL"
             and len(creates) == 1
+            and len(starts) == 1
             and len(teardowns) == 1
             and len(absence) == 1
             and absence[0].payload.get("reads") == 3
@@ -355,11 +377,23 @@ class ExposureLedger:
             and evidence.get("schema") == "srecon26-inference-startup-retry-entitlement/v1"
             and evidence.get("run_id") == INFERENCE_STARTUP_RETRY_RUN_ID
             and evidence.get("journal_sha256") == INFERENCE_STARTUP_RETRY_JOURNAL_SHA256
+            and evidence.get("sealed_root") == root_hash
+            and evidence.get("root_hash_file_sha256") == hashlib.sha256(root_raw).hexdigest()
+            and evidence.get("guard_anchor_sha256") == hashlib.sha256(anchor_raw).hexdigest()
+            and sealed.get("guard-anchor.json") == evidence.get("guard_anchor_sha256")
+            and sealed.get("remote-transport/provider-status.ndjson") == evidence.get("provider_status_sha256")
+            and sealed.get("remote-transport/failure.txt") == hashlib.sha256(b"exact instance did not reach running with a safe SSH endpoint within the bounded wait\n").hexdigest()
+            and anchor.get("acknowledged") == pre_anchor_root
+            and anchor.get("root_hash") == pre_anchor_root
+            and hashlib.sha256(pre_anchor_sums).hexdigest() == pre_anchor_root
             and evidence.get("provider_status_sha256") == hashlib.sha256(status_raw).hexdigest()
             and evidence.get("provider_status_last_attempt") == 60
             and evidence.get("provider_status_reached_running") is False
-            and status_records[-1].get("attempt") == 60
-            and not any(record.get("actual_status") == "running" for record in status_records)
+            and len(provider_reads) == 60
+            and [record.get("attempt") for record in provider_reads] == list(range(1, 61))
+            and all(record.get("instance_id") == 52254086 for record in provider_reads)
+            and all(record.get("label") == "srecon26-inference--nonce-8e886e93ecf9943ff9e70232" for record in provider_reads)
+            and not any(record.get("actual_status") == "running" for record in provider_reads)
             and evidence.get("provider_create_calls") == 1
             and evidence.get("provider_destroy_calls") == 1
             and evidence.get("absence_reads") == 3
