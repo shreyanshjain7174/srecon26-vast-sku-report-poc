@@ -26,7 +26,14 @@ sys.path.insert(0, str(ROOT / "src"))
 from srecon26_poc.contracts import OfferContract
 from srecon26_poc.live_factory import DynamicGitHubGuard, GitHubGuardConfig, SshRemoteWorkload, SshWorkloadConfig, VastSshResolver
 from srecon26_poc.two_node import NodeLease, TwoNodeLease
-from srecon26_poc.vast_provider import OFFICIAL_KVM_IMAGE, OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, VastCliProvider, VastLaunchContract
+from srecon26_poc.vast_provider import (
+    OFFICIAL_KVM_IMAGE,
+    OFFICIAL_UBUNTU_2204_TEMPLATE_HASH,
+    OFFICIAL_UBUNTU_DESKTOP_IMAGE,
+    OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH,
+    VastCliProvider,
+    VastLaunchContract,
+)
 
 
 def contract_record(contract: OfferContract | object) -> dict[str, object]:
@@ -61,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--worker-guard-issue", type=int, required=True)
     parser.add_argument("--guard-author", required=True)
     parser.add_argument("--heartbeat-seconds", type=int, default=300)
+    parser.add_argument("--vm-template", choices=("ubuntu-cli", "ubuntu-desktop"), default="ubuntu-cli")
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -103,7 +111,12 @@ def main() -> int:
             local_manifest_dir=ROOT / "infra/k3s",
         ),
     )
-    launch = VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE)
+    template = (
+        (OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH, OFFICIAL_UBUNTU_DESKTOP_IMAGE)
+        if args.vm_template == "ubuntu-desktop"
+        else (OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE)
+    )
+    launch = VastLaunchContract(*template)
     controller = TwoNodeLease(
         provider=provider,
         server=NodeLease("server", "two-node-server-" + server_nonce, server_nonce, server_offer),
@@ -116,6 +129,8 @@ def main() -> int:
         "started_at": datetime.now(UTC).isoformat(),
         "hard_deadline": deadline.isoformat(),
         "heartbeat_seconds": args.heartbeat_seconds,
+        "vm_template": args.vm_template,
+        "launch": launch.to_json(),
         "status": "preflighted",
         "server": {"nonce": server_nonce, "offer": contract_record(server_offer)},
         "worker": {"nonce": worker_nonce, "offer": contract_record(worker_offer)},
