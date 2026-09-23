@@ -1,0 +1,11 @@
+rules:
+  - id: provider-secret-assignment
+    languages: [python]
+    severity: ERROR
+    message: Provider credentials must not be committed to source.
+    pattern-regex: '(?i)(vast|provider).{0,24}(api[_-]?key|token|secret)\\s*='
+  - id: unsafe-provider-create
+    languages: [python]
+    severity: ERROR
+    message: Phase 1 must not include a live Vast provider adapter.
+    pattern-regex: '(?i)vast\\.ai|vastai\\.create'
