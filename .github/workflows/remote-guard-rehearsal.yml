@@ -42,8 +42,7 @@ jobs:
           sudo install -m 600 /dev/null "$REHEARSAL_DIR/fake-provider-credential"
           printf '%s' 'rehearsal-not-a-secret' | sudo tee "$REHEARSAL_DIR/fake-provider-credential" >/dev/null
           sudo chmod 600 "$REHEARSAL_DIR/fake-provider-credential"
-          sudo chmod 755 guard/fake_vastai_cli.py
-          sudo ln -s "$GITHUB_WORKSPACE/guard/fake_vastai_cli.py" "$REHEARSAL_DIR/fake-bin/vastai"
+          sudo install -m 755 guard/fake_vastai_cli.py "$REHEARSAL_DIR/fake-bin/vastai"
           label="rehearsal-${GITHUB_RUN_ID}--nonce-${INPUT_NONCE}"
           sudo python3 - "$REHEARSAL_DIR/fake-bin/state.json" "$label" <<'PY'
           import json
