@@ -5,7 +5,7 @@ import json
 import pytest
 
 from srecon26_poc.integrity import IntegrityError
-from srecon26_poc.local_evidence import arm_allowlist, finalize_arm_bundle
+from srecon26_poc.local_evidence import arm_allowlist, finalize_arm_bundle, write_pending_anchor_metadata
 
 
 def _write_selected_arm(bundle, arm: str) -> None:
@@ -33,3 +33,18 @@ def test_finalize_arm_rejects_files_outside_explicit_allowlist(tmp_path) -> None
 
     with pytest.raises(IntegrityError, match="allowlist"):
         finalize_arm_bundle(bundle, "queue", "phase1-live-example")
+
+
+def test_anchor_metadata_keeps_external_receipt_pending(tmp_path) -> None:
+    bundle = tmp_path / "kv"
+    _write_selected_arm(bundle, "kv")
+    finalized = finalize_arm_bundle(bundle, "kv", "phase1-live-example")
+    anchor = tmp_path / "anchor.json"
+
+    write_pending_anchor_metadata(anchor, [finalized], relative_to=tmp_path)
+
+    payload = json.loads(anchor.read_text(encoding="utf-8"))
+    assert payload["external_guard_receipt"]["status"] == "PENDING"
+    assert payload["external_guard_receipt"]["receipt_path"] is None
+    assert payload["external_guard_receipt"]["required_root_hashes"] == {"kv": finalized.root_hash}
+    assert payload["selected_arms"][0]["bundle"] == "kv"

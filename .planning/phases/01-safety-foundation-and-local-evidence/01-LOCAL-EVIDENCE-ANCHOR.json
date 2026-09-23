@@ -1,0 +1,46 @@
+{
+  "external_guard_receipt": {
+    "note": "No independent guard acknowledgement exists yet; this metadata is not a receipt.",
+    "receipt_path": null,
+    "required_fields": [
+      "guard_id",
+      "nonce",
+      "acknowledged_at",
+      "root_hash"
+    ],
+    "required_root_hashes": {
+      "cpu": "1ae7f36ade32cf257e89edadbe3330be1f0584701f93c7607dad777b941834d2",
+      "kv": "0b61b3eb05eff58c8912ba0d3032dc1d60e495fe4c4af0b3d67e4bcbadf7be10",
+      "queue": "f2d9faaba8f9b440843ed7f14f7cbbd4d536c5ba9a2ad7111d7c3deb125fceeb"
+    },
+    "status": "PENDING"
+  },
+  "provenance": "local-synthetic",
+  "schema_version": 1,
+  "selected_arms": [
+    {
+      "allowlist": "EVIDENCE-MANIFEST.json",
+      "arm": "cpu",
+      "bundle": "local-evidence/phase1-live-202609d03531790135589z/cpu",
+      "manifest_sha256": "a6f164f87ae8093643c26e81ae0e343fe167cf27b65c7afa29bdc7be3e4cb744",
+      "root_hash": "1ae7f36ade32cf257e89edadbe3330be1f0584701f93c7607dad777b941834d2",
+      "run_id": "phase1-live-202609d03531790135589z"
+    },
+    {
+      "allowlist": "EVIDENCE-MANIFEST.json",
+      "arm": "kv",
+      "bundle": "local-evidence/phase1-live-202609d04031790136227z/kv",
+      "manifest_sha256": "1e5e4579cbe2959f67eadeb520a1616d648577d035ae9f22b5a7510d42316393",
+      "root_hash": "0b61b3eb05eff58c8912ba0d3032dc1d60e495fe4c4af0b3d67e4bcbadf7be10",
+      "run_id": "phase1-live-202609d04031790136227z"
+    },
+    {
+      "allowlist": "EVIDENCE-MANIFEST.json",
+      "arm": "queue",
+      "bundle": "local-evidence/phase1-live-202609d04271790137679z/queue",
+      "manifest_sha256": "88ab021207dee81ae2ae0baba383bfe96c76dadc3f24d4417bca410aee73f450",
+      "root_hash": "f2d9faaba8f9b440843ed7f14f7cbbd4d536c5ba9a2ad7111d7c3deb125fceeb",
+      "run_id": "phase1-live-202609d04271790137679z"
+    }
+  ]
+}
