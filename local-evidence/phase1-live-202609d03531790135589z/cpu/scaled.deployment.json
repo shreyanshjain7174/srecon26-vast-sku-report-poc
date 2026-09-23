@@ -1,0 +1,118 @@
+{
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "metadata": {
+        "annotations": {
+            "deployment.kubernetes.io/revision": "1",
+            "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"metadata\":{\"annotations\":{},\"name\":\"hpa-target\",\"namespace\":\"srecon26-local\"},\"spec\":{\"replicas\":1,\"selector\":{\"matchLabels\":{\"app\":\"hpa-target\"}},\"template\":{\"metadata\":{\"annotations\":{\"prometheus.io/path\":\"/metrics\",\"prometheus.io/port\":\"8000\",\"prometheus.io/scrape\":\"true\"},\"labels\":{\"app\":\"hpa-target\"}},\"spec\":{\"containers\":[{\"image\":\"srecon26-phase1-mock:local\",\"imagePullPolicy\":\"Never\",\"name\":\"server\",\"ports\":[{\"containerPort\":8000,\"name\":\"http\"}],\"readinessProbe\":{\"httpGet\":{\"path\":\"/health\",\"port\":\"http\"},\"periodSeconds\":2},\"resources\":{\"limits\":{\"cpu\":\"1\",\"memory\":\"128Mi\"},\"requests\":{\"cpu\":\"100m\",\"memory\":\"64Mi\"}}}]}}}}\n"
+        },
+        "creationTimestamp": "2026-09-23T03:53:58Z",
+        "generation": 2,
+        "labels": {
+            "srecon26.io/owner": "srecon26-phase1-phase1-live-202609d03531790135589z"
+        },
+        "name": "hpa-target",
+        "namespace": "srecon26-local",
+        "resourceVersion": "990",
+        "uid": "46ea77ee-2201-4b35-87dc-fd9d7a6be62b"
+    },
+    "spec": {
+        "progressDeadlineSeconds": 600,
+        "replicas": 2,
+        "revisionHistoryLimit": 10,
+        "selector": {
+            "matchLabels": {
+                "app": "hpa-target"
+            }
+        },
+        "strategy": {
+            "rollingUpdate": {
+                "maxSurge": "25%",
+                "maxUnavailable": "25%"
+            },
+            "type": "RollingUpdate"
+        },
+        "template": {
+            "metadata": {
+                "annotations": {
+                    "prometheus.io/path": "/metrics",
+                    "prometheus.io/port": "8000",
+                    "prometheus.io/scrape": "true"
+                },
+                "labels": {
+                    "app": "hpa-target"
+                }
+            },
+            "spec": {
+                "containers": [
+                    {
+                        "image": "srecon26-phase1-mock:local",
+                        "imagePullPolicy": "Never",
+                        "name": "server",
+                        "ports": [
+                            {
+                                "containerPort": 8000,
+                                "name": "http",
+                                "protocol": "TCP"
+                            }
+                        ],
+                        "readinessProbe": {
+                            "failureThreshold": 3,
+                            "httpGet": {
+                                "path": "/health",
+                                "port": "http",
+                                "scheme": "HTTP"
+                            },
+                            "periodSeconds": 2,
+                            "successThreshold": 1,
+                            "timeoutSeconds": 1
+                        },
+                        "resources": {
+                            "limits": {
+                                "cpu": "1",
+                                "memory": "128Mi"
+                            },
+                            "requests": {
+                                "cpu": "100m",
+                                "memory": "64Mi"
+                            }
+                        },
+                        "terminationMessagePath": "/dev/termination-log",
+                        "terminationMessagePolicy": "File"
+                    }
+                ],
+                "dnsPolicy": "ClusterFirst",
+                "restartPolicy": "Always",
+                "schedulerName": "default-scheduler",
+                "securityContext": {},
+                "terminationGracePeriodSeconds": 30
+            }
+        }
+    },
+    "status": {
+        "availableReplicas": 2,
+        "conditions": [
+            {
+                "lastTransitionTime": "2026-09-23T03:53:58Z",
+                "lastUpdateTime": "2026-09-23T03:54:00Z",
+                "message": "ReplicaSet \"hpa-target-9898bfb8d\" has successfully progressed.",
+                "reason": "NewReplicaSetAvailable",
+                "status": "True",
+                "type": "Progressing"
+            },
+            {
+                "lastTransitionTime": "2026-09-23T03:57:39Z",
+                "lastUpdateTime": "2026-09-23T03:57:39Z",
+                "message": "Deployment has minimum availability.",
+                "reason": "MinimumReplicasAvailable",
+                "status": "True",
+                "type": "Available"
+            }
+        ],
+        "observedGeneration": 2,
+        "readyReplicas": 2,
+        "replicas": 2,
+        "terminatingReplicas": 0,
+        "updatedReplicas": 2
+    }
+}

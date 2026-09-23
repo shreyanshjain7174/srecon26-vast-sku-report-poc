@@ -2,14 +2,16 @@
 
 ## Status and scope
 
-`scripts/run_canary.py` is an **offline fixture simulator**.  It has no
-provider adapter, browser driver, network client, or credential source.  A
-normal invocation writes a `BLOCKED` limitation manifest and exits without a
-provider create.  It is not a command to rent a GPU.
+`scripts/run_canary.py` defaults to an **offline fixture simulator**.  A normal
+invocation writes a `BLOCKED` limitation manifest and exits without a provider
+create.  It is not a command to rent a GPU.
 
-The separately reviewed Plan 02-06 paid dispatcher must consume a fresh set of
-gate evidence and use the lifecycle contract proven by these fixtures.  Until
-then, only the following local, in-memory command is available:
+Plan 02-06 adds a separately injected live dispatcher.  It has no built-in
+credential, SSH command, browser driver, offer, image, template, or remote
+workload implementation.  The operator-owned dispatcher factory must supply
+those privileged dependencies; this repository never discovers or defaults
+them.  Until that factory exists, only the following local, in-memory command
+is available:
 
 ```sh
 python3 scripts/run_canary.py --fixture --stage gpu-smoke --scenario success \
@@ -38,17 +40,89 @@ or ambiguous evidence is a `BLOCKED` terminal result before provider create.
 | Metric path ordering | A finalized smoke result is present before the metric-path stage may begin. |
 
 There are deliberately no fallback credentials, remembered offer IDs, default
-SKUs, or retry paths.  A create response that cannot be reconciled to exactly
-one nonce-bound label is never retried.
+SKUs, images, templates, or retry paths.  A create response that cannot be
+reconciled to exactly one nonce-bound label is never retried.
+
+## Live dispatcher contract
+
+The `--live` branch rejects missing inputs before it loads the integration
+factory.  It requires `--require-zero-instances`, `--nonce`, `--label`,
+`--offer-id`, `--hard-deadline`, `--phase1-verification`,
+`--semgrep-artifact`, `--provider-preflight`, `--guard-attestation`,
+`--report-fixture`, and `--dispatcher-factory`.  Metric path additionally
+requires `--smoke-manifest`.  All artifact paths must exist and be no more than
+five minutes old.  The dispatcher hashes every accepted gate file into the run
+manifest.
+
+The preflight JSON must say `eligible: true`,
+`balance_threshold_enabled: false`, and `instance_count: 0`.  It must contain
+one current exact offer whose `vms_enabled` flag is true.  The dispatcher
+re-reads that offer immediately before create and blocks if any contract field
+changed.  The guard record must be `ARMED` or `ACTIVE` and bind the exact
+nonce, label, immutable deadline, non-local host identity, and script hash.
+The report fixture must prove a `SUBMITTED` exact-target receipt with zero
+provider requests.
+
+Approved VM launch contracts are explicit pairs. Primary Ubuntu 22.04 uses
+template hash `b7942f6bbc4374893ff66eb78145bbac` and recorded image identity
+`docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16`. The authorized alternate
+uses Vast recommended template `10d921fdff3c0d2a794897d81ae870c5`
+(`Ubuntu Desktop (VM)`) and fixed tag
+`docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21`. Its redacted provider
+snapshot is hash-pinned in `evidence/vast-template-ubuntu-desktop-vm-20260923.json`.
+Remote probes must still prove Ubuntu 22.04, KVM, systemd, cgroup v2, Docker,
+and NVIDIA runtime before inference. The CLI selects the template with
+`--template_hash`, never a default image, and always uses exactly
+`130` GiB disk with `--ssh`, `--direct`, and `--cancel-unavail`. Vast documents
+`--direct` as requesting both direct and proxy SSH routes; it does not prove
+which route is usable. The resolver uses a direct endpoint only when the exact
+instance record supplies `public_ipaddr` plus `ports["22/tcp"][0].HostPort`;
+otherwise it records and uses the exact record's proxy pair. It never combines
+fields across routes or guesses a port. The exact create argument order is
+recorded in unit tests; provider CLI calls use an argument vector, never a
+shell string. The earlier one-attempt scope is exhausted. On 2026-09-23 the
+user explicitly authorized up to three new, distinct `inference-smoke`
+attempts when needed for a credible conference PoC. One additional replacement
+reservation is permitted only for hash-pinned run `inference-infer202609231456`,
+which terminated before `provider.create_intent` after its external desktop
+authentication response missed the 60-second window. Its canonical journal and
+three fresh zero-inventory provider reads are checked in as entitlement evidence.
+The `$4.25` inference category cap retains the four historical reservations
+(`$0.75 + $0.75 + $0.75 + $1.00`) and allows one final `$1.00` replacement under
+the unchanged `$5.00` global exposure ceiling. A second, hash-pinned controller
+replacement covers run `inference-infer20260923150917`: it reached real RTX 4090
+inference and HTTP 200, then failed because the controller over-escaped curl
+timing JSON. Exact teardown, three provider absence reads, guard anchor, and
+`$0.133` invoice evidence are retained. Settled actuals restore headroom without
+erasing any reservation history. Each attempt uses budget
+category `gpu-inference-smoke`, reserves at most `$1.00`, and still requires a
+fresh read-only CLI/schema preflight because the corrected direct route has not
+yet been live-validated. After seven preserved attempts, the user explicitly
+authorized one distinct-machine attempt with the pinned alternate template.
+The ledger rejects reservation eight unless its template hash and image pair
+match the pinned provider snapshot. Total exposure remains under the unchanged
+`$5.00` global and `$4.25` inference caps.
+
+The workload contract is equally frozen and explicit: model
+`Qwen/Qwen2.5-1.5B-Instruct`, revision
+`989aa7980e4cf806f80c7fef2b1adb7bc71aa306`, and the revalidated amd64 vLLM
+amd64 v0.10.2 digest
+`sha256:df2607b26bdda2875de4832f4d08da0055b4b6e3570347f3a849bcc652771dd6`.
+The remote executor must report all three values back from the running VM;
+missing or different values produce a limitation bundle, never real-GPU
+provenance.
 
 ## Lifecycle and deadline
 
-Before the sole permitted future create, the orchestrator journals the Decimal
+For an authorized create, the orchestrator must first journal the Decimal
 reservation, exact offer contract, immutable `hard_deadline`, and
-`report_start_by`.  The report start cutoff is:
+`report_start_by`. The current inference PoC uses one machine at a time and
+expands only when an actionable failure or a materially useful comparison
+justifies another. The
+report start cutoff is:
 
 ```
-hard_deadline - 60s report - 60s exact teardown - 45s three-read absence proof
+hard_deadline - 180s report - 180s exact teardown - 60s three-read absence proof
 ```
 
 The independent guard remains authoritative at the hard deadline.  A confirmed
@@ -58,14 +132,34 @@ down by exact numeric ID plus its nonce-bound label, then the runner records
 three separately timestamped absence reads.  A KVM capability failure performs
 the same cleanup but must not bootstrap k3s.
 
+The injected remote workload receives a heartbeat callback and has no authority
+to create or destroy instances.  It must return direct GPU identity, CUDA,
+KVM, and evidence files.  Metric path also needs fresh node/device-plugin/vLLM
+readiness, Prometheus, resource and custom metrics APIs, HPA state, events,
+timing, warm-up, and measured request evidence.  `provenance: real-gpu` and
+`real_gpu_claim: true` are emitted only after all of this evidence, exact
+teardown, three absence reads, and guard root-hash acknowledgement succeed.
+All other terminal paths are `live-limitation` bundles.
+
 ## Stage evidence requirements
 
 `gpu-smoke` records the frozen offer/instance contract, GPU and CUDA facts,
 KVM decision, lifecycle timestamps, cost reservation, diagnosis/report result,
 exact teardown, and absence proof.
 
-`metric-path` is permitted only after finalized smoke in a future paid
-dispatcher.  It additionally requires current node allocatable GPU, ready
+`inference-smoke` is the current proof path. It does not bootstrap k3s. On the
+created VM it starts the immutable vLLM image on loopback only, loads the frozen
+model revision, performs a warm-up and bounded concurrent streamed requests,
+and captures raw stream bodies, TTFT transport timing, end-to-end latency,
+token counts, derived TPOT/throughput, vLLM queue/KV metrics when exposed, and
+GPU utilization/memory samples before, during, and after load. Real-GPU success
+also requires a sealed measurement bound to the exact run ID, instance ID,
+nonce label, model revision, and image digest. Missing measurements are a safe
+failure, never a successful smoke.
+
+`metric-path` remains an unexecuted protocol, not an authorized next action. If
+a later paid dispatcher is explicitly authorized, it is permitted only after a
+finalized successful smoke. It additionally requires current node allocatable GPU, ready
 NVIDIA device plugin, ready vLLM pod holding exactly one GPU, healthy
 Prometheus target, fresh CPU/queue/KV metrics, one successful warm-up, one
 measured request, resource/custom metrics APIs, HPA state, events, and timing

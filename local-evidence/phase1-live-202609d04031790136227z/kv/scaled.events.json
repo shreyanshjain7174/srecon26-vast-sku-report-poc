@@ -1,0 +1,164 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-09-23T04:04:54Z",
+            "involvedObject": {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": "hpa-target",
+                "namespace": "srecon26-local",
+                "resourceVersion": "538",
+                "uid": "bae699a7-478b-406b-8487-f79da1a58bd7"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-09-23T04:04:54Z",
+            "message": "Scaled up replica set hpa-target-9898bfb8d from 0 to 1",
+            "metadata": {
+                "creationTimestamp": "2026-09-23T04:04:54Z",
+                "name": "hpa-target.18d7d779b8a2ef2c",
+                "namespace": "srecon26-local",
+                "resourceVersion": "546",
+                "uid": "9280ecdc-80e3-47f8-88ba-4e0b4b8df2cc"
+            },
+            "reason": "ScalingReplicaSet",
+            "reportingComponent": "deployment-controller",
+            "reportingInstance": "",
+            "source": {
+                "component": "deployment-controller"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-09-23T04:06:00Z",
+            "involvedObject": {
+                "apiVersion": "autoscaling/v2",
+                "kind": "HorizontalPodAutoscaler",
+                "name": "hpa-target",
+                "namespace": "srecon26-local",
+                "resourceVersion": "761",
+                "uid": "99f88e63-9ced-47fb-8ad5-3004d67ab968"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-09-23T04:06:00Z",
+            "message": "unable to get metric vllm_kv_cache_usage: unable to fetch metrics from custom metrics API: the server could not find the metric vllm_kv_cache_usage for pods",
+            "metadata": {
+                "creationTimestamp": "2026-09-23T04:06:00Z",
+                "name": "hpa-target.18d7d7891a846abf",
+                "namespace": "srecon26-local",
+                "resourceVersion": "781",
+                "uid": "6a3c35ac-9f01-46ce-866e-46cde4aea555"
+            },
+            "reason": "FailedGetPodsMetric",
+            "reportingComponent": "horizontal-pod-autoscaler",
+            "reportingInstance": "",
+            "source": {
+                "component": "horizontal-pod-autoscaler"
+            },
+            "type": "Warning"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-09-23T04:06:00Z",
+            "involvedObject": {
+                "apiVersion": "autoscaling/v2",
+                "kind": "HorizontalPodAutoscaler",
+                "name": "hpa-target",
+                "namespace": "srecon26-local",
+                "resourceVersion": "761",
+                "uid": "99f88e63-9ced-47fb-8ad5-3004d67ab968"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-09-23T04:06:00Z",
+            "message": "invalid metrics (1 invalid out of 1), first error is: failed to get pods metric value: unable to get metric vllm_kv_cache_usage: unable to fetch metrics from custom metrics API: the server could not find the metric vllm_kv_cache_usage for pods",
+            "metadata": {
+                "creationTimestamp": "2026-09-23T04:06:00Z",
+                "name": "hpa-target.18d7d7891b207ae5",
+                "namespace": "srecon26-local",
+                "resourceVersion": "783",
+                "uid": "15d39ea0-8ae8-4d7e-863d-4daa8a562102"
+            },
+            "reason": "FailedComputeMetricsReplicas",
+            "reportingComponent": "horizontal-pod-autoscaler",
+            "reportingInstance": "",
+            "source": {
+                "component": "horizontal-pod-autoscaler"
+            },
+            "type": "Warning"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-09-23T04:08:15Z",
+            "involvedObject": {
+                "apiVersion": "autoscaling/v2",
+                "kind": "HorizontalPodAutoscaler",
+                "name": "hpa-target",
+                "namespace": "srecon26-local",
+                "resourceVersion": "802",
+                "uid": "99f88e63-9ced-47fb-8ad5-3004d67ab968"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-09-23T04:08:15Z",
+            "message": "New size: 2; reason: pods metric vllm_kv_cache_usage above target",
+            "metadata": {
+                "creationTimestamp": "2026-09-23T04:08:15Z",
+                "name": "hpa-target.18d7d7a88d1e67c0",
+                "namespace": "srecon26-local",
+                "resourceVersion": "961",
+                "uid": "71befbd2-57ab-4f5c-99b1-d0d06bfd59a5"
+            },
+            "reason": "SuccessfulRescale",
+            "reportingComponent": "horizontal-pod-autoscaler",
+            "reportingInstance": "",
+            "source": {
+                "component": "horizontal-pod-autoscaler"
+            },
+            "type": "Normal"
+        },
+        {
+            "apiVersion": "v1",
+            "count": 1,
+            "eventTime": null,
+            "firstTimestamp": "2026-09-23T04:08:15Z",
+            "involvedObject": {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": "hpa-target",
+                "namespace": "srecon26-local",
+                "resourceVersion": "958",
+                "uid": "bae699a7-478b-406b-8487-f79da1a58bd7"
+            },
+            "kind": "Event",
+            "lastTimestamp": "2026-09-23T04:08:15Z",
+            "message": "Scaled up replica set hpa-target-9898bfb8d from 1 to 2",
+            "metadata": {
+                "creationTimestamp": "2026-09-23T04:08:15Z",
+                "name": "hpa-target.18d7d7a88d8d7188",
+                "namespace": "srecon26-local",
+                "resourceVersion": "962",
+                "uid": "826c9d92-5912-4e12-8242-177ace05bf22"
+            },
+            "reason": "ScalingReplicaSet",
+            "reportingComponent": "deployment-controller",
+            "reportingInstance": "",
+            "source": {
+                "component": "deployment-controller"
+            },
+            "type": "Normal"
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

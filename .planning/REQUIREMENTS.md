@@ -73,27 +73,27 @@
 
 ### Evidence Analyzer
 
-- [ ] **ANLZ-01**: Analyzer accepts an artifact bundle path and returns a structured verdict: `VALID`, `INVALID`, or `EXPLORATORY`, with a list of failing checks for non-`VALID` outcomes
-- [ ] **ANLZ-02**: Analyzer verifies SHA256 checksums for every file listed in `SHA256SUMS` before any other check
-- [ ] **ANLZ-03**: Analyzer verifies the root hash matches the value recorded in the guard journal anchor
+- [x] **ANLZ-01**: Analyzer accepts an artifact bundle path and returns a structured verdict: `VALID`, `INVALID`, or `EXPLORATORY`, with a list of failing checks for non-`VALID` outcomes
+- [x] **ANLZ-02**: Analyzer verifies SHA256 checksums for every file listed in `SHA256SUMS` before any other check
+- [x] **ANLZ-03**: Analyzer verifies the root hash matches the value recorded in the guard journal anchor
 - [ ] **ANLZ-04**: Analyzer checks provenance labels on every artifact; missing or `MIXED` provenance is an `INVALID` verdict
 - [ ] **ANLZ-05**: Analyzer checks event timestamps for monotonic ordering and containment within the declared run window
-- [ ] **ANLZ-06**: Analyzer verifies independence proof assertions: non-target signal maxima in the captured samples must be ≤ the declared margin for each local HPA arm
+- [x] **ANLZ-06**: Analyzer verifies independence proof assertions: non-target signal maxima in the captured samples must be ≤ the declared margin for each local HPA arm
 
 ### Chart Generation
 
-- [ ] **CHART-01**: Charts are generated only from artifact bundles that the analyzer has returned a `VALID` verdict for; `INVALID` or `EXPLORATORY` bundles produce no charts
-- [ ] **CHART-02**: Each chart carries a provenance annotation derived from the source artifact's label (`local-synthetic` or `real-gpu`)
-- [ ] **CHART-03**: CPU-vs-queue/KV comparison chart is generated only when the paired comparison bundle is `VALID` with three complete A/B blocks; otherwise it is replaced by a limitation notice
+- [x] **CHART-01**: Charts are generated only from artifact bundles that the analyzer has returned a `VALID` verdict for; `INVALID` or `EXPLORATORY` bundles produce no charts
+- [x] **CHART-02**: Each chart carries a provenance annotation derived from the source artifact's label (`local-synthetic` or `real-gpu`)
+- [x] **CHART-03**: CPU-vs-queue/KV comparison chart is generated only when the paired comparison bundle is `VALID` with three complete A/B blocks; otherwise it is replaced by a limitation notice
 
 ### 16-Slide Deck
 
-- [ ] **DECK-01**: Deck generator produces a 16-slide, 16:9 `.pptx` file with speaker notes on every slide
-- [ ] **DECK-02**: Slides 7–13 are generated exclusively from `VALID` artifact bundles; the generator refuses to render these slides from unvalidated or fabricated data
-- [ ] **DECK-03**: If a required `VALID` artifact is absent, slides 7–13 are replaced by a "limitation: experiment not yet run" slide — no placeholder or example data is substituted
-- [ ] **DECK-04**: Slides 1–6 and 14–16 (background, hypothesis, future work) are labeled with their claim category; no background slide contains a claim that requires artifact support
+- [x] **DECK-01**: Deck generator produces a 16-slide, 16:9 `.pptx` file with speaker notes on every slide
+- [x] **DECK-02**: Slides 7–13 are generated exclusively from `VALID` artifact bundles; the generator refuses to render these slides from unvalidated or fabricated data
+- [x] **DECK-03**: If a required `VALID` artifact is absent, slides 7–13 are replaced by a "limitation: experiment not yet run" slide — no placeholder or example data is substituted
+- [x] **DECK-04**: Slides 1–6 and 14–16 (background, hypothesis, future work) are labeled with their claim category; no background slide contains a claim that requires artifact support
 - [ ] **DECK-05**: Deck imports cleanly into Google Slides with no broken fonts, missing slides, or layout regressions; this is validated by screenshot evidence captured after import
-- [ ] **DECK-06**: Deck generation produces a `DECK-MANIFEST.json` listing each slide's source artifact paths and checksum references
+- [x] **DECK-06**: Deck generation produces a `DECK-MANIFEST.json` listing each slide's source artifact paths and checksum references
 
 ### Error Handling & Observability
 
@@ -101,7 +101,7 @@
 - [x] **ERR-02**: Any exception that causes the controller to halt produces a `HALT` journal event with the exception class, message, and traceback hash before process exit
 - [x] **ERR-03**: Budget ledger write failures are fatal and produce a `BUDGET_WRITE_FAIL` halt event; the controller never continues past a failed budget write
 - [x] **ERR-04**: Guard heartbeat failures are logged with timestamp and retry count; the guard treats three consecutive missed heartbeats as controller loss
-- [ ] **ERR-05**: Analyzer run produces a machine-readable verdict file (`verdict.json`) in addition to human-readable output; deck generator consumes `verdict.json`, not log output
+- [x] **ERR-05**: Analyzer run produces a machine-readable verdict file (`verdict.json`) in addition to human-readable output; deck generator consumes `verdict.json`, not log output
 
 ## v2 Requirements
 
@@ -186,22 +186,22 @@
 | PAIR-02 | Phase 2 | Pending |
 | PAIR-03 | Phase 2 | Pending |
 | PAIR-04 | Phase 2 | Pending |
-| ANLZ-01 | Phase 3 | Pending |
-| ANLZ-02 | Phase 3 | Pending |
-| ANLZ-03 | Phase 3 | Pending |
+| ANLZ-01 | Phase 3 | Complete |
+| ANLZ-02 | Phase 3 | Complete |
+| ANLZ-03 | Phase 3 | Complete |
 | ANLZ-04 | Phase 3 | Pending |
 | ANLZ-05 | Phase 3 | Pending |
-| ANLZ-06 | Phase 3 | Pending |
-| CHART-01 | Phase 3 | Pending |
-| CHART-02 | Phase 3 | Pending |
-| CHART-03 | Phase 3 | Pending |
-| DECK-01 | Phase 3 | Pending |
-| DECK-02 | Phase 3 | Pending |
-| DECK-03 | Phase 3 | Pending |
-| DECK-04 | Phase 3 | Pending |
+| ANLZ-06 | Phase 3 | Complete |
+| CHART-01 | Phase 3 | Complete |
+| CHART-02 | Phase 3 | Complete |
+| CHART-03 | Phase 3 | Complete |
+| DECK-01 | Phase 3 | Complete |
+| DECK-02 | Phase 3 | Complete |
+| DECK-03 | Phase 3 | Complete |
+| DECK-04 | Phase 3 | Complete |
 | DECK-05 | Phase 3 | Pending |
-| DECK-06 | Phase 3 | Pending |
-| ERR-05 | Phase 3 | Pending |
+| DECK-06 | Phase 3 | Complete |
+| ERR-05 | Phase 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 62 total

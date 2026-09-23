@@ -1,0 +1,109 @@
+{
+    "apiVersion": "autoscaling/v2",
+    "kind": "HorizontalPodAutoscaler",
+    "metadata": {
+        "annotations": {
+            "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"autoscaling/v2\",\"kind\":\"HorizontalPodAutoscaler\",\"metadata\":{\"annotations\":{},\"name\":\"hpa-target\",\"namespace\":\"srecon26-local\"},\"spec\":{\"behavior\":{\"scaleUp\":{\"stabilizationWindowSeconds\":0}},\"maxReplicas\":2,\"metrics\":[{\"pods\":{\"metric\":{\"name\":\"vllm_num_requests_waiting\"},\"target\":{\"averageValue\":\"1\",\"type\":\"AverageValue\"}},\"type\":\"Pods\"}],\"minReplicas\":1,\"scaleTargetRef\":{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"name\":\"hpa-target\"}}}\n"
+        },
+        "creationTimestamp": "2026-09-23T04:29:29Z",
+        "labels": {
+            "srecon26.io/owner": "srecon26-phase1-phase1-live-202609d04271790137679z"
+        },
+        "name": "hpa-target",
+        "namespace": "srecon26-local",
+        "resourceVersion": "973",
+        "uid": "4dd0020d-9a93-4d6f-90b8-729d3495f5f8"
+    },
+    "spec": {
+        "behavior": {
+            "scaleDown": {
+                "policies": [
+                    {
+                        "periodSeconds": 15,
+                        "type": "Percent",
+                        "value": 100
+                    }
+                ],
+                "selectPolicy": "Max"
+            },
+            "scaleUp": {
+                "policies": [
+                    {
+                        "periodSeconds": 15,
+                        "type": "Pods",
+                        "value": 4
+                    },
+                    {
+                        "periodSeconds": 15,
+                        "type": "Percent",
+                        "value": 100
+                    }
+                ],
+                "selectPolicy": "Max",
+                "stabilizationWindowSeconds": 0
+            }
+        },
+        "maxReplicas": 2,
+        "metrics": [
+            {
+                "pods": {
+                    "metric": {
+                        "name": "vllm_num_requests_waiting"
+                    },
+                    "target": {
+                        "averageValue": "1",
+                        "type": "AverageValue"
+                    }
+                },
+                "type": "Pods"
+            }
+        ],
+        "minReplicas": 1,
+        "scaleTargetRef": {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "name": "hpa-target"
+        }
+    },
+    "status": {
+        "conditions": [
+            {
+                "lastTransitionTime": "2026-09-23T04:29:44Z",
+                "message": "recommended size matches current size",
+                "reason": "ReadyForNewScale",
+                "status": "True",
+                "type": "AbleToScale"
+            },
+            {
+                "lastTransitionTime": "2026-09-23T04:30:00Z",
+                "message": "the HPA was able to successfully calculate a replica count from pods metric vllm_num_requests_waiting",
+                "reason": "ValidMetricFound",
+                "status": "True",
+                "type": "ScalingActive"
+            },
+            {
+                "lastTransitionTime": "2026-09-23T04:32:00Z",
+                "message": "the desired replica count is more than the maximum replica count",
+                "reason": "TooManyReplicas",
+                "status": "True",
+                "type": "ScalingLimited"
+            }
+        ],
+        "currentMetrics": [
+            {
+                "pods": {
+                    "current": {
+                        "averageValue": "4"
+                    },
+                    "metric": {
+                        "name": "vllm_num_requests_waiting"
+                    }
+                },
+                "type": "Pods"
+            }
+        ],
+        "currentReplicas": 2,
+        "desiredReplicas": 2,
+        "lastScaleTime": "2026-09-23T04:32:01Z"
+    }
+}

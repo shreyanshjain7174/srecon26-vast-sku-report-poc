@@ -1,0 +1,1 @@
+{"kind":"MetricValueList","apiVersion":"custom.metrics.k8s.io/v1beta1","metadata":{},"items":[{"describedObject":{"kind":"Pod","namespace":"srecon26-local","name":"hpa-target-9898bfb8d-cc9sg","apiVersion":"/v1"},"metricName":"vllm_kv_cache_usage","timestamp":"2026-09-23T03:56:28Z","value":"200m","selector":null}]}

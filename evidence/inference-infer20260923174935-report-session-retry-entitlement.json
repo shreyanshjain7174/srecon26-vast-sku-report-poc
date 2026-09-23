@@ -1,0 +1,30 @@
+{
+  "schema": "srecon26-inference-report-session-retry-entitlement/v1",
+  "run_id": "inference-infer20260923174935",
+  "label": "srecon26-inference--nonce-40ea6782c91b06808178364f",
+  "reason": "external desktop did not answer preflight-authenticated-session within 60 seconds",
+  "journal_sha256": "23b52819f536ccf84f7cc90fbdf554f038a0e4e6db3adae77c7d927365f70fed",
+  "authenticated_session_request_sha256": "a12d186dbddae0cd45a3fcfa0f2c4d35ce2b421fe6e258d0d7a6c3172a5e3ee7",
+  "provider_command": [
+    "show",
+    "instances",
+    "--raw"
+  ],
+  "provider_absence_reads": [
+    {
+      "observed_at": "2026-09-23T17:56:32Z",
+      "matching_instances": 0,
+      "raw": []
+    },
+    {
+      "observed_at": "2026-09-23T17:56:41Z",
+      "matching_instances": 0,
+      "raw": []
+    },
+    {
+      "observed_at": "2026-09-23T17:56:49Z",
+      "matching_instances": 0,
+      "raw": []
+    }
+  ]
+}

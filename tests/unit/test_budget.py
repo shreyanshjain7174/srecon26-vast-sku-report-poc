@@ -1,8 +1,72 @@
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from srecon26_poc.budget import BudgetExceeded, ExposureLedger
+from srecon26_poc.journal import RunJournal
+from srecon26_poc.types import RunIdentity, RunState
+
+
+def _proof(tmp_path, run_id: str, amount: str = "0.01"):
+    artifact = tmp_path / f"invoice-{run_id}.json"
+    payload = {
+        "schema": "srecon26-vast-invoice-evidence/v1",
+        "source": "VastCliProvider.capture_invoice_charge/v1",
+        "observed_at": "2026-09-23T06:30:25Z",
+        "run_id": run_id,
+        "instance_id": 417,
+        "label": f"label-{run_id}",
+        "amount_usd": amount,
+        "command": ["show", "invoices-v1", "--charges", "--verbose"],
+        "provider_charge": {"amount": amount, "source": "instance-417", "type": "instance", "metadata": {"label": f"label-{run_id}"}},
+    }
+    artifact.write_text(json.dumps(payload))
+    journal = RunJournal.create(tmp_path / f"journal-{run_id}", RunIdentity(run_id, f"label-{run_id}", datetime.now(UTC)))
+    now = datetime.now(UTC)
+    states = [
+        (RunState.OFFLINE_VALIDATED, "gates.passed", {}),
+        (RunState.BUDGET_RESERVED, "budget.reserved", {}),
+        (RunState.OFFER_PINNED, "offer.pinned", {}),
+        (RunState.REPORT_ADAPTER_READY, "report.adapter_ready", {}),
+        (RunState.GUARD_ARMED, "guard.armed", {}),
+        (RunState.CREATE_REQUESTED, "provider.create_intent", {}),
+        (RunState.CREATED_VERIFYING, "provider.create_observed", {"instance_id": 417}),
+    ]
+    for index, (state, event, event_payload) in enumerate(states, start=1):
+        journal.append(state, event, event_payload, now + timedelta(microseconds=index), index)
+    journal_path = journal.path
+    journal.append(RunState.DESTROYING, "teardown.exact", {"instance_id": 417, "label": f"label-{run_id}"}, now + timedelta(microseconds=8), 8)
+    journal.append(RunState.TERMINAL, "terminal.safe", {}, now + timedelta(microseconds=9), 9)
+    absence = tmp_path / f"absence-{run_id}.json"
+    absence.write_text(json.dumps({
+        "schema": "srecon26-vast-absence-evidence/v1",
+        "source": "VastCliProvider.capture_absence_evidence/v1",
+        "run_id": run_id,
+        "instance_id": 417,
+        "label": f"label-{run_id}",
+        "reads": [
+            {"observed_at": "2026-09-23T06:23:25Z", "matching_instances": 0},
+            {"observed_at": "2026-09-23T06:23:31Z", "matching_instances": 0},
+            {"observed_at": "2026-09-23T06:23:38Z", "matching_instances": 0},
+        ],
+    }))
+    return {
+        "reads": 3,
+        "instance_id": 417,
+        "label": f"label-{run_id}",
+        "billing": {
+            "source": "provider_invoice",
+            "artifact": artifact.name,
+            "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            "journal_artifact": str(journal_path.relative_to(tmp_path)),
+            "journal_sha256": hashlib.sha256(journal_path.read_bytes()).hexdigest(),
+            "absence_artifact": absence.name,
+            "absence_sha256": hashlib.sha256(absence.read_bytes()).hexdigest(),
+        },
+    }
 
 
 def test_cumulative_reservation_above_five_dollars_fails(tmp_path):
@@ -30,5 +94,413 @@ def test_actual_spend_does_not_release_reservation_without_absence_proof(tmp_pat
     with pytest.raises(ValueError, match="absence proof"):
         ledger.commit_actual("run-a", Decimal("0.01"), None)
     assert ledger.headroom() == Decimal("4.00")
-    ledger.commit_actual("run-a", Decimal("0.01"), {"reads": 3})
+    ledger.commit_actual("run-a", Decimal("0.01"), _proof(tmp_path, "run-a"))
+    assert ledger.headroom() == Decimal("4.99")
+    ledger.reserve("run-b", Decimal("0.99"), "gpu-smoke")
     assert ledger.headroom() == Decimal("4.00")
+
+
+def test_actual_spend_cannot_exceed_reservation(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("run-a", Decimal("1.00"), "gpu-smoke")
+    with pytest.raises(BudgetExceeded, match="fit within"):
+        ledger.commit_actual("run-a", Decimal("1.01"), _proof(tmp_path, "run-a", "1.01"))
+
+
+def test_actual_spend_still_counts_toward_category_cap(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("run-a", Decimal("1.00"), "gpu-smoke")
+    ledger.commit_actual("run-a", Decimal("0.01"), _proof(tmp_path, "run-a"))
+    with pytest.raises(BudgetExceeded):
+        ledger.reserve("run-b", Decimal("2.00"), "gpu-smoke")
+
+
+def test_audited_smoke_retry_envelope_keeps_pending_reservation_charged(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("pending-invoice", Decimal("0.97"), "gpu-smoke")
+    ledger.reserve("bounded-retry", Decimal("0.90"), "gpu-smoke-retry")
+    assert ledger.headroom() == Decimal("3.13")
+    with pytest.raises(BudgetExceeded):
+        ledger.reserve("overflow", Decimal("0.01"), "gpu-smoke-retry")
+
+
+def test_direct_inference_smoke_allows_three_bounded_reservations(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+
+    for run_id in ("inference-attempt-1", "inference-attempt-2", "inference-attempt-3"):
+        ledger.reserve(run_id, Decimal("0.50"), "gpu-inference-smoke")
+    assert ledger.headroom() == Decimal("3.50")
+    assert ledger.run_ids_for_category("gpu-inference-smoke") == (
+        "inference-attempt-1",
+        "inference-attempt-2",
+        "inference-attempt-3",
+    )
+    ledger.reserve("inference-attempt-4", Decimal("0.50"), "gpu-inference-smoke")
+    with pytest.raises(BudgetExceeded, match="requires pinned no-create replacement evidence"):
+        ledger.reserve("inference-attempt-5", Decimal("0.01"), "gpu-inference-smoke")
+
+
+def test_fifth_inference_reservation_requires_exact_pinned_no_create_journal(tmp_path, monkeypatch):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    for index in range(1, 5):
+        ledger.reserve(f"inference-attempt-{index}", Decimal("0.50"), "gpu-inference-smoke", machine_id=145337 + index)
+
+    run_id = "inference-attempt-4"
+    label = "srecon26-inference--nonce-timeout"
+    journal = RunJournal.create(tmp_path / run_id / "journal", RunIdentity(run_id, label, datetime.now(UTC)))
+    now = datetime.now(UTC)
+    states = [
+        (RunState.OFFLINE_VALIDATED, "gates.passed", {}),
+        (RunState.BUDGET_RESERVED, "budget.reserved", {}),
+        (RunState.OFFER_PINNED, "offer.pinned", {}),
+        (RunState.REPORT_ADAPTER_READY, "report.adapter_ready", {}),
+        (RunState.GUARD_ARMED, "guard.armed", {}),
+        (RunState.TERMINAL, "terminal.safe", {"limitation": "external desktop did not answer preflight-authenticated-session within 60 seconds", "status": "FAILED_SAFE"}),
+    ]
+    for index, (state, event, payload) in enumerate(states, start=1):
+        journal.append(state, event, payload, now + timedelta(microseconds=index), index)
+
+    journal_hash = hashlib.sha256(journal.path.read_bytes()).hexdigest()
+    evidence = tmp_path / "replacement.json"
+    evidence.write_text(json.dumps({
+        "schema": "srecon26-inference-replacement-entitlement/v1",
+        "run_id": run_id,
+        "journal_sha256": journal_hash,
+        "provider_command": ["show", "instances", "--raw"],
+        "provider_absence_reads": [{"matching_instances": 0, "raw": []} for _ in range(3)],
+    }))
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_RUN_ID", run_id)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_JOURNAL_SHA256", journal_hash)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_EVIDENCE_PATH", evidence)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_EVIDENCE_SHA256", hashlib.sha256(evidence.read_bytes()).hexdigest())
+    ledger.reserve("inference-attempt-5", Decimal("0.50"), "gpu-inference-smoke", machine_id=145400)
+    with pytest.raises(BudgetExceeded, match="requires pinned measurement-retry evidence"):
+        ledger.reserve("inference-attempt-6", Decimal("0.01"), "gpu-inference-smoke", machine_id=145401)
+
+
+def test_sixth_inference_reservation_requires_exact_pinned_measurement_retry(tmp_path, monkeypatch):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    for index in range(1, 6):
+        ledger.reserve(f"inference-attempt-{index}", Decimal("0.50"), "gpu-inference-smoke", machine_id=145337 + index) if index <= 4 else None
+
+    first_run = "inference-attempt-4"
+    first = RunJournal.create(tmp_path / first_run / "journal", RunIdentity(first_run, "srecon26-inference--nonce-timeout", datetime.now(UTC)))
+    now = datetime.now(UTC)
+    first_states = [
+        (RunState.OFFLINE_VALIDATED, "gates.passed", {}), (RunState.BUDGET_RESERVED, "budget.reserved", {}),
+        (RunState.OFFER_PINNED, "offer.pinned", {}), (RunState.REPORT_ADAPTER_READY, "report.adapter_ready", {}),
+        (RunState.GUARD_ARMED, "guard.armed", {}),
+        (RunState.TERMINAL, "terminal.safe", {"limitation": "external desktop did not answer preflight-authenticated-session within 60 seconds", "status": "FAILED_SAFE"}),
+    ]
+    for index, (state, event, payload) in enumerate(first_states, start=1):
+        first.append(state, event, payload, now + timedelta(microseconds=index), index)
+    first_hash = hashlib.sha256(first.path.read_bytes()).hexdigest()
+    first_evidence = tmp_path / "first-replacement.json"
+    first_evidence.write_text(json.dumps({"schema": "srecon26-inference-replacement-entitlement/v1", "run_id": first_run, "journal_sha256": first_hash, "provider_command": ["show", "instances", "--raw"], "provider_absence_reads": [{"matching_instances": 0, "raw": []} for _ in range(3)]}))
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_RUN_ID", first_run)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_JOURNAL_SHA256", first_hash)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_EVIDENCE_PATH", first_evidence)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_EVIDENCE_SHA256", hashlib.sha256(first_evidence.read_bytes()).hexdigest())
+    ledger.reserve("inference-attempt-5", Decimal("0.50"), "gpu-inference-smoke", machine_id=145342)
+
+    retry_run = "inference-attempt-5"
+    retry = RunJournal.create(tmp_path / retry_run / "journal", RunIdentity(retry_run, "srecon26-inference--nonce-measured", datetime.now(UTC)))
+    retry_states = [
+        (RunState.OFFLINE_VALIDATED, "gates.passed", {}), (RunState.BUDGET_RESERVED, "budget.reserved", {}),
+        (RunState.OFFER_PINNED, "offer.pinned", {}), (RunState.REPORT_ADAPTER_READY, "report.adapter_ready", {}),
+        (RunState.GUARD_ARMED, "guard.armed", {}), (RunState.CREATE_REQUESTED, "provider.create_intent", {}),
+        (RunState.CREATED_VERIFYING, "provider.create_observed", {"instance_id": 417}),
+        (RunState.RUNNING_CANARY, "canary.started", {"instance_id": 417}),
+        (RunState.DESTROYING, "teardown.exact", {"instance_id": 417, "label": "srecon26-inference--nonce-measured"}),
+        (RunState.ABSENCE_VERIFYING, "absence.proved", {"reads": 3}),
+        (RunState.TERMINAL, "terminal.safe", {"status": "FAILED_SAFE"}),
+    ]
+    for index, (state, event, payload) in enumerate(retry_states, start=1):
+        retry.append(state, event, payload, now + timedelta(seconds=1, microseconds=index), index)
+    retry_hash = hashlib.sha256(retry.path.read_bytes()).hexdigest()
+    retry_evidence = tmp_path / "measurement-retry.json"
+    retry_evidence.write_text(json.dumps({"schema": "srecon26-inference-measurement-retry-entitlement/v1", "run_id": retry_run, "journal_sha256": retry_hash, "provider_create_calls": 1, "provider_destroy_calls": 1, "absence_reads": 3, "report_attempted": False, "actual_usd": "0.133", "warmup_observation": {"http_code": 200, "model": "Qwen/Qwen2.5-1.5B-Instruct", "ttft_method": "curl_time_starttransfer_first_stream_response_byte"}}))
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_MEASUREMENT_RETRY_RUN_ID", retry_run)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_MEASUREMENT_RETRY_JOURNAL_SHA256", retry_hash)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_MEASUREMENT_RETRY_EVIDENCE_PATH", retry_evidence)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_MEASUREMENT_RETRY_EVIDENCE_SHA256", hashlib.sha256(retry_evidence.read_bytes()).hexdigest())
+    ledger.reserve("inference-attempt-6", Decimal("0.50"), "gpu-inference-smoke", machine_id=145343)
+    with pytest.raises(BudgetExceeded, match="requires pinned provider-startup retry evidence"):
+        ledger.reserve("inference-attempt-7", Decimal("0.01"), "gpu-inference-smoke", machine_id=145344)
+    monkeypatch.setattr(ExposureLedger, "_has_pinned_startup_retry_entitlement", lambda self, reservations: True)
+    ledger.reserve("inference-attempt-7", Decimal("0.01"), "gpu-inference-smoke", machine_id=145344)
+    with pytest.raises(BudgetExceeded, match="requires pinned alternate-template authorization"):
+        ledger.reserve("inference-attempt-8", Decimal("0.01"), "gpu-inference-smoke", machine_id=145345)
+    ledger.reserve(
+        "inference-attempt-8",
+        Decimal("0.01"),
+        "gpu-inference-smoke",
+        machine_id=145345,
+        template_hash="10d921fdff3c0d2a794897d81ae870c5",
+        image_contract="docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21",
+    )
+    with pytest.raises(BudgetExceeded, match="requires pinned no-create report-session evidence"):
+        ledger.reserve("inference-attempt-9", Decimal("0.01"), "gpu-inference-smoke", machine_id=145346)
+    monkeypatch.setattr(ExposureLedger, "_has_pinned_report_session_retry_entitlement", lambda self, reservations: True)
+    ledger.reserve(
+        "inference-attempt-9",
+        Decimal("0.01"),
+        "gpu-inference-smoke",
+        machine_id=145346,
+        template_hash="10d921fdff3c0d2a794897d81ae870c5",
+        image_contract="docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21",
+    )
+    with pytest.raises(BudgetExceeded, match="settled alternate-template failure"):
+        ledger.reserve("inference-attempt-10", Decimal("0.01"), "gpu-inference-smoke", machine_id=145347)
+    monkeypatch.setattr(ExposureLedger, "_has_settled_alternate_template_failure", lambda self, reservations: True)
+    ledger.reserve(
+        "inference-attempt-10",
+        Decimal("0.01"),
+        "gpu-inference-smoke",
+        machine_id=145347,
+        template_hash="b7942f6bbc4374893ff66eb78145bbac",
+        image_contract="docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16",
+    )
+    with pytest.raises(BudgetExceeded, match="settled terminal-startup failure"):
+        ledger.reserve("inference-attempt-11", Decimal("0.01"), "gpu-inference-smoke", machine_id=145348)
+    monkeypatch.setattr(ExposureLedger, "_has_settled_terminal_startup_failure", lambda self, reservations: True)
+    ledger.reserve(
+        "inference-attempt-11",
+        Decimal("0.01"),
+        "gpu-inference-smoke",
+        machine_id=145348,
+        template_hash="b7942f6bbc4374893ff66eb78145bbac",
+        image_contract="docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16",
+    )
+    with pytest.raises(BudgetExceeded, match="pinned no-create reservation-rejection evidence"):
+        ledger.reserve("inference-attempt-12", Decimal("0.01"), "gpu-inference-smoke", machine_id=145349)
+    monkeypatch.setattr(ExposureLedger, "_has_pinned_reservation_rejection_retry_entitlement", lambda self, reservations: True)
+    ledger.reserve(
+        "inference-attempt-12",
+        Decimal("0.01"),
+        "gpu-inference-smoke",
+        machine_id=145349,
+        template_hash="b7942f6bbc4374893ff66eb78145bbac",
+        image_contract="docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16",
+    )
+    with pytest.raises(BudgetExceeded, match="settled benign price-decrease evidence"):
+        ledger.reserve("inference-attempt-13", Decimal("0.01"), "gpu-inference-smoke", machine_id=145350)
+    monkeypatch.setattr(ExposureLedger, "_has_settled_benign_price_decrease", lambda self, reservations: True)
+    ledger.reserve(
+        "inference-attempt-13",
+        Decimal("0.01"),
+        "gpu-inference-smoke",
+        machine_id=145350,
+        template_hash="b7942f6bbc4374893ff66eb78145bbac",
+        image_contract="docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16",
+    )
+    with pytest.raises(BudgetExceeded, match="at most thirteen reservations"):
+        ledger.reserve("inference-attempt-14", Decimal("0.01"), "gpu-inference-smoke", machine_id=145351)
+
+
+def test_reservation_rejection_entitlement_validates_bound_artifacts_and_fails_closed(tmp_path, monkeypatch):
+    run_id = "inference-infer20260923182103"
+    nonce = "d27b6fd478c47bf2004c58fa"
+    label = f"srecon26-inference--nonce-{nonce}"
+    run_path = tmp_path / run_id
+    journal = RunJournal.create(run_path / "journal", RunIdentity(run_id, label, datetime.now(UTC)))
+    now = datetime.now(UTC)
+    states = [
+        (RunState.OFFLINE_VALIDATED, "gates.passed", {}),
+        (RunState.BUDGET_RESERVED, "budget.reserved", {}),
+        (RunState.OFFER_PINNED, "offer.pinned", {"offer_id": 48702994, "machine_id": 28666, "dph_total": "1.3694444444444445"}),
+        (RunState.REPORT_ADAPTER_READY, "report.adapter_ready", {}),
+        (RunState.GUARD_ARMED, "guard.armed", {}),
+        (RunState.TERMINAL, "terminal.safe", {"limitation": "frozen offer plus billing and teardown buffer can exceed the stage reservation", "status": "FAILED_SAFE"}),
+    ]
+    for index, (state, event, payload) in enumerate(states, start=1):
+        journal.append(state, event, payload, now + timedelta(microseconds=index), index)
+
+    report_path = run_path / "desktop-report" / ".external-report-test"
+    report_path.mkdir(parents=True)
+    request = {"schema": "srecon26-external-report-request/v1", "operation": "preflight-authenticated-session", "request_id": "request-1", "run_id": run_id, "nonce": nonce}
+    response = {**request, "schema": "srecon26-external-report-response/v1", "authenticated": True}
+    request_path = report_path / "01-preflight-authenticated-session.request.json"
+    response_path = report_path / "01-preflight-authenticated-session.request.response.json"
+    request_path.write_text(json.dumps(request))
+    response_path.write_text(json.dumps(response))
+
+    pre_anchor = run_path / "pre-anchor"
+    pre_anchor.mkdir()
+    sums_path = pre_anchor / "SHA256SUMS"
+    sums_path.write_text("sealed evidence\n")
+    root = hashlib.sha256(sums_path.read_bytes()).hexdigest()
+    (pre_anchor / "ROOT-HASH.txt").write_text(root + "\n")
+    manifest_path = pre_anchor / "run-manifest.json"
+    limitation_path = pre_anchor / "limitation.json"
+    manifest_path.write_text(json.dumps({"run_id": run_id}))
+    limitation_path.write_text(json.dumps({"status": "FAILED_SAFE"}))
+
+    journal_hash = hashlib.sha256(journal.path.read_bytes()).hexdigest()
+    evidence = {
+        "schema": "srecon26-inference-reservation-rejection-retry-entitlement/v1",
+        "run_id": run_id,
+        "label": label,
+        "nonce": nonce,
+        "journal_sha256": journal_hash,
+        "terminal_limitation": "frozen offer plus billing and teardown buffer can exceed the stage reservation",
+        "provider_create_calls": 0,
+        "guard_anchor_acknowledged": False,
+        "authenticated_session_request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "authenticated_session_response_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),
+        "pre_anchor_root": root,
+        "pre_anchor_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "pre_anchor_limitation_sha256": hashlib.sha256(limitation_path.read_bytes()).hexdigest(),
+        "provider_command": ["show", "instances", "--raw"],
+        "provider_absence_reads": [{"observed_at": f"2026-09-23T18:29:4{index}Z", "matching_instances": 0, "raw": []} for index in range(1, 4)],
+    }
+    evidence_path = tmp_path / "reservation-rejection.json"
+    evidence_path.write_text(json.dumps(evidence))
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_RESERVATION_REJECTION_JOURNAL_SHA256", journal_hash)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_RESERVATION_REJECTION_EVIDENCE_PATH", evidence_path)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_RESERVATION_REJECTION_EVIDENCE_SHA256", hashlib.sha256(evidence_path.read_bytes()).hexdigest())
+
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    reservations = {run_id: {"amount": "1.00", "category": "gpu-inference-smoke", "actual": None, "absence_proof": None, "machine_id": 28666, "template_hash": "b7942f6bbc4374893ff66eb78145bbac", "image_contract": "docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16"}}
+    assert ledger._has_pinned_reservation_rejection_retry_entitlement(reservations) is True
+
+    response["authenticated"] = False
+    response_path.write_text(json.dumps(response))
+    assert ledger._has_pinned_reservation_rejection_retry_entitlement(reservations) is False
+
+
+def test_fifth_inference_reservation_rejects_pinned_journal_with_create_intent(tmp_path, monkeypatch):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    run_id = "inference-attempt-4"
+    label = "srecon26-inference--nonce-created"
+    for index in range(1, 5):
+        ledger.reserve(f"inference-attempt-{index}", Decimal("0.50"), "gpu-inference-smoke", machine_id=145337 + index)
+    journal = RunJournal.create(tmp_path / run_id / "journal", RunIdentity(run_id, label, datetime.now(UTC)))
+    now = datetime.now(UTC)
+    states = [
+        (RunState.OFFLINE_VALIDATED, "gates.passed", {}),
+        (RunState.BUDGET_RESERVED, "budget.reserved", {}),
+        (RunState.OFFER_PINNED, "offer.pinned", {}),
+        (RunState.REPORT_ADAPTER_READY, "report.adapter_ready", {}),
+        (RunState.GUARD_ARMED, "guard.armed", {}),
+        (RunState.CREATE_REQUESTED, "provider.create_intent", {}),
+        (RunState.TERMINAL, "terminal.safe", {"limitation": "external desktop did not answer preflight-authenticated-session within 60 seconds", "status": "FAILED_SAFE"}),
+    ]
+    for index, (state, event, payload) in enumerate(states, start=1):
+        journal.append(state, event, payload, now + timedelta(microseconds=index), index)
+
+    journal_hash = hashlib.sha256(journal.path.read_bytes()).hexdigest()
+    evidence = tmp_path / "replacement.json"
+    evidence.write_text(json.dumps({
+        "schema": "srecon26-inference-replacement-entitlement/v1",
+        "run_id": run_id,
+        "journal_sha256": journal_hash,
+        "provider_command": ["show", "instances", "--raw"],
+        "provider_absence_reads": [{"matching_instances": 0, "raw": []} for _ in range(3)],
+    }))
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_RUN_ID", run_id)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_JOURNAL_SHA256", journal_hash)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_EVIDENCE_PATH", evidence)
+    monkeypatch.setattr("srecon26_poc.budget.INFERENCE_REPLACEMENT_EVIDENCE_SHA256", hashlib.sha256(evidence.read_bytes()).hexdigest())
+    with pytest.raises(BudgetExceeded, match="pinned no-create replacement evidence"):
+        ledger.reserve("inference-attempt-5", Decimal("0.50"), "gpu-inference-smoke", machine_id=145400)
+
+
+def test_direct_inference_smoke_rejects_a_reservation_over_fifty_cents(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+
+    with pytest.raises(BudgetExceeded):
+        ledger.reserve("inference-attempt", Decimal("1.000001"), "gpu-inference-smoke")
+
+
+def test_direct_inference_machine_binding_is_atomic_and_distinct(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+
+    ledger.reserve("inference-attempt-1", Decimal("0.50"), "gpu-inference-smoke", machine_id=145338)
+    with pytest.raises(BudgetExceeded, match="already reserved"):
+        ledger.reserve("inference-attempt-2", Decimal("0.50"), "gpu-inference-smoke", machine_id=145338)
+    ledger.reserve("inference-attempt-2", Decimal("0.50"), "gpu-inference-smoke", machine_id=145339)
+
+
+def test_machine_binding_is_rejected_outside_inference(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+
+    with pytest.raises(BudgetExceeded, match="restricted"):
+        ledger.reserve("canary-attempt", Decimal("0.50"), "canary", machine_id=145338)
+
+
+def test_distinct_machine_smoke_is_single_use_after_settled_retry(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("pending-original", Decimal("0.97"), "gpu-smoke")
+    ledger.reserve("settled-retry", Decimal("0.90"), "gpu-smoke-retry")
+    ledger.commit_actual("settled-retry", Decimal("0.005"), _proof(tmp_path, "settled-retry", "0.005"))
+
+    ledger.reserve("distinct-machine", Decimal("0.25"), "gpu-smoke-distinct-machine")
+
+    assert ledger.headroom() == Decimal("3.775")
+    assert ledger.smoke_run_ids() == ("distinct-machine", "pending-original", "settled-retry")
+    with pytest.raises(BudgetExceeded, match="unused entitlement"):
+        ledger.reserve("second-distinct-machine", Decimal("0.01"), "gpu-smoke-distinct-machine")
+
+
+def test_distinct_machine_smoke_requires_settled_retry(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("pending-original", Decimal("0.97"), "gpu-smoke")
+    ledger.reserve("pending-retry", Decimal("0.90"), "gpu-smoke-retry")
+
+    with pytest.raises(BudgetExceeded, match="one settled retry"):
+        ledger.reserve("distinct-machine", Decimal("0.25"), "gpu-smoke-distinct-machine")
+
+
+def test_audited_smoke_retry_rejects_one_dollar_and_requires_pending_original(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    with pytest.raises(BudgetExceeded, match="pending original"):
+        ledger.reserve("retry-without-original", Decimal("0.90"), "gpu-smoke-retry")
+    ledger.reserve("pending-invoice", Decimal("0.97"), "gpu-smoke")
+    with pytest.raises(BudgetExceeded):
+        ledger.reserve("oversized-retry", Decimal("1.00"), "gpu-smoke-retry")
+
+
+def test_idempotent_reservation_returns_without_relocking(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("run-a", Decimal("1.00"), "gpu-smoke")
+    assert ledger.reserve("run-a", Decimal("1.00"), "gpu-smoke") == Decimal("4.00")
+
+
+def test_malformed_entry_fails_closed(tmp_path):
+    path = tmp_path / "ledger.json"
+    path.write_text('{"reservations":{"bad":"not-a-mapping"}}')
+    with pytest.raises(Exception, match="safely"):
+        ExposureLedger(path).headroom()
+
+
+def test_tampered_invoice_evidence_fails_closed(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("run-a", Decimal("1.00"), "gpu-smoke")
+    proof = _proof(tmp_path, "run-a")
+    ledger.commit_actual("run-a", Decimal("0.01"), proof)
+    (tmp_path / "invoice-run-a.json").write_text("{}")
+    with pytest.raises(Exception, match="safely"):
+        ledger.headroom()
+
+
+def test_null_identity_cannot_release_reservation(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("run-a", Decimal("1.00"), "gpu-smoke")
+    proof = _proof(tmp_path, "run-a")
+    proof["instance_id"] = None
+    proof["label"] = None
+    with pytest.raises(ValueError, match="exact instance"):
+        ledger.commit_actual("run-a", Decimal("0.01"), proof)
+
+
+def test_missing_teardown_cannot_release_reservation(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+    ledger.reserve("run-a", Decimal("1.00"), "gpu-smoke")
+    proof = _proof(tmp_path, "run-a")
+    journal_path = tmp_path / proof["billing"]["journal_artifact"]
+    lines = journal_path.read_text().splitlines()
+    journal_path.write_text("\n".join(lines[:7]) + "\n")
+    proof["billing"]["journal_sha256"] = hashlib.sha256(journal_path.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="teardown|journal"):
+        ledger.commit_actual("run-a", Decimal("0.01"), proof)

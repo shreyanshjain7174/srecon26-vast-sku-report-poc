@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ import pytest
 
 from scripts.run_canary import (
     FixtureScenario,
+    _parse_inference_history,
     default_gate_evidence,
     run_blocked_paid_invocation,
     run_fixture,
@@ -18,16 +20,29 @@ from scripts.run_canary import (
 NOW = datetime(2026, 9, 23, 12, tzinfo=UTC)
 
 
+def test_parse_explicit_inference_history_binds_exact_prior_machine() -> None:
+    history = _parse_inference_history("inference-infer20260923155935:8024")
+
+    assert history.run_id == "inference-infer20260923155935"
+    assert history.machine_id == 8024
+
+
+@pytest.mark.parametrize("value", ["missing-separator", "run:zero", "run:not-an-int"])
+def test_parse_explicit_inference_history_rejects_invalid_identity(value: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_inference_history(value)
+
+
 def _manifest(result):
     return json.loads(result.manifest_path.read_text(encoding="utf-8"))
 
 
-def _run(tmp_path, scenario=FixtureScenario.SUCCESS, *, stage="gpu-smoke", evidence=None):
+def _run(tmp_path, scenario=FixtureScenario.SUCCESS, *, stage="gpu-smoke", reserve=Decimal("1.00"), evidence=None):
     return run_fixture(
         output_root=tmp_path,
         stage=stage,
         scenario=scenario,
-        reserve=Decimal("1.00"),
+        reserve=reserve,
         evidence=evidence,
         now=NOW,
         run_id=f"{stage}-{scenario.value}",
@@ -56,6 +71,20 @@ def test_metric_path_requires_and_records_complete_fixture_path(tmp_path) -> Non
     assert manifest["stage"] == "metric-path"
     assert manifest["contract_and_gpu_facts"]["fixture_only"] is True
     assert result.absence_reads == 3
+
+
+def test_inference_smoke_fixture_accepts_the_distinct_half_dollar_stage(tmp_path) -> None:
+    result = _run(tmp_path, stage="inference-smoke", reserve=Decimal("0.50"))
+    manifest = _manifest(result)
+
+    assert result.status == "COMPLETED"
+    assert manifest["stage"] == "inference-smoke"
+    assert manifest["cost"]["reserved"] == "0.50"
+
+
+def test_inference_smoke_fixture_refuses_to_exceed_its_entitlement(tmp_path) -> None:
+    with pytest.raises(ValueError, match="stage ceiling"):
+        _run(tmp_path, stage="inference-smoke", reserve=Decimal("1.000001"))
 
 
 def test_metric_path_blocks_until_smoke_is_finalized(tmp_path) -> None:

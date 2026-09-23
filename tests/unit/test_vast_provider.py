@@ -10,7 +10,17 @@ import pytest
 
 from srecon26_poc.contracts import OfferContract
 from srecon26_poc.provider import AccountSnapshot
-from srecon26_poc.vast_provider import VastCliProvider, VastPreflightError
+from srecon26_poc.provider import AmbiguousCreate
+from srecon26_poc.vast_provider import (
+    OFFICIAL_KVM_IMAGE,
+    OFFICIAL_UBUNTU_DESKTOP_IMAGE,
+    OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH,
+    OFFICIAL_UBUNTU_2204_TEMPLATE_HASH,
+    VastCliProvider,
+    VastLaunchContract,
+    VastPreflightError,
+    VastProviderError,
+)
 
 
 FIXTURES = Path(__file__).parents[2] / "providers" / "vast" / "fixtures"
@@ -65,6 +75,15 @@ def test_offer_contract_is_normalized_from_current_search_result(fixture_cli: Pa
     assert str(contract.dph_total) == "0.30"
 
 
+def test_kvm_offer_refreeze_uses_machine_query_then_exact_offer_id(fixture_cli: Path) -> None:
+    provider = VastCliProvider(fixture_cli, timeout_seconds=1)
+
+    contract = provider.get_vms_enabled_offer(101, machine_id=99, label="phase2-nonce-label")
+
+    assert contract.offer_id == 101
+    assert contract.machine_id == 99
+
+
 @pytest.mark.parametrize(
     "account_payload",
     [
@@ -116,4 +135,130 @@ def test_create_response_may_be_a_single_json_record() -> None:
     provider = VastCliProvider("fixture", runner=lambda _args, _timeout: record)
     contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
 
-    assert provider.create_once(contract, "run-id").instance_id == 77
+    assert provider.create_once(contract, "run-id", VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE)).instance_id == 77
+
+
+def test_create_acknowledgement_requires_label_reconciliation() -> None:
+    provider = VastCliProvider("fixture", runner=lambda _args, _timeout: '{"success": true, "new_contract": 77}')
+    contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
+
+    with pytest.raises(AmbiguousCreate, match="reconcile"):
+        provider.create_once(contract, "run-id", VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE))
+
+
+def test_create_requires_explicit_frozen_kvm_launch_contract_and_exact_arguments() -> None:
+    calls: list[list[str]] = []
+    record = '{"id": 77, "gpu_name": "RTX 3090", "num_gpus": 1, "gpu_ram": 24, "compute_cap": 860, "machine_id": 99, "dph_total": 0.30, "label": "run-nonce-label"}'
+    provider = VastCliProvider("fixture", runner=lambda args, _timeout: calls.append(args) or record)
+    contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
+
+    created = provider.create_once(contract, "run-id", VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE))
+
+    assert created.instance_id == 77
+    assert calls == [[
+        "fixture", "--raw", "--no-color", "create", "instance", "101",
+        "--template_hash", OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, "--disk", "130", "--ssh", "--direct", "--cancel-unavail", "--label", "run-nonce-label",
+    ]]
+
+
+def test_launch_manifest_records_that_direct_ssh_was_requested() -> None:
+    launch = VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE)
+
+    assert launch.to_json()["direct_ssh_requested"] is True
+
+
+def test_launch_contract_accepts_second_exact_official_vm_template_pair() -> None:
+    launch = VastLaunchContract(OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH, OFFICIAL_UBUNTU_DESKTOP_IMAGE)
+
+    assert launch.create_args(label="alternate-template-run")[:2] == ["--template_hash", OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH]
+
+
+def test_launch_contract_rejects_cross_template_image_metadata() -> None:
+    with pytest.raises(VastProviderError, match="approved exact Vast VM template and image pair"):
+        VastLaunchContract(OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE).validate()
+
+
+def test_alternate_template_rejects_tampered_provider_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot = tmp_path / "template.json"
+    snapshot.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr("srecon26_poc.vast_provider.OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_EVIDENCE", snapshot)
+
+    with pytest.raises(VastProviderError, match="pinned provider snapshot"):
+        VastLaunchContract(OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH, OFFICIAL_UBUNTU_DESKTOP_IMAGE).validate()
+
+
+def test_destroy_uses_noninteractive_yes_after_exact_label_check() -> None:
+    calls: list[list[str]] = []
+    record = '[{"id": 77, "gpu_name": "RTX 3090", "num_gpus": 1, "gpu_ram": 24, "compute_cap": 860, "machine_id": 99, "dph_total": 0.30, "label": "run-nonce-label"}]'
+
+    def runner(args: list[str], _timeout: int) -> str:
+        calls.append(args)
+        return record if "show" in args else ""
+
+    provider = VastCliProvider("fixture", runner=runner)
+    provider.destroy_exact(77, "run-nonce-label")
+
+    assert calls[-1][-4:] == ["destroy", "instance", "77", "--yes"]
+
+
+def test_invoice_capture_requires_and_records_exact_instance_and_label(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    response = json.dumps([
+        {"amount": 0.004, "source": "instance-77", "type": "instance", "metadata": {"label": "run-nonce-label"}},
+        {"amount": 1.0, "source": "instance-88", "type": "instance", "metadata": {"label": "other"}},
+    ])
+    provider = VastCliProvider("fixture", runner=lambda args, _timeout: calls.append(args) or response)
+    artifact = tmp_path / "invoice.json"
+
+    evidence = provider.capture_invoice_charge(run_id="run-id", instance_id=77, label="run-nonce-label", start_date="2026-09-23", end_date="2026-09-24", artifact=artifact)
+
+    payload = json.loads(artifact.read_text())
+    assert evidence.amount == Decimal("0.004")
+    assert payload["source"] == "VastCliProvider.capture_invoice_charge/v1"
+    assert payload["provider_charge"]["source"] == "instance-77"
+    assert payload["provider_charge"]["metadata"]["label"] == "run-nonce-label"
+    assert calls[0][:3] == ["fixture", "--raw", "--no-color"]
+
+
+def test_invoice_capture_refuses_label_mismatch(tmp_path: Path) -> None:
+    response = '[{"amount":0.004,"source":"instance-77","type":"instance","metadata":{"label":"other"}}]'
+    provider = VastCliProvider("fixture", runner=lambda _args, _timeout: response)
+
+    with pytest.raises(VastProviderError, match="exact"):
+        provider.capture_invoice_charge(run_id="run-id", instance_id=77, label="run-nonce-label", start_date="2026-09-23", end_date="2026-09-24", artifact=tmp_path / "invoice.json")
+
+
+def test_absence_capture_persists_three_fresh_zero_match_reads(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    provider = VastCliProvider("fixture", runner=lambda args, _timeout: calls.append(args) or "[]", sleeper=lambda _seconds: None)
+    artifact = tmp_path / "absence.json"
+
+    evidence = provider.capture_absence_evidence(run_id="run-id", instance_id=77, label="run-nonce-label", artifact=artifact, interval_seconds=0)
+
+    payload = json.loads(artifact.read_text())
+    assert evidence.sha256
+    assert len(payload["reads"]) == 3
+    assert [read["matching_instances"] for read in payload["reads"]] == [0, 0, 0]
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [
+        VastLaunchContract(),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE, disk_gib=129),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, "docker.io/vastai/kvm:latest"),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE, ssh=False),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE, request_direct_ssh=False),
+        VastLaunchContract(ubuntu_template_hash="not-a-template", image_contract=OFFICIAL_KVM_IMAGE),
+    ],
+)
+def test_create_refuses_missing_or_relaxed_vm_contract_before_cli_mutation(launch: VastLaunchContract) -> None:
+    calls: list[list[str]] = []
+    provider = VastCliProvider("fixture", runner=lambda args, _timeout: calls.append(args) or "[]")
+    contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
+
+    with pytest.raises(VastProviderError):
+        provider.create_once(contract, "run-id", launch)
+
+    assert calls == []

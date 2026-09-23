@@ -1,0 +1,14 @@
+{
+  "schema": "srecon26-inference-replacement-entitlement/v1",
+  "run_id": "inference-infer202609231456",
+  "label": "srecon26-inference--nonce-ddf8760f2183a52a24d2a769",
+  "reason": "external desktop did not answer preflight-authenticated-session within 60 seconds",
+  "journal_sha256": "0a66d7bd0ad2693db76a0e02327ed9a1c9ff61425c792130a2191742979407be",
+  "authenticated_session_request_sha256": "2c942adb537b473a676f86ab74a0642136b74a38eb1e6487802fe22484638564",
+  "provider_command": ["show", "instances", "--raw"],
+  "provider_absence_reads": [
+    {"observed_at": "2026-09-23T15:07:25Z", "matching_instances": 0, "raw": []},
+    {"observed_at": "2026-09-23T15:07:30Z", "matching_instances": 0, "raw": []},
+    {"observed_at": "2026-09-23T15:07:35Z", "matching_instances": 0, "raw": []}
+  ]
+}

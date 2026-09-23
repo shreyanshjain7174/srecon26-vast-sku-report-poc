@@ -41,6 +41,7 @@ class InstanceContract:
 def classify_fault(offer: OfferContract, instance: InstanceContract, probe: ProbeOutcome) -> FaultClass:
     if probe is not ProbeOutcome.PASS:
         return FaultClass.DIAGNOSIS_UNRESOLVED
-    expected = (offer.gpu_name, offer.num_gpus, offer.gpu_ram_mib, offer.compute_capability, offer.machine_id, offer.dph_total, offer.label)
-    actual = (instance.gpu_name, instance.num_gpus, instance.gpu_ram_mib, instance.compute_capability, instance.machine_id, instance.dph_total, instance.label)
-    return FaultClass.PROVIDER_FAULT_CONFIRMED if actual != expected else FaultClass.DIAGNOSIS_UNRESOLVED
+    expected = (offer.gpu_name, offer.num_gpus, offer.gpu_ram_mib, offer.compute_capability, offer.machine_id, offer.label)
+    actual = (instance.gpu_name, instance.num_gpus, instance.gpu_ram_mib, instance.compute_capability, instance.machine_id, instance.label)
+    harmful_price_change = instance.dph_total > offer.dph_total
+    return FaultClass.PROVIDER_FAULT_CONFIRMED if actual != expected or harmful_price_change else FaultClass.DIAGNOSIS_UNRESOLVED

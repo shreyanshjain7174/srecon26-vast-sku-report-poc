@@ -1,0 +1,2 @@
+# Preserve captured Prometheus exposition bytes exactly; trailing blank lines are evidence, not formatting errors.
+local-evidence/**/*.source.prom -diff

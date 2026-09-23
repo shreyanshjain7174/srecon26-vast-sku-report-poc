@@ -66,7 +66,7 @@ def main() -> int:
         _append(calls_path, {"operation": "show_instance", "instance_id": instance_id})
         print(json.dumps(instance if instance and instance["id"] == instance_id else {}))
         return 0
-    if len(args) == 3 and args[:2] == ["destroy", "instance"]:
+    if len(args) == 4 and args[:2] == ["destroy", "instance"] and args[3] == "--yes":
         instance_id = int(args[2])
         if instance is None or instance["id"] != instance_id:
             raise FakeVastError("fake destroy requires the exact live instance ID")

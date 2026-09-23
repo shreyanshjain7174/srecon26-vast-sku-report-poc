@@ -18,6 +18,7 @@ def main() -> int:
     parser.add_argument("--json", type=Path, required=True)
     parser.add_argument("--query", default="external=false rentable=true verified=true")
     parser.add_argument("--limit", type=int, default=5)
+    parser.add_argument("--storage", type=int, default=130)
     parser.add_argument("--vast-cli", default="vastai")
     args = parser.parse_args()
 
@@ -25,7 +26,7 @@ def main() -> int:
         parser.error("--limit must be between 1 and 25")
 
     try:
-        snapshot = VastCliProvider(args.vast_cli).read_only_preflight(args.query, limit=args.limit, require_ready=True)
+        snapshot = VastCliProvider(args.vast_cli).read_only_preflight(args.query, limit=args.limit, require_ready=True, storage_gib=args.storage)
         payload: dict[str, object] = {"eligible": True, **snapshot.to_json()}
         exit_code = 0
     except (VastPreflightError, VastProviderError) as error:

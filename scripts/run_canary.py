@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Offline-only lifecycle simulator for the bounded GPU canary.
+"""Fixture simulator plus injected, gate-bound live canary entry point.
 
-This module deliberately contains no provider client, credential loader, browser
-driver, or network dispatch.  Plan 02-06 may consume its verified lifecycle
-contract later, but it must supply a separately reviewed paid dispatcher.
+The default command stays fixture-only.  A paid dispatch has no defaults and
+needs an explicitly supplied integration factory that constructs independently
+reviewed provider, guard, report, and remote-workload dependencies.
 """
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import sys
 from dataclasses import dataclass, replace
@@ -34,13 +35,21 @@ from srecon26_poc.contracts import InstanceContract, OfferContract, ProbeOutcome
 from srecon26_poc.controller import ExperimentController, LifecycleHalted
 from srecon26_poc.guard import GuardAttestation
 from srecon26_poc.journal import RunJournal
+from srecon26_poc.live_dispatch import (
+    GateArtifactPaths,
+    InferenceAttemptHistory,
+    LiveCanaryDispatcher,
+    LiveCanaryRequest,
+    WorkloadContract,
+)
 from srecon26_poc.provider import AmbiguousCreate
 from srecon26_poc.reporting import FaultRecord, ReportGate, ReportReceipt
 from srecon26_poc.types import FaultClass, RunIdentity, RunState
+from srecon26_poc.vast_provider import VastLaunchContract
 
 
 NON_GPU_PROVENANCE = "offline-fixture"
-REPORT_MARGIN = timedelta(seconds=165)  # 60 report + 60 teardown + 45 absence
+REPORT_MARGIN = timedelta(seconds=420)  # 180 report + 180 teardown + 60 absence
 REQUIRED_GATES = (
     "phase1_passed",
     "semgrep_current",
@@ -279,12 +288,14 @@ def run_fixture(
 ) -> CanaryResult:
     """Exercise a complete offline lifecycle with an in-memory provider only."""
 
-    if stage not in {"gpu-smoke", "metric-path"}:
-        raise ValueError("stage must be gpu-smoke or metric-path")
+    if stage not in {"gpu-smoke", "inference-smoke", "metric-path"}:
+        raise ValueError("stage must be gpu-smoke, inference-smoke, or metric-path")
     if not isinstance(reserve, Decimal) or not reserve.is_finite() or reserve <= 0:
         raise ValueError("reserve must be a positive Decimal")
     if reserve > Decimal("1.00"):
         raise ValueError("reserve exceeds the stage ceiling")
+    if stage == "inference-smoke" and reserve > Decimal("1.00"):
+        raise ValueError("inference-smoke reserve exceeds the 1.00 entitlement")
     started = (now or datetime.now(UTC)).astimezone(UTC)
     clock = FixtureClock(started)
     label = f"srecon26-{stage}--nonce-fixture-nonce-01234567"
@@ -317,9 +328,9 @@ def run_fixture(
     provider = FixtureProvider(scenario, offer)
     guard = FixtureGuard("fixture-nonce-01234567", clock)
     report_adapter = FixtureReportAdapter(timeout=scenario is FixtureScenario.REPORT_TIMEOUT)
-    controller = ExperimentController(journal, provider, guard, ReportGate(report_adapter))
+    controller = ExperimentController(journal, provider, guard, ReportGate(report_adapter, now=clock.now))
     ledger = ExposureLedger(Path(output_root) / "fixture-exposure-ledger.json")
-    category = "gpu-smoke" if stage == "gpu-smoke" else "canary"
+    category = {"gpu-smoke": "gpu-smoke", "inference-smoke": "gpu-inference-smoke", "metric-path": "canary"}[stage]
     status, limitation, instance, absence_reads = "FAILED_SAFE", None, None, 0
     report_receipt: ReportReceipt | None = None
     try:
@@ -402,7 +413,8 @@ def run_fixture(
             absence_reads = len(proof.reads)
             _append(journal, clock, RunState.ABSENCE_VERIFYING, "absence.proved", {"reads": absence_reads})
             _append(journal, clock, RunState.TERMINAL, "terminal.safe", {"status": status, "limitation": limitation})
-            ledger.commit_actual(run_id, Decimal("0.00"), {"reads": absence_reads, "fixture": True})
+            # Fixture reservations stay conservative. Only a live provider
+            # credit delta may release a persisted reservation.
     except (BudgetExceeded, LifecycleHalted, TimeoutError, ValueError) as exc:
         limitation, status = str(exc), "FAILED_SAFE"
         if journal.state() is not RunState.TERMINAL:
@@ -451,22 +463,131 @@ def run_blocked_paid_invocation(*, output_root: Path, stage: str, reserve: Decim
     return CanaryResult("BLOCKED", "paid dispatch is intentionally unavailable until Plan 02-06", manifest_path, 0, (), 0, NON_GPU_PROVENANCE, None, None)
 
 
+def run_live_dispatch(*, dispatcher: LiveCanaryDispatcher, request: LiveCanaryRequest):
+    """Run code-only injected dependencies through the fail-closed paid lifecycle.
+
+    This deliberately accepts no credential, provider URL, shell command, or
+    browser object.  Those privileged capabilities live behind the injected
+    implementation and are reachable only after every artifact gate passes.
+    """
+
+    return dispatcher.run(request)
+
+
+def _parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError("timestamp must include a timezone")
+    return parsed.astimezone(UTC)
+
+
+def _parse_inference_history(value: str) -> InferenceAttemptHistory:
+    run_id, separator, machine_id = value.partition(":")
+    if not separator:
+        raise argparse.ArgumentTypeError("inference history must be RUN_ID:MACHINE_ID")
+    try:
+        history = InferenceAttemptHistory(run_id, int(machine_id))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("inference history machine id must be an integer") from error
+    if not history.valid():
+        raise argparse.ArgumentTypeError("inference history must contain a valid run and positive machine id")
+    return history
+
+
+def _load_dispatcher(spec: str) -> LiveCanaryDispatcher:
+    """Load an operator-owned integration factory; no repository default exists."""
+
+    module_name, separator, attribute = spec.partition(":")
+    if not separator or not module_name or not attribute:
+        raise ValueError("--dispatcher-factory must be module:callable")
+    factory = getattr(importlib.import_module(module_name), attribute)
+    dispatcher = factory()
+    if not isinstance(dispatcher, LiveCanaryDispatcher):
+        raise ValueError("dispatcher factory did not return LiveCanaryDispatcher")
+    return dispatcher
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Offline-only bounded canary lifecycle simulator")
-    parser.add_argument("--stage", choices=("gpu-smoke", "metric-path"), required=True)
+    parser.add_argument("--stage", choices=("gpu-smoke", "inference-smoke", "metric-path"), required=True)
     parser.add_argument("--reserve", type=Decimal, default=Decimal("1.00"))
+    parser.add_argument("--budget-category", choices=("gpu-inference-smoke", "gpu-smoke-retry", "gpu-smoke-distinct-machine"))
     parser.add_argument("--require-zero-instances", action="store_true")
     parser.add_argument("--fixture", action="store_true", help="run only an in-memory fixture")
+    parser.add_argument("--live", action="store_true", help="dispatch only through explicit gate artifacts and an injected integration factory")
     parser.add_argument("--scenario", choices=[item.value for item in FixtureScenario], default=FixtureScenario.SUCCESS.value)
     parser.add_argument("--output-root", type=Path, default=ROOT / "artifacts" / "runs")
     parser.add_argument("--run-id", default="fixture-run")
+    parser.add_argument("--nonce")
+    parser.add_argument("--label")
+    parser.add_argument("--offer-id", type=int)
+    parser.add_argument("--hard-deadline", type=_parse_utc)
+    parser.add_argument("--phase1-verification", type=Path)
+    parser.add_argument("--semgrep-artifact", type=Path)
+    parser.add_argument("--provider-preflight", type=Path)
+    parser.add_argument("--guard-attestation", type=Path)
+    parser.add_argument("--report-fixture", type=Path)
+    parser.add_argument("--smoke-manifest", type=Path)
+    parser.add_argument("--vm-image-contract")
+    parser.add_argument("--ubuntu-template-hash")
+    parser.add_argument("--model-id")
+    parser.add_argument("--model-revision")
+    parser.add_argument("--vllm-image-digest")
+    parser.add_argument(
+        "--inference-history",
+        action="append",
+        type=_parse_inference_history,
+        default=[],
+        metavar="RUN_ID:MACHINE_ID",
+        help="exact prior inference attempt identity when its sealed manifest lacks terminal anchor evidence",
+    )
+    parser.add_argument("--dispatcher-factory", help="operator-owned module:callable returning injected live dependencies")
     args = parser.parse_args()
     try:
-        result = (
-            run_fixture(output_root=args.output_root, stage=args.stage, scenario=FixtureScenario(args.scenario), reserve=args.reserve, run_id=args.run_id)
-            if args.fixture
-            else run_blocked_paid_invocation(output_root=args.output_root, stage=args.stage, reserve=args.reserve)
-        )
+        if args.fixture and args.live:
+            parser.error("--fixture and --live are mutually exclusive")
+        if args.live:
+            missing = [name for name, value in {
+                "--nonce": args.nonce,
+                "--label": args.label,
+                "--offer-id": args.offer_id,
+                "--hard-deadline": args.hard_deadline,
+                "--phase1-verification": args.phase1_verification,
+                "--semgrep-artifact": args.semgrep_artifact,
+                "--provider-preflight": args.provider_preflight,
+                "--guard-attestation": args.guard_attestation,
+                "--report-fixture": args.report_fixture,
+                "--ubuntu-template-hash": args.ubuntu_template_hash,
+                "--vm-image-contract": args.vm_image_contract,
+                "--model-id": args.model_id,
+                "--model-revision": args.model_revision,
+                "--vllm-image-digest": args.vllm_image_digest,
+                "--dispatcher-factory": args.dispatcher_factory,
+            }.items() if value is None]
+            if not args.require_zero_instances:
+                missing.append("--require-zero-instances")
+            if args.stage == "metric-path" and args.smoke_manifest is None:
+                missing.append("--smoke-manifest")
+            if missing:
+                parser.error("live dispatch requires " + ", ".join(missing))
+            request = LiveCanaryRequest(
+                args.stage,
+                args.run_id,
+                args.nonce,
+                args.label,
+                args.offer_id,
+                args.reserve,
+                args.hard_deadline,
+                GateArtifactPaths(args.phase1_verification, args.semgrep_artifact, args.provider_preflight, args.guard_attestation, args.report_fixture, args.smoke_manifest),
+                VastLaunchContract(ubuntu_template_hash=args.ubuntu_template_hash, image_contract=args.vm_image_contract),
+                WorkloadContract(args.model_id, args.model_revision, args.vllm_image_digest),
+                args.budget_category,
+                tuple(args.inference_history),
+            )
+            result = run_live_dispatch(dispatcher=_load_dispatcher(args.dispatcher_factory), request=request)
+            print(json.dumps({"status": result.status, "manifest": str(result.manifest_path), "provenance": result.provenance}, sort_keys=True))
+            return 0 if result.status in {"COMPLETED", "FAILED_SAFE", "REPORT_UNCONFIRMED", "HALTED", "BLOCKED"} else 2
+        result = run_fixture(output_root=args.output_root, stage=args.stage, scenario=FixtureScenario(args.scenario), reserve=args.reserve, run_id=args.run_id) if args.fixture else run_blocked_paid_invocation(output_root=args.output_root, stage=args.stage, reserve=args.reserve)
     except (InvalidOperation, ValueError) as exc:
         parser.error(str(exc))
     print(json.dumps({"status": result.status, "manifest": str(result.manifest_path), "provenance": result.provenance}, sort_keys=True))

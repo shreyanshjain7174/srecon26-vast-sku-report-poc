@@ -1,0 +1,22 @@
+{
+  "schema": "srecon26-inference-startup-retry-entitlement/v1",
+  "run_id": "inference-infer20260923154131",
+  "label": "srecon26-inference--nonce-8e886e93ecf9943ff9e70232",
+  "reason": "controller entered its canary phase, but 60 exact-instance provider reads never observed actual_status=running",
+  "instance_id": 52254086,
+  "machine_id": 49553,
+  "journal_sha256": "f1f384770f2962efbbd9814d5f3f7ebbd7d1ad1a6469b03e5da3e7ec7abe0c23",
+  "sealed_root": "fb41a294d00c304ca428e7ada5f4009f0b162c223fcfc8a8ded3ef72e732522b",
+  "root_hash_file_sha256": "acc2e5b2b74a09c78e44fc698688e2986d6f3a3cfaf308f61f82a7be448055a6",
+  "guard_anchor_sha256": "895a23daf7bd1347e8c263597f5bb2c3692bf0a27110011c6d7a156a496bec0d",
+  "provider_status_sha256": "3c6bbaaa8f7478fa95f565d6e5053dc8da1e97bcafa2a57b0ab0b48758f9ac69",
+  "provider_status_last_attempt": 60,
+  "provider_status_reached_running": false,
+  "invoice_sha256": "932b864043adc5aa79fd0a3509f75639ccd9007fee2e540eddf00e23eb9d1110",
+  "actual_usd": "0.008",
+  "absence_sha256": "d661f5f9ed025546590e5bbe8b394aa7fd374d72f886a9c7e0e08c49ddd996af",
+  "absence_reads": 3,
+  "provider_create_calls": 1,
+  "provider_destroy_calls": 1,
+  "report_attempted": false
+}

@@ -33,9 +33,16 @@ spec:
         prometheus.io/port: "8000"
         prometheus.io/path: /metrics
     spec:
+      nodeSelector:
+        srecon26.io/vllm-gpu: "true"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: vllm
-          image: docker.io/vllm/vllm-openai@sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b
+          image: docker.io/vllm/vllm-openai@sha256:df2607b26bdda2875de4832f4d08da0055b4b6e3570347f3a849bcc652771dd6
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-ceu"]
           args:
@@ -43,6 +50,10 @@ spec:
               exec vllm serve "$MODEL_ID" --revision "$MODEL_REVISION"
               --served-model-name srecon26-canary --host 0.0.0.0 --port 8000
           env:
+            - name: HOME
+              value: /tmp
+            - name: HF_HOME
+              value: /tmp/huggingface
             - name: MODEL_ID
               value: REQUIRED_AT_RUN_TIME_MODEL
             - name: MODEL_REVISION
@@ -59,6 +70,10 @@ spec:
               cpu: "4"
               memory: 20Gi
               nvidia.com/gpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           readinessProbe:
             httpGet:
               path: /health
