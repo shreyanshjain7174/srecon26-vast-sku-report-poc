@@ -232,6 +232,11 @@ def test_direct_inference_evidence_contract_retains_raw_stream_timing_tokens_que
         "capture_inference_gpu_snapshot \"$out\" after",
         "--query-compute-apps=pid,process_name,used_gpu_memory,gpu_uuid",
         "capture_inference_queue_metrics \"$out\" during",
+        '--output "$raw_body"',
+        'mktemp "/var/tmp/srecon26-inference-${label}.XXXXXX"',
+        'redact_stream <"$raw_body" >"$body"',
+        'status "REDACTION_FAILED"',
+        'jq -en --arg container "$container"',
     ):
         assert required_measurement in script
 

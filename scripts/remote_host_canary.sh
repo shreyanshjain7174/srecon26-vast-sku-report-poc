@@ -769,9 +769,13 @@ run_inference_stream_request() {
   local endpoint="$3"
   local payload="$4"
   local deadline_epoch="$5"
-  local request_timeout body raw_timing timing usage stream_model
+  local request_timeout body raw_body raw_timing timing usage stream_model
   request_timeout="$(inference_timeout_until_deadline "$deadline_epoch" "$(inference_request_timeout_seconds)")"
   body="$out/inference-${label}-body.ndjson"
+  # Keep unredacted transport bytes outside evidence.  Even a cleanup failure
+  # cannot make them part of the collected run bundle, and provider teardown
+  # removes the private VM-local temporary file.
+  raw_body="$(mktemp "/var/tmp/srecon26-inference-${label}.XXXXXX")"
   raw_timing="$out/inference-${label}-curl-timing.json"
   timing="$out/inference-${label}-timing.json"
   # curl's first response byte is explicitly retained as raw transport timing.
@@ -779,13 +783,21 @@ run_inference_stream_request() {
   # token timestamp.  ``include_usage`` provides server token counts on the
   # final streaming event, from which TPOT and completion throughput follow.
   if ! curl --no-buffer --silent --show-error --fail --max-time "$request_timeout" \
-    --output >(redact_stream >"$body") \
+    --output "$raw_body" \
     --write-out "{\\\"request\\\":\\\"${label}\\\",\\\"ttft_method\\\":\\\"curl_time_starttransfer_first_stream_response_byte\\\",\\\"ttft_seconds\\\":%{time_starttransfer},\\\"e2e_seconds\\\":%{time_total},\\\"http_code\\\":%{http_code}}\\n" \
     --header 'content-type: application/json' --data "$payload" "$endpoint/v1/completions" >"$raw_timing"; then
     jq -n --arg request "$label" --arg status "FAILED_OR_TIMED_OUT" \
       '{request: $request, status: $status}' >"$timing"
+    rm -f "$raw_body"
     return 1
   fi
+  if ! redact_stream <"$raw_body" >"$body"; then
+    rm -f "$raw_body"
+    jq -n --arg request "$label" --arg status "REDACTION_FAILED" \
+      '{request: $request, status: $status}' >"$timing"
+    return 1
+  fi
+  rm -f "$raw_body"
   usage="$(sed -n 's/^data: //p' "$body" | sed '/^\[DONE\]$/d' | jq -ces 'map(select(.usage? != null) | .usage) | last // empty')" \
     || { jq -n --arg request "$label" --arg status "MISSING_STREAM_USAGE" '{request: $request, status: $status}' >"$timing"; return 1; }
   stream_model="$(sed -n 's/^data: //p' "$body" | sed '/^\[DONE\]$/d' | jq -res 'map(select(.model? != null) | .model) | last // empty')" \
@@ -887,7 +899,7 @@ run_direct_inference_smoke() {
   capture_inference_until_deadline "$out/inference-container-port-bindings.json" "$phase_deadline" \
     docker inspect --format '{{json .HostConfig.PortBindings}}' "$container" \
     || die "cannot inspect direct vLLM port bindings"
-  jq -e --arg container "$container" --arg image "$CANARY_VLLM_IMAGE" \
+  jq -en --arg container "$container" --arg image "$CANARY_VLLM_IMAGE" \
     --slurpfile command "$out/inference-container-command.json" \
     --slurpfile ports "$out/inference-container-port-bindings.json" \
     '{container: $container, image: $image, command: $command[0], port_bindings: $ports[0]}' \
