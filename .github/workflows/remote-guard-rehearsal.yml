@@ -37,7 +37,8 @@ jobs:
           set -euo pipefail
           [[ "$INPUT_HEARTBEAT_TIMEOUT" =~ ^[0-9]+$ ]]
           (( INPUT_HEARTBEAT_TIMEOUT >= 1 && INPUT_HEARTBEAT_TIMEOUT <= 30 ))
-          sudo install -d -m 700 "$REHEARSAL_DIR/guard" "$REHEARSAL_DIR/fake-bin" "$REHEARSAL_DIR/artifact"
+          install -d -m 700 "$REHEARSAL_DIR" "$REHEARSAL_DIR/artifact"
+          sudo install -d -m 700 "$REHEARSAL_DIR/guard" "$REHEARSAL_DIR/fake-bin"
           sudo install -m 600 /dev/null "$REHEARSAL_DIR/fake-provider-credential"
           printf '%s' 'rehearsal-not-a-secret' | sudo tee "$REHEARSAL_DIR/fake-provider-credential" >/dev/null
           sudo chmod 600 "$REHEARSAL_DIR/fake-provider-credential"
