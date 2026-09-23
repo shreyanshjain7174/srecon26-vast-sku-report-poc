@@ -868,7 +868,9 @@ run_direct_inference_smoke() {
   jq -e --arg digest "${CANARY_VLLM_IMAGE##*@}" 'map(select(endswith("@" + $digest))) | length > 0' "$out/inference-image-inspect.json" >/dev/null \
     || die "Docker image inspection did not attest the requested immutable vLLM digest"
   capture_inference_until_deadline "$out/inference-container-run.txt" "$phase_deadline" \
-    docker run --detach --rm --name "$container" --gpus all --publish "127.0.0.1:${local_port}:8000" \
+    docker run --detach --rm --name "$container" --runtime nvidia \
+      --env NVIDIA_VISIBLE_DEVICES=all --env NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+      --publish "127.0.0.1:${local_port}:8000" \
       "$CANARY_VLLM_IMAGE" --model "$CANARY_MODEL" --revision "$CANARY_MODEL_REVISION" \
       --served-model-name "$CANARY_MODEL" --host 0.0.0.0 --port 8000 --max-model-len "$max_model_len" \
     || die "cannot start the direct localhost-only vLLM container"

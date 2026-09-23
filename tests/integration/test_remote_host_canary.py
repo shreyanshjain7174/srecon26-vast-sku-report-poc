@@ -180,6 +180,10 @@ def test_direct_inference_smoke_is_a_pinned_localhost_only_non_k3s_path() -> Non
     assert "docker image inspect" in direct_smoke
     assert "docker run --detach --rm" in direct_smoke
     assert '--publish "127.0.0.1:${local_port}:8000"' in direct_smoke
+    assert "--runtime nvidia" in direct_smoke
+    assert "NVIDIA_VISIBLE_DEVICES=all" in direct_smoke
+    assert "NVIDIA_DRIVER_CAPABILITIES=compute,utility" in direct_smoke
+    assert "--gpus all" not in direct_smoke
     assert "--revision \"$CANARY_MODEL_REVISION\"" in direct_smoke
     assert "--served-model-name \"$CANARY_MODEL\"" in direct_smoke
     assert "kubectl" not in direct_smoke

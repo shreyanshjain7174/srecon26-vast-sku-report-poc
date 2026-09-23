@@ -685,6 +685,7 @@ class SshRemoteWorkload:
         transport = run_directory / "remote-transport"
         transport.mkdir(parents=True, exist_ok=True)
         cleanup_needed = False
+        endpoint: SshEndpoint | None = None
         evidence_files: tuple[Path, ...] = ()
         try:
             self.resolver.attach_public_key(instance, self.config.public_key_file, hard_deadline=hard_deadline, heartbeat=heartbeat, status_log=transport / "provider-status.ndjson")
@@ -745,9 +746,15 @@ class SshRemoteWorkload:
             failure = transport / "failure.txt"
             failure.parent.mkdir(parents=True, exist_ok=True)
             failure.write_text(str(error) + "\n", encoding="utf-8")
-            return LiveEvidence(None, None, None, provider_fault=None, probe_outcome=ProbeOutcome.CONTROLLER_FAILED, evidence_files=tuple(path for path in transport.rglob("*") if path.is_file()))
+            if endpoint is not None:
+                try:
+                    self._fetch(endpoint, remote_evidence, local_evidence, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-failure-evidence.log")
+                except Exception as fetch_error:
+                    (transport / "failure-evidence-fetch.txt").write_text(str(fetch_error) + "\n", encoding="utf-8")
+            evidence_files = tuple(path for path in local_evidence.rglob("*") if path.is_file()) + tuple(path for path in transport.rglob("*") if path.is_file())
+            return LiveEvidence(None, None, None, provider_fault=None, probe_outcome=ProbeOutcome.CONTROLLER_FAILED, evidence_files=evidence_files)
         finally:
-            if cleanup_needed:
+            if cleanup_needed and endpoint is not None:
                 try:
                     self._remote(endpoint, ["env", f"CANARY_EVIDENCE_DIR={remote_evidence}", f"CANARY_MANIFEST_DIR={root}/manifests", f"CANARY_MANIFEST_SHA256={self._manifest_hash(self.config.local_manifest_dir)}", "bash", f"{root}/remote_host_canary.sh", "cleanup"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "cleanup.log")
                 except Exception:
