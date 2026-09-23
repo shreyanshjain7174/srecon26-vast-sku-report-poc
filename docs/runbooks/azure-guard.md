@@ -94,8 +94,11 @@ receipt only when it has all of the following:
 Call `preflight` after arming so `GuardClient` can construct and validate the
 attestation. The transport rejects a preflight receipt unless it restates the
 exact nonce, label, and immutable deadline from its validated `ARMED` receipt.
-Send bounded heartbeats during the run. Anchor the local evidence root, then
-collect `status` receipts.
+Reuse that armed transport for the rest of the run: heartbeat, status, and
+anchor receipts must each restate the cached arm nonce, label, and immutable
+deadline; an echo of later caller-supplied fields is not sufficient. Send
+bounded heartbeats during the run. Anchor the local evidence root, then collect
+`status` receipts.
 
 After the final `status` response, invoke the bounded export RPC with that
 receipt's nonce and journal root:

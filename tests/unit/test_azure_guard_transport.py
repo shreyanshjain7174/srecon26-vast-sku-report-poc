@@ -21,6 +21,16 @@ LABEL = f"srecon26-run-1--nonce-{NONCE}"
 ROOT = "a" * 64
 
 
+def _arm_receipt() -> dict[str, object]:
+    return {
+        "status": "ARMED",
+        "root_hash": ROOT,
+        "nonce": NONCE,
+        "label": LABEL,
+        "hard_deadline": "2026-09-24T04:00:00Z",
+    }
+
+
 def _transport(tmp_path: Path, runner) -> AzureSshGuardTransport:
     identity = tmp_path / "guard-key"
     identity.write_text("test-private-key-placeholder", encoding="utf-8")
@@ -222,20 +232,30 @@ def test_absence_confirmed_requires_three_distinct_ordered_observations(tmp_path
 
 def test_absence_confirmed_accepts_exactly_three_distinct_ordered_observations(tmp_path: Path) -> None:
     observations = ["2026-09-24T04:01:00Z", "2026-09-24T04:02:00Z", "2026-09-24T04:03:00Z"]
+    responses = iter(
+        [
+            _arm_receipt(),
+            {
+                "status": "ABSENCE_CONFIRMED",
+                "root_hash": ROOT,
+                "nonce": NONCE,
+                "label": LABEL,
+                "hard_deadline": "2026-09-24T04:00:00Z",
+                "teardown_authority_at": "2026-09-24T04:00:00Z",
+                "absence_observations": observations,
+            },
+        ]
+    )
 
     def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
-        response = {
-            "status": "ABSENCE_CONFIRMED",
-            "root_hash": ROOT,
-            "nonce": NONCE,
-            "label": LABEL,
-            "hard_deadline": "2026-09-24T04:00:00Z",
-            "teardown_authority_at": "2026-09-24T04:00:00Z",
-            "absence_observations": observations,
-        }
-        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(response), stderr="")
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(next(responses)), stderr="")
 
-    assert _transport(tmp_path, runner).call("status", {"nonce": NONCE})["absence_observations"] == observations
+    transport = _transport(tmp_path, runner)
+    transport.call(
+        "arm",
+        {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "hard_deadline": "2026-09-24T04:00:00Z"},
+    )
+    assert transport.call("status", {"nonce": NONCE})["absence_observations"] == observations
 
 
 def test_evidence_export_is_bounded_and_hash_verified(tmp_path: Path) -> None:
@@ -280,3 +300,42 @@ def test_evidence_export_rejects_a_journal_hash_mismatch(tmp_path: Path) -> None
 def test_streaming_runner_terminates_when_stdout_exceeds_the_hard_cap() -> None:
     with pytest.raises(AzureGuardTransportError, match="size limit"):
         _run([sys.executable, "-c", "import sys; sys.stdout.write('x' * 70000)"], "{}\n", 5)
+
+
+@pytest.mark.parametrize("command", ["heartbeat", "status", "anchor"])
+@pytest.mark.parametrize("foreign_field", ["nonce", "label", "hard_deadline"])
+def test_post_arm_rpcs_reject_foreign_run_receipts(tmp_path: Path, command: str, foreign_field: str) -> None:
+    response: dict[str, object] = {
+        "status": "ARMED",
+        "root_hash": ROOT,
+        "nonce": NONCE,
+        "label": LABEL,
+        "hard_deadline": "2026-09-24T04:00:00Z",
+    }
+    if command == "anchor":
+        response["anchored_root_hash"] = ROOT
+    if foreign_field == "nonce":
+        response["nonce"] = "foreign_nonce_1234"
+        response["label"] = "foreign-run--nonce-foreign_nonce_1234"
+    elif foreign_field == "label":
+        response["label"] = f"foreign-run--nonce-{NONCE}"
+    else:
+        response["hard_deadline"] = "2026-09-24T04:00:01Z"
+    responses = iter([_arm_receipt(), response])
+
+    def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(next(responses)), stderr="")
+
+    transport = _transport(tmp_path, runner)
+    transport.call(
+        "arm",
+        {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "hard_deadline": "2026-09-24T04:00:00Z"},
+    )
+    payloads = {
+        "heartbeat": {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "monotonic_ns": 1},
+        "status": {"nonce": NONCE},
+        "anchor": {"nonce": NONCE, "root_hash": ROOT},
+    }
+
+    with pytest.raises(AzureGuardTransportError):
+        transport.call(command, payloads[command])

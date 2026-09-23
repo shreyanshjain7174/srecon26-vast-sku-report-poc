@@ -312,15 +312,28 @@ def _validate_response(
         _required(response, frozenset({"status", "root_hash", "nonce", "label", "hard_deadline"}), command)
         if status not in {"ARMED", "AWAITING_INSTANCE"}:
             raise AzureGuardTransportError("Azure guard heartbeat returned a non-heartbeatable status")
-        if response["nonce"] != payload["nonce"] or response["label"] != payload["label"]:
-            raise AzureGuardTransportError("Azure guard heartbeat response changed ownership")
+        if payload["nonce"] != binding["nonce"] or payload["label"] != binding["label"]:
+            raise AzureGuardTransportError("Azure guard heartbeat request differs from the validated arm receipt")
+        if response["nonce"] != binding["nonce"] or response["label"] != binding["label"]:
+            raise AzureGuardTransportError("Azure guard heartbeat response differs from the validated arm receipt")
         if not _same_timestamp(response["hard_deadline"], binding["hard_deadline"], "hard_deadline"):
             raise AzureGuardTransportError("Azure guard heartbeat changed the deadline")
     elif command == "status":
+        if binding is None:
+            raise AzureGuardTransportError("Azure guard status requires a validated arm receipt")
         _required(response, frozenset({"status", "root_hash", "nonce", "label", "hard_deadline"}), command)
-        if status not in _RECEIPT_STATUSES or response["nonce"] != payload["nonce"]:
-            raise AzureGuardTransportError("Azure guard status response is invalid or changed ownership")
+        if payload["nonce"] != binding["nonce"]:
+            raise AzureGuardTransportError("Azure guard status request differs from the validated arm receipt")
+        if (
+            status not in _RECEIPT_STATUSES
+            or response["nonce"] != binding["nonce"]
+            or response["label"] != binding["label"]
+            or not _same_timestamp(response["hard_deadline"], binding["hard_deadline"], "hard_deadline")
+        ):
+            raise AzureGuardTransportError("Azure guard status response differs from the validated arm receipt")
     elif command == "anchor":
+        if binding is None:
+            raise AzureGuardTransportError("Azure guard anchor requires a validated arm receipt")
         _required(
             response,
             frozenset({"status", "root_hash", "nonce", "label", "hard_deadline", "anchored_root_hash"}),
@@ -328,10 +341,13 @@ def _validate_response(
         )
         if (
             status not in _RECEIPT_STATUSES
-            or response["nonce"] != payload["nonce"]
+            or payload["nonce"] != binding["nonce"]
+            or response["nonce"] != binding["nonce"]
+            or response["label"] != binding["label"]
+            or not _same_timestamp(response["hard_deadline"], binding["hard_deadline"], "hard_deadline")
             or response["anchored_root_hash"] != payload["root_hash"]
         ):
-            raise AzureGuardTransportError("Azure guard anchor response is not bound to the request")
+            raise AzureGuardTransportError("Azure guard anchor response differs from the validated arm receipt")
     else:
         _required(
             response,
