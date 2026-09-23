@@ -56,6 +56,7 @@ ALTERNATE_TEMPLATE_EVIDENCE_SHA256 = "771fd7af957052ea991a29c95f8f61d59124a23d7f
 ALTERNATE_TEMPLATE_LIVE_FAILURE_RUN_ID = "inference-infer20260923175832"
 PRIMARY_TEMPLATE_HASH = "b7942f6bbc4374893ff66eb78145bbac"
 PRIMARY_TEMPLATE_IMAGE = "docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16"
+PRIMARY_TEMPLATE_TERMINAL_FAILURE_RUN_ID = "inference-infer20260923180850"
 
 
 class BudgetExceeded(ValueError):
@@ -495,6 +496,20 @@ class ExposureLedger:
             and proof.get("reads") == 3
         )
 
+    def _has_settled_terminal_startup_failure(self, reservations: Mapping[str, object]) -> bool:
+        entry = reservations.get(PRIMARY_TEMPLATE_TERMINAL_FAILURE_RUN_ID)
+        proof = entry.get("absence_proof") if isinstance(entry, Mapping) else None
+        return (
+            isinstance(entry, Mapping)
+            and entry.get("category") == "gpu-inference-smoke"
+            and self._decimal(entry.get("actual")) == Decimal("0.002")
+            and entry.get("machine_id") == 31550
+            and entry.get("template_hash") == PRIMARY_TEMPLATE_HASH
+            and entry.get("image_contract") == PRIMARY_TEMPLATE_IMAGE
+            and isinstance(proof, Mapping)
+            and proof.get("reads") == 3
+        )
+
     def reserve(self, run_id: str, amount: Decimal, category: str, *, machine_id: int | None = None, template_hash: str | None = None, image_contract: str | None = None) -> Decimal:
         amount = self._decimal(amount)
         if amount <= 0 or category not in CATEGORY_CAPS:
@@ -535,8 +550,8 @@ class ExposureLedger:
                     raise BudgetExceeded("distinct-machine smoke requires one pending original, one settled retry, and one unused entitlement")
             if category == "gpu-inference-smoke":
                 inference_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
-                if len(inference_smokes) >= 10:
-                    raise BudgetExceeded("direct inference smoke allows at most ten reservations")
+                if len(inference_smokes) >= 11:
+                    raise BudgetExceeded("direct inference smoke allows at most eleven reservations")
                 if len(inference_smokes) == 4 and not self._has_pinned_inference_replacement_entitlement(reservations):
                     raise BudgetExceeded("fifth inference reservation requires pinned no-create replacement evidence")
                 if len(inference_smokes) == 5 and not self._has_pinned_measurement_retry_entitlement(reservations):
@@ -556,6 +571,12 @@ class ExposureLedger:
                     or image_contract != PRIMARY_TEMPLATE_IMAGE
                 ):
                     raise BudgetExceeded("tenth inference reservation requires settled alternate-template failure and exact primary-template recovery")
+                if len(inference_smokes) == 10 and (
+                    not self._has_settled_terminal_startup_failure(reservations)
+                    or template_hash != PRIMARY_TEMPLATE_HASH
+                    or image_contract != PRIMARY_TEMPLATE_IMAGE
+                ):
+                    raise BudgetExceeded("eleventh inference reservation requires settled terminal-startup failure and exact primary-template recovery")
                 if amount > Decimal("1.00"):
                     raise BudgetExceeded("direct inference smoke reservation must be no greater than 1.00")
                 if machine_id is not None and any(entry.get("machine_id") == machine_id for entry in inference_smokes):
