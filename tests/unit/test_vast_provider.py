@@ -159,6 +159,20 @@ def test_create_requires_explicit_frozen_kvm_launch_contract_and_exact_arguments
     ]]
 
 
+def test_destroy_uses_noninteractive_yes_after_exact_label_check() -> None:
+    calls: list[list[str]] = []
+    record = '[{"id": 77, "gpu_name": "RTX 3090", "num_gpus": 1, "gpu_ram": 24, "compute_cap": 860, "machine_id": 99, "dph_total": 0.30, "label": "run-nonce-label"}]'
+
+    def runner(args: list[str], _timeout: int) -> str:
+        calls.append(args)
+        return record if "show" in args else ""
+
+    provider = VastCliProvider("fixture", runner=runner)
+    provider.destroy_exact(77, "run-nonce-label")
+
+    assert calls[-1][-4:] == ["destroy", "instance", "77", "--yes"]
+
+
 @pytest.mark.parametrize(
     "launch",
     [

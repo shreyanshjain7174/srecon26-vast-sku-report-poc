@@ -116,6 +116,13 @@ class VastCliProvider:
         except json.JSONDecodeError as error:
             raise VastProviderError(f"Vast CLI {args[:2]!r} did not return JSON") from error
 
+    def _run_mutation(self, args: list[str]) -> None:
+        command = [self._cli_path, "--raw", "--no-color", *args]
+        try:
+            self._runner(command, self._timeout_seconds)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+            raise VastProviderError(f"Vast CLI {args[:2]!r} failed") from error
+
     @staticmethod
     def _records(value: object) -> list[Mapping[str, object]]:
         if isinstance(value, list) and all(isinstance(item, Mapping) for item in value):
@@ -270,7 +277,7 @@ class VastCliProvider:
         instance = self.get_instance(instance_id)
         if instance.label != expected_label:
             raise VastProviderError("refusing to destroy an instance with a mismatched label")
-        self._run_json(["destroy", "instance", str(instance_id)])
+        self._run_mutation(["destroy", "instance", str(instance_id), "--yes"])
 
     @staticmethod
     def _auto_recharge_enabled(account: Mapping[str, object]) -> bool | None:

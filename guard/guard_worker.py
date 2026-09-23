@@ -142,6 +142,18 @@ class VastCliGuardProvider:
         )
         return json.loads(completed.stdout)
 
+    def _run_mutation(self, arguments: list[str]) -> None:
+        secret = load_provider_secret(self.secret_file)
+        environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "VAST_API_KEY": secret}
+        subprocess.run(
+            [self.vast_bin, *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=self.timeout_seconds,
+            env=environment,
+        )
+
     @staticmethod
     def _instance_listing(raw: object) -> list[object]:
         """Return a verified provider inventory payload.
@@ -184,7 +196,7 @@ class VastCliGuardProvider:
         current = self.get_instance(instance_id)
         if current is None or current.label != expected_label:
             raise GuardSafetyError("provider target changed before destroy")
-        self._run(["destroy", "instance", str(instance_id)])
+        self._run_mutation(["destroy", "instance", str(instance_id), "--yes"])
 
 
 class GuardWorker:

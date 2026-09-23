@@ -176,6 +176,6 @@ def test_fake_label_only_vast_cli_records_one_exact_destroy(tmp_path: Path) -> N
 
     result = subprocess.run([sys.executable, str(binary), "show", "instances", "--raw"], check=True, capture_output=True, text=True)
     assert json.loads(result.stdout) == [state["instance"]]
-    subprocess.run([sys.executable, str(binary), "destroy", "instance", "417"], check=True)
+    subprocess.run([sys.executable, str(binary), "destroy", "instance", "417", "--yes"], check=True)
     calls = [json.loads(line) for line in (tmp_path / "calls.ndjson").read_text(encoding="utf-8").splitlines()]
     assert calls[-1] == {"instance_id": 417, "label": "run--nonce-nonce_12345678", "operation": "destroy"}

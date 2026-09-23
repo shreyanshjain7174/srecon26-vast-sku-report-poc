@@ -513,7 +513,7 @@ class SshRemoteWorkload:
             failure = transport / "failure.txt"
             failure.parent.mkdir(parents=True, exist_ok=True)
             failure.write_text(str(error) + "\n", encoding="utf-8")
-            return LiveEvidence(None, None, None, provider_fault=None, probe_outcome=ProbeOutcome.INCONCLUSIVE, evidence_files=tuple(path for path in transport.rglob("*") if path.is_file()))
+            return LiveEvidence(None, None, None, provider_fault=None, probe_outcome=ProbeOutcome.CONTROLLER_FAILED, evidence_files=tuple(path for path in transport.rglob("*") if path.is_file()))
         finally:
             if cleanup_needed:
                 try:
@@ -562,7 +562,7 @@ class SshRemoteWorkload:
             model_revision=workload.model_revision if model_ok else None, vllm_image_digest=workload.vllm_image_digest if image_ok else None,
             snapshot=snapshot, resource_metrics_api=bool(text("resource-metrics.txt")), custom_metrics_api=bool(text("custom-metrics.txt")),
             hpa_observed=bool(text("hpa.txt")), events_captured=bool(text("events.txt")), timing_captured=bool(text("request-timing.json")),
-            probe_outcome=ProbeOutcome.PASS if probe else ProbeOutcome.INCONCLUSIVE, evidence_files=files,
+            probe_outcome=ProbeOutcome.PASS if probe else ProbeOutcome.CONTROLLER_FAILED, evidence_files=files,
         )
 
 
