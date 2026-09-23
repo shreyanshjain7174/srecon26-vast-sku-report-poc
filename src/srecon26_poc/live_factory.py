@@ -316,18 +316,42 @@ class SshEndpoint:
 class VastSshResolver:
     """Resolve SSH only from the exact created instance's current record."""
 
-    def __init__(self, cli_path: Path | str, *, runner: CommandRunner | None = None, attempts: int = 24, interval_seconds: float = 5.0, sleep: Callable[[float], None] = time.sleep) -> None:
-        if not 1 <= attempts <= 30 or not 0 <= interval_seconds <= 15:
+    _CLI_TIMEOUT_SECONDS = 20
+    _CLI_DEADLINE_OVERHEAD_SECONDS = 2
+
+    def __init__(self, cli_path: Path | str, *, runner: CommandRunner | None = None, attempts: int = 60, interval_seconds: float = 5.0, sleep: Callable[[float], None] = time.sleep) -> None:
+        if not 1 <= attempts <= 90 or not 0 <= interval_seconds <= 15:
             raise ValueError("SSH resolution retry bounds are invalid")
         self.cli_path, self.runner = str(cli_path), runner or _run
         self.attempts, self.interval_seconds, self.sleep = attempts, interval_seconds, sleep
 
-    def resolve(self, instance: InstanceContract) -> SshEndpoint:
+    @classmethod
+    def _require_cli_window(cls, hard_deadline: datetime | None, operation: str) -> int:
+        if hard_deadline is None:
+            return cls._CLI_TIMEOUT_SECONDS
+        remaining = (hard_deadline - REPORT_MARGIN - datetime.now(UTC)).total_seconds()
+        required = cls._CLI_TIMEOUT_SECONDS + cls._CLI_DEADLINE_OVERHEAD_SECONDS
+        if remaining < required:
+            raise LiveFactoryError(f"{operation} cannot fit before immutable teardown margin")
+        return cls._CLI_TIMEOUT_SECONDS
+
+    @staticmethod
+    def _require_remaining_margin(hard_deadline: datetime | None, operation: str) -> None:
+        if hard_deadline is not None and datetime.now(UTC) >= hard_deadline - REPORT_MARGIN:
+            raise LiveFactoryError(f"{operation} reached immutable teardown margin")
+
+    def resolve(self, instance: InstanceContract, *, hard_deadline: datetime | None = None, heartbeat: Callable[[], None] | None = None, status_log: Path | None = None) -> SshEndpoint:
+        terminal = {"error", "offline", "stopped", "exited"}
         for attempt in range(self.attempts):
+            timeout = self._require_cli_window(hard_deadline, "provider status lookup")
+            if heartbeat is not None:
+                heartbeat()
             try:
-                raw = _json(self.runner([self.cli_path, "--raw", "--no-color", "show", "instance", str(instance.instance_id)], timeout=20), context="Vast instance lookup")
+                raw = _json(self.runner([self.cli_path, "--raw", "--no-color", "show", "instance", str(instance.instance_id)], timeout=timeout), context="Vast instance lookup")
             except LiveFactoryError:
+                self._require_remaining_margin(hard_deadline, "provider status lookup")
                 raw = None
+            self._require_remaining_margin(hard_deadline, "provider status lookup")
             if isinstance(raw, Mapping):
                 current_id = _integer(raw.get("id", raw.get("instance_id")), "instance id")
                 label = raw.get("label")
@@ -335,11 +359,47 @@ class VastSshResolver:
                     raise LiveFactoryError("exact instance SSH lookup changed ID or nonce-bound label")
                 host = raw.get("ssh_host", raw.get("public_ipaddr", raw.get("public_ip", raw.get("ipaddr"))))
                 port = raw.get("ssh_port", raw.get("port"))
-                if isinstance(host, str) and _safe_host(host) and port is not None:
+                status = str(raw.get("actual_status", "")).lower()
+                if status_log is not None:
+                    status_log.parent.mkdir(parents=True, exist_ok=True)
+                    with status_log.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps({"attempt": attempt + 1, "instance_id": current_id, "label": label, "actual_status": status, "endpoint_published": isinstance(host, str) and port is not None, "observed_at": _stamp(datetime.now(UTC))}, sort_keys=True) + "\n")
+                if status in terminal:
+                    raise LiveFactoryError(f"exact instance entered terminal provider status: {status}")
+                if status == "running" and isinstance(host, str) and _safe_host(host) and port is not None:
                     return SshEndpoint(host, _integer(port, "SSH port", minimum=1, maximum=65535))
             if attempt + 1 < self.attempts:
+                if heartbeat is not None:
+                    heartbeat()
+                if hard_deadline is not None and (hard_deadline - REPORT_MARGIN - datetime.now(UTC)).total_seconds() <= self.interval_seconds:
+                    raise LiveFactoryError("provider status retry cannot fit before immutable teardown margin")
                 self.sleep(self.interval_seconds)
-        raise LiveFactoryError("exact instance did not publish a safe SSH endpoint within the bounded wait")
+        raise LiveFactoryError("exact instance did not reach running with a safe SSH endpoint within the bounded wait")
+
+    def attach_public_key(self, instance: InstanceContract, public_key_file: Path, *, hard_deadline: datetime, heartbeat: Callable[[], None], status_log: Path) -> None:
+        """Attach the approved public key only after rechecking exact ownership."""
+
+        if not public_key_file.is_file() or public_key_file.is_symlink():
+            raise LiveFactoryError("SSH public key must be a regular file")
+        key = public_key_file.read_text(encoding="utf-8").strip()
+        if not re.fullmatch(r"ssh-(?:rsa|ed25519) [A-Za-z0-9+/=]+(?: [^\r\n]+)?", key):
+            raise LiveFactoryError("SSH public key file is invalid")
+        lookup_timeout = self._require_cli_window(hard_deadline, "SSH key ownership lookup")
+        heartbeat()
+        raw = _json(self.runner([self.cli_path, "--raw", "--no-color", "show", "instance", str(instance.instance_id)], timeout=lookup_timeout), context="Vast instance ownership lookup")
+        self._require_remaining_margin(hard_deadline, "SSH key ownership lookup")
+        if not isinstance(raw, Mapping) or _integer(raw.get("id", raw.get("instance_id")), "instance id") != instance.instance_id or raw.get("label") != instance.label:
+            raise LiveFactoryError("refusing to attach SSH key after instance ownership changed")
+        status = str(raw.get("actual_status", "")).lower()
+        if status not in {"loading", "running"}:
+            raise LiveFactoryError("refusing to attach SSH key without an exact nonterminal provider status")
+        status_log.parent.mkdir(parents=True, exist_ok=True)
+        with status_log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"event": "ssh_key_attach_precheck", "instance_id": instance.instance_id, "label": instance.label, "actual_status": status, "observed_at": _stamp(datetime.now(UTC))}, sort_keys=True) + "\n")
+        attach_timeout = self._require_cli_window(hard_deadline, "SSH key attach")
+        self.runner([self.cli_path, "--raw", "--no-color", "attach", "ssh", str(instance.instance_id), str(public_key_file)], timeout=attach_timeout)
+        self._require_remaining_margin(hard_deadline, "SSH key attach")
+        heartbeat()
 
 
 def _integer(value: object, field: str, *, minimum: int | None = None, maximum: int | None = None) -> int:
@@ -369,6 +429,7 @@ def _safe_host(host: str) -> bool:
 class SshWorkloadConfig:
     user: str
     identity_file: Path
+    public_key_file: Path
     known_hosts_file: Path
     k3s_binary: Path
     nvidia_runtime_template: Path
@@ -380,7 +441,7 @@ class SshWorkloadConfig:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,31}", self.user):
             raise LiveFactoryError("SSH user is invalid")
         for label, path, executable in (
-            ("SSH identity", self.identity_file, False), ("SSH known-hosts", self.known_hosts_file, False),
+            ("SSH identity", self.identity_file, False), ("SSH public key", self.public_key_file, False), ("SSH known-hosts", self.known_hosts_file, False),
             ("k3s binary", self.k3s_binary, True), ("NVIDIA runtime template", self.nvidia_runtime_template, False),
             ("remote canary script", self.local_script, True),
         ):
@@ -446,12 +507,12 @@ class SshRemoteWorkload:
         self._stream([*self._ssh_prefix(endpoint), remote], hard_deadline=hard_deadline, heartbeat=heartbeat, log=log)
 
     def _wait_for_ssh(self, endpoint: SshEndpoint, *, hard_deadline: datetime, heartbeat: Callable[[], None], transport: Path) -> None:
-        for attempt in range(1, 25):
+        for attempt in range(1, 37):
             try:
                 self._remote(endpoint, ["true"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / f"ssh-ready-{attempt:02d}.log")
                 return
             except LiveFactoryError:
-                if attempt == 24:
+                if attempt == 36:
                     break
                 heartbeat()
                 time.sleep(5)
@@ -479,13 +540,16 @@ class SshRemoteWorkload:
         self._stream(arguments, hard_deadline=hard_deadline, heartbeat=heartbeat, log=log)
 
     def run(self, *, stage: str, workload: WorkloadContract, instance: InstanceContract, run_directory: Path, hard_deadline: datetime, heartbeat: Callable[[], None]) -> LiveEvidence:
-        endpoint = self.resolver.resolve(instance)
         root = f"/var/tmp/srecon26-canary-{hashlib.sha256(instance.label.encode()).hexdigest()[:20]}"
         remote_evidence, local_evidence = f"{root}/evidence", run_directory / "remote-evidence"
         transport = run_directory / "remote-transport"
+        transport.mkdir(parents=True, exist_ok=True)
         cleanup_needed = False
         evidence_files: tuple[Path, ...] = ()
         try:
+            self.resolver.attach_public_key(instance, self.config.public_key_file, hard_deadline=hard_deadline, heartbeat=heartbeat, status_log=transport / "provider-status.ndjson")
+            (transport / "ssh-key-attached.txt").write_text(f"instance_id={instance.instance_id}\nlabel={instance.label}\n", encoding="utf-8")
+            endpoint = self.resolver.resolve(instance, hard_deadline=hard_deadline, heartbeat=heartbeat, status_log=transport / "provider-status.ndjson")
             self._wait_for_ssh(endpoint, hard_deadline=hard_deadline, heartbeat=heartbeat, transport=transport)
             self._remote(endpoint, ["install", "-d", "-m", "0700", root], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "mkdir.log")
             self._copy(endpoint, self.config.local_script, f"{root}/remote_host_canary.sh", recursive=False, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-script.log")
@@ -627,7 +691,7 @@ def create_dispatcher() -> LiveCanaryDispatcher:
         dispatch_on_arm=os.environ.get("SRECON26_GUARD_ADOPT_EXISTING", "false").lower() != "true",
     )
     ssh = SshWorkloadConfig(
-        user=_required_env("SRECON26_SSH_USER"), identity_file=Path(_required_env("SRECON26_SSH_IDENTITY_FILE")).expanduser(),
+        user=_required_env("SRECON26_SSH_USER"), identity_file=Path(_required_env("SRECON26_SSH_IDENTITY_FILE")).expanduser(), public_key_file=Path(_required_env("SRECON26_SSH_PUBLIC_KEY_FILE")).expanduser(),
         known_hosts_file=Path(_required_env("SRECON26_SSH_KNOWN_HOSTS_FILE")).expanduser(),
         k3s_binary=Path(_required_env("SRECON26_K3S_BINARY")).expanduser(),
         nvidia_runtime_template=root / "infra/k3s/nvidia-runtime.toml", local_script=root / "scripts/remote_host_canary.sh",

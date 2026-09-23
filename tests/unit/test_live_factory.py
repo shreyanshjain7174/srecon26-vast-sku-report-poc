@@ -15,6 +15,7 @@ from srecon26_poc.live_factory import (
     LiveFactoryError,
     VastSshResolver,
 )
+from srecon26_poc.live_dispatch import REPORT_MARGIN
 from srecon26_poc.types import RunIdentity
 
 
@@ -111,7 +112,7 @@ def test_ssh_resolver_rejects_an_instance_record_that_does_not_preserve_exact_la
 
     def runner(_arguments, *, timeout: int) -> str:
         del timeout
-        return json.dumps({"id": 417, "label": "other--nonce-nonce_12345678", "ssh_host": "203.0.113.8", "ssh_port": 22})
+        return json.dumps({"id": 417, "label": "other--nonce-nonce_12345678", "actual_status": "running", "ssh_host": "203.0.113.8", "ssh_port": 22})
 
     with pytest.raises(LiveFactoryError, match="changed ID or nonce-bound label"):
         VastSshResolver("vastai", runner=runner).resolve(instance)
@@ -122,10 +123,88 @@ def test_ssh_resolver_accepts_only_safe_endpoint_from_exact_instance_record() ->
 
     def runner(_arguments, *, timeout: int) -> str:
         del timeout
-        return json.dumps({"id": 417, "label": LABEL, "public_ipaddr": "203.0.113.8", "ssh_port": "2222"})
+        return json.dumps({"id": 417, "label": LABEL, "actual_status": "running", "public_ipaddr": "203.0.113.8", "ssh_port": "2222"})
 
     endpoint = VastSshResolver("vastai", runner=runner).resolve(instance)
     assert (endpoint.host, endpoint.port, endpoint.destination("root")) == ("203.0.113.8", 2222, "root@203.0.113.8")
+
+
+def test_ssh_resolver_waits_for_running_even_when_endpoint_is_published(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    statuses = iter(("loading", "running"))
+
+    def runner(_arguments, *, timeout: int) -> str:
+        del timeout
+        return json.dumps({"id": 417, "label": LABEL, "actual_status": next(statuses), "ssh_host": "203.0.113.8", "ssh_port": 2222})
+
+    log = tmp_path / "status.ndjson"
+    endpoint = VastSshResolver("vastai", runner=runner, interval_seconds=0).resolve(instance, status_log=log)
+
+    assert endpoint.host == "203.0.113.8"
+    assert [json.loads(line)["actual_status"] for line in log.read_text().splitlines()] == ["loading", "running"]
+
+
+def test_ssh_resolver_attaches_public_key_only_after_exact_ownership_check(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    public_key = tmp_path / "id_rsa.pub"
+    public_key.write_text("ssh-rsa QUJDRA== test@example")
+    calls: list[list[str]] = []
+
+    def runner(arguments, *, timeout: int) -> str:
+        del timeout
+        calls.append(arguments)
+        return json.dumps({"id": 417, "label": LABEL, "actual_status": "loading"}) if "show" in arguments else ""
+
+    beats: list[int] = []
+    VastSshResolver("vastai", runner=runner).attach_public_key(instance, public_key, hard_deadline=datetime.now(UTC) + timedelta(minutes=20), heartbeat=lambda: beats.append(1), status_log=tmp_path / "status.ndjson")
+
+    assert calls[-1][-4:] == ["attach", "ssh", "417", str(public_key)]
+    assert len(beats) == 2
+
+
+def test_ssh_resolver_does_not_start_cli_lookup_without_full_deadline_window() -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    calls: list[list[str]] = []
+
+    def runner(arguments, *, timeout: int) -> str:
+        calls.append(arguments)
+        return ""
+
+    with pytest.raises(LiveFactoryError, match="cannot fit before immutable teardown margin"):
+        VastSshResolver("vastai", runner=runner).resolve(instance, hard_deadline=datetime.now(UTC) + REPORT_MARGIN + timedelta(seconds=21))
+    assert calls == []
+
+
+def test_ssh_resolver_does_not_start_key_attach_lookup_without_full_deadline_window(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    public_key = tmp_path / "id_rsa.pub"
+    public_key.write_text("ssh-rsa QUJDRA== test@example")
+    calls: list[list[str]] = []
+
+    def runner(arguments, *, timeout: int) -> str:
+        calls.append(arguments)
+        return ""
+
+    with pytest.raises(LiveFactoryError, match="cannot fit before immutable teardown margin"):
+        VastSshResolver("vastai", runner=runner).attach_public_key(instance, public_key, hard_deadline=datetime.now(UTC) + REPORT_MARGIN + timedelta(seconds=21), heartbeat=lambda: None, status_log=tmp_path / "status.ndjson")
+    assert calls == []
+
+
+@pytest.mark.parametrize("status", ["", "error", "stopped"])
+def test_ssh_resolver_refuses_key_attach_without_nonterminal_status(tmp_path: Path, status: str) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    public_key = tmp_path / "id_rsa.pub"
+    public_key.write_text("ssh-rsa QUJDRA== test@example")
+    calls: list[list[str]] = []
+
+    def runner(arguments, *, timeout: int) -> str:
+        del timeout
+        calls.append(arguments)
+        return json.dumps({"id": 417, "label": LABEL, "actual_status": status})
+
+    with pytest.raises(LiveFactoryError, match="nonterminal"):
+        VastSshResolver("vastai", runner=runner).attach_public_key(instance, public_key, hard_deadline=datetime.now(UTC) + timedelta(minutes=20), heartbeat=lambda: None, status_log=tmp_path / "status.ndjson")
+    assert not any("attach" in call for call in calls)
 
 
 def test_guard_workflow_publishes_machine_parseable_bound_arm_receipt() -> None:
