@@ -271,6 +271,24 @@ jobs:
             > "$BACKSTOP_STATE/armed.json"
           printf 'Independent deadline backstop is armed for %s.\n' "$INPUT_HARD_DEADLINE" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Publish machine-parseable backstop arm receipt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          arm_receipt="$(timeout 30s sudo env SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 guard/guard_worker.py status \
+            --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE" --nonce "$INPUT_NONCE")"
+          preflight="$(timeout 30s sudo env SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 guard/guard_worker.py preflight \
+            --root "$GUARD_ROOT" --secret-file "$GUARD_SECRET_FILE")"
+          root_hash="$(jq -r '.root_hash' <<<"$arm_receipt")"
+          script_hash="$(jq -r '.script_hash' <<<"$preflight")"
+          host_identity="$(jq -r '.host_identity' <<<"$preflight")"
+          [[ "$root_hash" =~ ^[0-9a-f]{64}$ && "$script_hash" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$host_identity" =~ ^[A-Za-z0-9_.-]+$ ]]
+          timeout 15s gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments" \
+            -f "body=SRECON26_GUARD_V1 BACKSTOP_ARMED nonce=${INPUT_NONCE} label=${INPUT_LABEL} deadline=${INPUT_HARD_DEADLINE} host=${host_identity} script=${script_hash} root=${root_hash}"
+
       - name: Destroy at immutable deadline and confirm provider absence
         shell: bash
         run: |

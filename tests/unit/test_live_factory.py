@@ -31,7 +31,12 @@ class GitHubRunner:
                 "body": f"SRECON26_GUARD_V1 ARMED nonce={NONCE} label={LABEL} deadline=2026-09-23T04:20:00Z host=github-runner-1 script={'a' * 64} root={'b' * 64}",
                 "created_at": "2026-09-23T04:00:01Z",
                 "user": {"login": "github-actions[bot]"},
-            }
+            },
+            {
+                "body": f"SRECON26_GUARD_V1 BACKSTOP_ARMED nonce={NONCE} label={LABEL} deadline=2026-09-23T04:20:00Z host=github-runner-2 script={'c' * 64} root={'d' * 64}",
+                "created_at": "2026-09-23T04:00:02Z",
+                "user": {"login": "github-actions[bot]"},
+            },
         ]
 
     def __call__(self, arguments, *, timeout: int) -> str:
@@ -61,7 +66,7 @@ def test_github_guard_dispatch_verifies_bound_action_attestation_then_comments_h
     client.record_heartbeat(identity, 7)
     root = client.anchor("c" * 64)
 
-    assert armed.host_identity == "github-runner-1"
+    assert armed.host_identity == "github-runner-1+github-runner-2"
     assert root == "c" * 64
     dispatch = runner.calls[0]
     assert "/actions/workflows/independent-guard.yml/dispatches" in dispatch[4]
@@ -112,4 +117,5 @@ def test_guard_workflow_publishes_machine_parseable_bound_arm_receipt() -> None:
 
     assert "guard_worker.py status" in workflow
     assert "SRECON26_GUARD_V1 ARMED nonce=" in workflow
+    assert "SRECON26_GUARD_V1 BACKSTOP_ARMED nonce=" in workflow
     assert "script=${script_hash} root=${root_hash}" in workflow

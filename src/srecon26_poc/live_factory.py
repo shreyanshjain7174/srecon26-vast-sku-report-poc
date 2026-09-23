@@ -48,6 +48,12 @@ _ARMED = re.compile(
     r"host=(?P<host>[A-Za-z0-9_.-]{1,128}) script=(?P<script>[0-9a-f]{64}) "
     r"root=(?P<root>[0-9a-f]{64})$"
 )
+_BACKSTOP_ARMED = re.compile(
+    r"^SRECON26_GUARD_V1 BACKSTOP_ARMED nonce=(?P<nonce>[A-Za-z0-9_-]{8,128}) "
+    r"label=(?P<label>[A-Za-z0-9_.-]{1,128}) deadline=(?P<deadline>[^ ]+) "
+    r"host=(?P<host>[A-Za-z0-9_.-]{1,128}) script=(?P<script>[0-9a-f]{64}) "
+    r"root=(?P<root>[0-9a-f]{64})$"
+)
 
 
 class LiveFactoryError(LiveDispatchError):
@@ -169,6 +175,8 @@ class GitHubGuardTransport(GuardTransport):
         self.runner(arguments, timeout=20)
 
     def _find_attestation(self, *, nonce: str, label: str, deadline: datetime, dispatched_at: datetime) -> GuardRemoteReceipt | None:
+        primary: tuple[re.Match[str], datetime] | None = None
+        backstop: tuple[re.Match[str], datetime] | None = None
         for comment in self._comments():
             body = comment.get("body")
             created = comment.get("created_at")
@@ -178,21 +186,32 @@ class GitHubGuardTransport(GuardTransport):
                 continue
             created_at = _parse_time(created)
             match = _ARMED.fullmatch(body)
-            if match is None or created_at < dispatched_at:
+            backstop_match = _BACKSTOP_ARMED.fullmatch(body)
+            selected = match or backstop_match
+            if selected is None or created_at < dispatched_at:
                 continue
-            if match.group("nonce") != nonce or match.group("label") != label or _parse_time(match.group("deadline")) != deadline:
+            if selected.group("nonce") != nonce or selected.group("label") != label or _parse_time(selected.group("deadline")) != deadline:
                 continue
-            return GuardRemoteReceipt(
-                status="ARMED",
-                root_hash=match.group("root"),
-                nonce=nonce,
-                label=label,
-                hard_deadline=deadline,
-                last_heartbeat=created_at,
-                host_identity=match.group("host"),
-                script_hash=match.group("script"),
-            )
-        return None
+            if match is not None:
+                primary = (match, created_at)
+            else:
+                assert backstop_match is not None
+                backstop = (backstop_match, created_at)
+        if primary is None or backstop is None:
+            return None
+        primary_match, primary_at = primary
+        backstop_match, backstop_at = backstop
+        combined_script = hashlib.sha256(f"{primary_match.group('script')}:{backstop_match.group('script')}".encode()).hexdigest()
+        return GuardRemoteReceipt(
+            status="ARMED",
+            root_hash=primary_match.group("root"),
+            nonce=nonce,
+            label=label,
+            hard_deadline=deadline,
+            last_heartbeat=max(primary_at, backstop_at),
+            host_identity=f"{primary_match.group('host')}+{backstop_match.group('host')}",
+            script_hash=combined_script,
+        )
 
     def _comment(self, body: str) -> None:
         self._api("POST", f"repos/{self.config.repository}/issues/{self.config.issue_number}/comments", fields={"body": body})
