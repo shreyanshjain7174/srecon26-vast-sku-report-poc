@@ -462,6 +462,38 @@ def test_ssh_resolver_emits_typed_host_fault_only_after_all_exact_startup_reads(
     assert all(item.selected_ssh_route == "proxy" for item in observations)
 
 
+def test_ssh_key_attachment_preserves_reportable_created_startup_observations(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    public_key = tmp_path / "id_rsa.pub"
+    public_key.write_text("ssh-rsa QUJDRA== test@example", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def runner(arguments, *, timeout: int) -> str:
+        del timeout
+        calls.append(list(arguments))
+        return json.dumps(
+            {
+                "id": 417,
+                "label": LABEL,
+                "actual_status": "created",
+                "ssh_host": "proxy.example.test",
+                "ssh_port": 2222,
+            }
+        )
+
+    with pytest.raises(ProviderStartupFault) as raised:
+        VastSshResolver("vastai", runner=runner, attempts=2, interval_seconds=0).attach_public_key(
+            instance,
+            public_key,
+            hard_deadline=datetime.now(UTC) + timedelta(minutes=20),
+            heartbeat=lambda: None,
+            status_log=tmp_path / "status.ndjson",
+        )
+
+    assert [item.actual_status for item in raised.value.observations] == ["created", "created"]
+    assert not any("attach" in call for call in calls)
+
+
 @pytest.mark.parametrize(
     "records",
     (

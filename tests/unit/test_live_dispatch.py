@@ -203,6 +203,51 @@ class Workload:
         )
 
 
+class HostStartupFaultWorkload:
+    def __init__(self, *, tamper_label: bool = False) -> None:
+        self.tamper_label = tamper_label
+
+    def run(self, *, stage: str, workload: WorkloadContract, instance: InstanceContract, run_directory: Path, hard_deadline: datetime, heartbeat) -> LiveEvidence:
+        del stage, workload, hard_deadline
+        heartbeat()
+        artifact = run_directory / "remote-transport" / "provider-startup-fault.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(
+            json.dumps(
+                {
+                    "schema": "srecon26-provider-startup-fault/v1",
+                    "source": "VastSshResolver.startup_observation/v1",
+                    "category": "host",
+                    "run_id": run_directory.name,
+                    "instance_id": instance.instance_id,
+                    "label": "tampered-label" if self.tamper_label else instance.label,
+                    "confirmed": {
+                        "all_bounded_provider_reads_succeeded": True,
+                        "exact_instance_and_label_preserved": True,
+                        "endpoint_published_on_every_read": True,
+                        "no_actual_status_running": True,
+                        "only_nonterminal_startup_statuses": True,
+                        "desktop_report_reserve_seconds": 90,
+                    },
+                    "bounded_reads": 2,
+                    "observations": [
+                        {"attempt": 1, "actual_status": "created", "endpoint_published": True, "selected_ssh_route": "proxy", "observed_at": "2026-09-23T04:00:00Z"},
+                        {"attempt": 2, "actual_status": "loading", "endpoint_published": True, "selected_ssh_route": "proxy", "observed_at": "2026-09-23T04:00:01Z"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return LiveEvidence(
+            None,
+            None,
+            None,
+            probe_outcome=ProbeOutcome.CONTROLLER_FAILED,
+            provider_fault=ProviderFaultEvidence("host", "exact startup fault", artifact),
+            evidence_files=(artifact,),
+        )
+
+
 def _write(path: Path, payload: object) -> Path:
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -488,6 +533,30 @@ def test_confirmed_provider_fault_reports_before_exact_teardown(tmp_path: Path) 
     assert events.index("report-submit") < events.index("destroy")
     assert events.index("report-after") < events.index("destroy")
     assert result.absence_reads == 3
+
+
+def test_tampered_host_startup_fault_artifact_never_reaches_report_gate(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    events: list[str] = []
+    provider = Provider(offer, events)
+    dispatcher = LiveCanaryDispatcher(
+        provider=provider,
+        guard=Guard(request.nonce, events),
+        report_gate=ReportGate(Reporter(events)),
+        workload=HostStartupFaultWorkload(tamper_label=True),
+        ledger=ExposureLedger(tmp_path / "host-fault-ledger.json"),
+        output_root=tmp_path / "host-fault-runs",
+        clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)),
+        absence_interval_seconds=0,
+    )
+
+    result = dispatcher.run(request)
+
+    assert result.status == "FAILED_SAFE"
+    assert "not bound to the exact run and instance" in (result.limitation or "")
+    assert "report-submit" not in events
+    assert events.index("destroy") > events.index("create")
 
 
 def test_post_create_machine_mismatch_reports_before_teardown_without_running_workload(tmp_path: Path) -> None:

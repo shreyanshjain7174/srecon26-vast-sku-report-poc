@@ -469,7 +469,25 @@ class VastSshResolver:
             "ssh_route_selection_reason": selection_reason,
         }
 
-    def resolve(self, instance: InstanceContract, *, hard_deadline: datetime | None = None, heartbeat: Callable[[], None] | None = None, status_log: Path | None = None) -> SshEndpoint:
+    def _observe_until(
+        self,
+        instance: InstanceContract,
+        *,
+        ready_statuses: frozenset[str],
+        require_endpoint: bool,
+        operation: str,
+        hard_deadline: datetime | None,
+        heartbeat: Callable[[], None] | None,
+        status_log: Path | None,
+    ) -> tuple[Mapping[str, object], SshEndpoint | None]:
+        """Read the exact instance until a safe transition or typed startup fault.
+
+        A provider-startup report is possible only after all bounded reads are
+        successful and exact.  In particular, parser/transport failures and
+        deadline cutoffs leave this method through an ordinary error instead
+        of manufacturing a reportable diagnosis.
+        """
+
         terminal = {"error", "offline", "stopped", "exited"}
         observations: list[StartupStatusObservation] = []
         for attempt in range(self.attempts):
@@ -537,8 +555,8 @@ class VastSshResolver:
                         handle.write(json.dumps(evidence, sort_keys=True) + "\n")
                 if status in terminal:
                     raise LiveFactoryError(f"exact instance entered terminal provider status: {status}")
-                if status == "running" and selected is not None:
-                    return SshEndpoint(*selected)
+                if status in ready_statuses and (not require_endpoint or selected is not None):
+                    return raw, SshEndpoint(*selected) if selected is not None else None
             if attempt + 1 < self.attempts:
                 if heartbeat is not None:
                     heartbeat()
@@ -552,7 +570,21 @@ class VastSshResolver:
             and all(observation.actual_status != "running" for observation in observations)
         ):
             raise ProviderStartupFault(tuple(observations), bounded_reads=self.attempts)
-        raise LiveFactoryError("exact instance did not reach running with a safe SSH endpoint within the bounded wait")
+        raise LiveFactoryError(f"exact instance did not reach {operation} within the bounded wait")
+
+    def resolve(self, instance: InstanceContract, *, hard_deadline: datetime | None = None, heartbeat: Callable[[], None] | None = None, status_log: Path | None = None) -> SshEndpoint:
+        _raw, endpoint = self._observe_until(
+            instance,
+            ready_statuses=frozenset({"running"}),
+            require_endpoint=True,
+            operation="running with a safe SSH endpoint",
+            hard_deadline=hard_deadline,
+            heartbeat=heartbeat,
+            status_log=status_log,
+        )
+        if endpoint is None:  # defensive: require_endpoint above makes this unreachable.
+            raise LiveFactoryError("provider published a running instance without a safe SSH endpoint")
+        return endpoint
 
     def attach_public_key(self, instance: InstanceContract, public_key_file: Path, *, hard_deadline: datetime, heartbeat: Callable[[], None], status_log: Path) -> None:
         """Attach the approved public key only after rechecking exact ownership."""
@@ -562,32 +594,30 @@ class VastSshResolver:
         key = public_key_file.read_text(encoding="utf-8").strip()
         if not re.fullmatch(r"ssh-(?:rsa|ed25519) [A-Za-z0-9+/=]+(?: [^\r\n]+)?", key):
             raise LiveFactoryError("SSH public key file is invalid")
-        terminal = {"error", "offline", "stopped", "exited"}
-        for attempt in range(self.attempts):
-            lookup_timeout = self._require_cli_window(hard_deadline, "SSH key ownership lookup")
-            heartbeat()
-            raw = _json(self.runner([self.cli_path, "--raw", "--no-color", "show", "instance", str(instance.instance_id)], timeout=lookup_timeout), context="Vast instance ownership lookup")
-            self._require_remaining_margin(hard_deadline, "SSH key ownership lookup")
-            if not isinstance(raw, Mapping) or _integer(raw.get("id", raw.get("instance_id")), "instance id") != instance.instance_id or raw.get("label") != instance.label:
-                raise LiveFactoryError("refusing to attach SSH key after instance ownership changed")
-            status = str(raw.get("actual_status", "")).lower()
-            status_log.parent.mkdir(parents=True, exist_ok=True)
-            with status_log.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"event": "ssh_key_attach_wait", "attempt": attempt + 1, "instance_id": instance.instance_id, "label": instance.label, "actual_status": status, "observed_at": _stamp(datetime.now(UTC))}, sort_keys=True) + "\n")
-            if status in terminal:
-                raise LiveFactoryError(f"refusing to attach SSH key after terminal provider status: {status}")
-            if status in {"loading", "running"}:
-                break
-            if attempt + 1 < self.attempts:
-                heartbeat()
-                if (hard_deadline - REPORT_MARGIN - datetime.now(UTC)).total_seconds() <= self.interval_seconds:
-                    raise LiveFactoryError("SSH key attach retry cannot fit before immutable teardown margin")
-                self.sleep(self.interval_seconds)
-        else:
-            raise LiveFactoryError("exact instance did not reach a safe SSH key attach status within the bounded wait")
-        attach_timeout = self._require_cli_window(hard_deadline, "SSH key attach")
+        # Do this bounded, exact-target observation before attaching the key:
+        # an endpoint-published host that remains in created/starting is
+        # reportable, whereas attaching first would hide that provider state
+        # behind an unclassified SSH setup timeout.
+        self._observe_until(
+            instance,
+            ready_statuses=frozenset({"loading", "running"}),
+            require_endpoint=False,
+            operation="a safe SSH key attach status",
+            hard_deadline=hard_deadline,
+            heartbeat=heartbeat,
+            status_log=status_log,
+        )
+        attach_timeout = self._require_cli_window(
+            hard_deadline,
+            "SSH key attach",
+            reserve=self._STARTUP_REPORT_RESERVE,
+        )
         self.runner([self.cli_path, "--raw", "--no-color", "attach", "ssh", str(instance.instance_id), str(public_key_file)], timeout=attach_timeout)
-        self._require_remaining_margin(hard_deadline, "SSH key attach")
+        self._require_remaining_margin(
+            hard_deadline,
+            "SSH key attach",
+            reserve=self._STARTUP_REPORT_RESERVE,
+        )
         heartbeat()
 
 
@@ -791,6 +821,7 @@ class SshRemoteWorkload:
                 "only_nonterminal_startup_statuses": True,
                 "desktop_report_reserve_seconds": int(VastSshResolver._STARTUP_REPORT_RESERVE.total_seconds()),
             },
+            "bounded_reads": fault.bounded_reads,
             "observations": [observation.as_json() for observation in fault.observations],
         }
         try:

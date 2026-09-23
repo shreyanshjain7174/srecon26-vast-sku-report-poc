@@ -63,6 +63,7 @@ AUDITED_HISTORICAL_SMOKE_ANCHORS: Mapping[str, tuple[str, int]] = {
 }
 FROZEN_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 FROZEN_MODEL_REVISION = "989aa7980e4cf806f80c7fef2b1adb7bc71aa306"
+REPORTABLE_STARTUP_STATUSES = frozenset({"created", "loading", "starting"})
 
 
 class LiveDispatchError(RuntimeError):
@@ -161,6 +162,79 @@ class ProviderFaultEvidence:
 
     def valid(self) -> bool:
         return self.category in {"contract", "gpu", "cuda", "image", "host"} and bool(self.description) and self.artifact.is_file()
+
+    def report_blockers(self, *, run_id: str, instance: InstanceContract, evidence_files: tuple[Path, ...]) -> tuple[str, ...]:
+        """Validate host-startup evidence before it can reach ReportGate.
+
+        Other provider-fault categories retain their independently established
+        probe contracts.  ``host`` is exceptional: it is inferred from a
+        bounded sequence of provider status reads and must therefore carry its
+        complete, exact-target sequence in the immutable artifact.
+        """
+
+        if not self.valid():
+            return ("provider fault evidence is not a readable supported artifact",)
+        if self.category != "host":
+            return ()
+        try:
+            artifact = self.artifact.resolve(strict=True)
+            declared = {path.resolve(strict=True) for path in evidence_files if path.is_file()}
+            if artifact not in declared:
+                return ("host startup fault artifact is not declared evidence",)
+            payload = _json(artifact)
+        except (OSError, LiveDispatchError):
+            return ("host startup fault artifact is unreadable",)
+        blockers: list[str] = []
+        if payload.get("schema") != "srecon26-provider-startup-fault/v1":
+            blockers.append("host startup fault schema is invalid")
+        if payload.get("source") != "VastSshResolver.startup_observation/v1":
+            blockers.append("host startup fault source is invalid")
+        if payload.get("category") != "host":
+            blockers.append("host startup fault category is invalid")
+        if payload.get("run_id") != run_id or payload.get("instance_id") != instance.instance_id or payload.get("label") != instance.label:
+            blockers.append("host startup fault is not bound to the exact run and instance")
+        confirmed = payload.get("confirmed")
+        expected_confirmations = {
+            "all_bounded_provider_reads_succeeded": True,
+            "exact_instance_and_label_preserved": True,
+            "endpoint_published_on_every_read": True,
+            "no_actual_status_running": True,
+            "only_nonterminal_startup_statuses": True,
+        }
+        if not isinstance(confirmed, Mapping) or any(confirmed.get(key) is not value for key, value in expected_confirmations.items()):
+            blockers.append("host startup fault confirmation flags are invalid")
+        elif not isinstance(confirmed.get("desktop_report_reserve_seconds"), int) or isinstance(confirmed.get("desktop_report_reserve_seconds"), bool) or confirmed["desktop_report_reserve_seconds"] < 90:
+            blockers.append("host startup fault report reserve is invalid")
+        bounded_reads = payload.get("bounded_reads")
+        observations = payload.get("observations")
+        if not isinstance(bounded_reads, int) or isinstance(bounded_reads, bool) or not 1 <= bounded_reads <= 90:
+            blockers.append("host startup fault bounded read count is invalid")
+        if not isinstance(observations, list) or (isinstance(bounded_reads, int) and not isinstance(bounded_reads, bool) and len(observations) != bounded_reads):
+            blockers.append("host startup fault observation count is invalid")
+        elif all(isinstance(item, Mapping) for item in observations):
+            previous_observed_at: datetime | None = None
+            for expected_attempt, observation in enumerate(observations, start=1):
+                attempt = observation.get("attempt")
+                if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt != expected_attempt:
+                    blockers.append("host startup fault observation sequence is invalid")
+                    break
+                if observation.get("actual_status") not in REPORTABLE_STARTUP_STATUSES:
+                    blockers.append("host startup fault contains a non-startup status")
+                    break
+                if observation.get("endpoint_published") is not True or observation.get("selected_ssh_route") not in {"direct", "proxy"}:
+                    blockers.append("host startup fault lacks an endpoint on every read")
+                    break
+                try:
+                    observed_at = datetime.fromisoformat(str(observation.get("observed_at")).replace("Z", "+00:00"))
+                    if observed_at.tzinfo is None or (previous_observed_at is not None and observed_at.astimezone(UTC) < previous_observed_at):
+                        raise ValueError
+                    previous_observed_at = observed_at.astimezone(UTC)
+                except ValueError:
+                    blockers.append("host startup fault observation timestamps are invalid")
+                    break
+        else:
+            blockers.append("host startup fault observations are invalid")
+        return tuple(dict.fromkeys(blockers))
 
 
 @dataclass(frozen=True, slots=True)
@@ -898,7 +972,16 @@ class LiveCanaryDispatcher:
                 evidence = self.workload.run(stage=request.stage, workload=request.workload, instance=instance, run_directory=run_directory, hard_deadline=request.hard_deadline, heartbeat=heartbeat)
                 evidence_files = evidence.evidence_files
                 completed, evidence_blockers = evidence.complete_for(request.stage, now=self.clock.now(), workload=request.workload, run_id=request.run_id, instance=instance)
-                remote_fault = evidence.provider_fault is not None and evidence.provider_fault.valid()
+                fault_blockers = (
+                    evidence.provider_fault.report_blockers(
+                        run_id=request.run_id,
+                        instance=instance,
+                        evidence_files=evidence_files,
+                    )
+                    if evidence.provider_fault is not None
+                    else ()
+                )
+                remote_fault = evidence.provider_fault is not None and not fault_blockers
                 if remote_fault:
                     self._append(journal, RunState.CAPTURING_FAULT, "provider.fault_confirmed", {"automatic_contract_mismatch": False, "remote_category": evidence.provider_fault.category if evidence.provider_fault else None})
                     if self.clock.now() < request.report_start_by:
@@ -912,6 +995,9 @@ class LiveCanaryDispatcher:
                     else:
                         limitation = "confirmed provider fault reached report cutoff; report skipped for teardown margin"
                     status = "FAILED_SAFE" if report_data.get("confirmed") else "REPORT_UNCONFIRMED"
+                elif fault_blockers:
+                    limitation = "; ".join(fault_blockers)
+                    status = "FAILED_SAFE"
                 elif not completed:
                     limitation = "; ".join(evidence_blockers)
                     status = "FAILED_SAFE"
