@@ -76,6 +76,7 @@ class VastLaunchContract:
     disk_gib: int = 130
     ssh: bool = True
     cancel_unavail: bool = True
+    request_direct_ssh: bool = True
 
     def validate(self) -> None:
         if self.ubuntu_template_hash != OFFICIAL_UBUNTU_2204_TEMPLATE_HASH:
@@ -84,13 +85,13 @@ class VastLaunchContract:
             raise VastProviderError("launch contract must pin the approved vastai/kvm Ubuntu image identity")
         if self.disk_gib != 130:
             raise VastProviderError("launch disk must be exactly 130 GiB")
-        if not (self.ssh and self.cancel_unavail):
-            raise VastProviderError("launch contract requires SSH and cancel-unavail")
+        if not (self.ssh and self.request_direct_ssh and self.cancel_unavail):
+            raise VastProviderError("launch contract requires SSH, a direct-route request, and cancel-unavail")
 
     def create_args(self, *, label: str) -> list[str]:
         self.validate()
         assert self.ubuntu_template_hash is not None
-        return ["--template_hash", self.ubuntu_template_hash, "--disk", str(self.disk_gib), "--ssh", "--cancel-unavail", "--label", label]
+        return ["--template_hash", self.ubuntu_template_hash, "--disk", str(self.disk_gib), "--ssh", "--direct", "--cancel-unavail", "--label", label]
 
     def to_json(self) -> dict[str, object]:
         self.validate()
@@ -100,6 +101,7 @@ class VastLaunchContract:
             "disk_gib": self.disk_gib,
             "ssh": self.ssh,
             "cancel_unavail": self.cancel_unavail,
+            "direct_ssh_requested": self.request_direct_ssh,
         }
 
 

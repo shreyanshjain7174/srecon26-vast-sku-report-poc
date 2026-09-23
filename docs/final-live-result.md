@@ -24,3 +24,12 @@ Run `gpu-smoke-distinct-20260923101734` is the single final paid distinct-machin
 ## Honest presentation boundary
 
 This run proves budget enforcement, pre-armed independent teardown, exact identity binding, conservative report gating, exact teardown, provider absence verification, invoice reconciliation, and sealed evidence. It does not prove direct GPU identity, CUDA, KVM capability, vLLM behavior, TTFT, or any CPU-only versus signal-aware A/B result.
+
+## Postmortem hardening (not live-validated)
+
+- Future creates now require Vast's `--direct` launch flag.
+- SSH resolution prefers the exact instance record's `public_ipaddr` only when paired with its explicit `ports["22/tcp"][0].HostPort` mapping.
+- If no valid direct pair exists, the resolver falls back only to the same record's `ssh_host` plus `ssh_port`; it never combines a public IP with a proxy port or guesses a port.
+- Provider status evidence records both candidates, the selected route, and the selection reason.
+
+These changes close the routing defect found by the failed canary, but they are code-and-test evidence only. They do not convert the failed canary into a GPU result and have not consumed another paid attempt.

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 2 planning complete; paid execution waits for a fresh passing Phase 1 verification
-last_updated: "2026-09-23T04:30:00Z"
+stopped_at: Final paid canary FAILED_SAFE; evidence-gated deck complete; Google Slides import and real GPU path remain open
+last_updated: "2026-09-23T12:20:00Z"
 last_activity: 2026-09-23
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 13
-  completed_plans: 5
-  percent: 33
+  completed_plans: 8
+  percent: 62
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-23)
 
 **Core value:** Every slide claim traces to a checksummed, independently-anchored artifact — no fabricated data, no unsupported conclusions.
-**Current focus:** Phase 2 — Live GPU Canary and Paired Comparison planning
+**Current focus:** Honest publication artifacts after the bounded live canary
 
 ## Current Position
 
-Phase: 2 of 3 (Live GPU Canary and Paired Comparison)
-Plan: 0 of 8 in current phase
-Status: Planned; paid execution blocked pending fresh Phase 1 pass
-Last activity: 2026-09-23 — Phase 2 plans created with read-only and paid stages separated
+Phase: 3 of 3 (Evidence, Charts, and Deck), with Phase 2 capability proof incomplete
+Plan: evidence verdict, charts, and deck implemented; Google Slides import pending
+Status: Partial — local proof and failed-safe lifecycle are valid; live GPU and paired A/B claims are denied
+Last activity: 2026-09-23 — regenerated a claim-gated 16-slide deck after the final paid canary
 
-Progress: [███░░░░░░░] 33%
+Progress: [██████░░░░] 62%
 
 ## Performance Metrics
 
@@ -61,7 +61,9 @@ Recent decisions affecting current work:
 - All phases: Guard must run on a separate always-on host, not the controller host
 - Phase 1: Hash-chained append-only NDJSON journal — crash-resume truncates partial tail, never re-issues create
 - Phase 2: Paired comparison requires exactly three complete A/B blocks; fewer → exploratory label only
-- Phase 3: Slides 7–13 generated from validated artifacts only; limitation slide substituted if absent
+- Phase 2: The final paid canary is `FAILED_SAFE`; `$0.025` was charged and the GPU metric path remains unproved
+- Phase 2: Future launches require Vast `--direct`; endpoint resolution prefers exact `public_ipaddr` plus published `22/tcp` host port and falls back only to the provider proxy pair
+- Phase 3: Slides 7–13 consume machine-readable claim gates; unsupported live-GPU and A/B claims render as explicit limitations
 
 ### Pending Todos
 
@@ -69,10 +71,10 @@ None yet.
 
 ### Blockers/Concerns
 
-- Phase 1 verification currently reports `gaps_found`: remote concrete guard, valid queue-arm independence evidence, and selected-run integrity anchors must be closed and re-verified before any paid mutation.
-- Guard host not yet provisioned — must be a separately-reachable always-on host (fly.io/render/hetzner) before any Phase 2 paid stage; cost excluded from $5.00 Vast.ai cap
-- vLLM digest `sha256:770fe65b...` must be revalidated against the registry before each paid run
-- Vast.ai paired comparison SKU availability (two compatible GPU SKUs) is not guaranteed — check at canary time
+- Real GPU/CUDA/KVM/vLLM/Prometheus/custom-metrics/HPA request evidence does not exist; the claim remains `EXPLORATORY` and denied.
+- No paired A/B blocks exist; the comparison claim remains `EXPLORATORY` and denied.
+- The existing one-attempt paid-run authorization is exhausted. Do not spend again without a new explicit run scope.
+- Actual Google Slides upload/open/render QA is unavailable in the current authenticated browser tooling and remains the only deck release gate not exercised.
 
 ## Deferred Items
 
@@ -83,5 +85,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-09-23T04:30:00Z
-Stopped at: Phase 2 planning complete; paid execution waits for a fresh passing Phase 1 verification
+Stopped at: Final paid canary FAILED_SAFE; claim-gated deck built; no further paid attempt authorized
 Resume file: None

@@ -67,10 +67,15 @@ The approved VM launch contract is explicit and frozen: Ubuntu 22.04 template
 hash `b7942f6bbc4374893ff66eb78145bbac`, with recorded image identity
 `docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16`.  The CLI selects the
 template with `--template_hash`, never a default image, and always uses exactly
-`130` GiB disk with `--ssh` and `--cancel-unavail`.  It intentionally does not
-add `--direct`; the approved template provides SSH launch semantics.  The exact
-create argument order is recorded in unit tests; provider CLI calls use an
-argument vector, never a shell string.
+`130` GiB disk with `--ssh`, `--direct`, and `--cancel-unavail`. Vast documents
+`--direct` as requesting both direct and proxy SSH routes; it does not prove
+which route is usable. The resolver uses a direct endpoint only when the exact
+instance record supplies `public_ipaddr` plus `ports["22/tcp"][0].HostPort`;
+otherwise it records and uses the exact record's proxy pair. It never combines
+fields across routes or guesses a port. The exact create argument order is
+recorded in unit tests; provider CLI calls use an argument vector, never a
+shell string. A read-only CLI/schema preflight is required again before any
+future paid create because this combination has not been live-validated.
 
 The workload contract is equally frozen and explicit: model
 `Qwen/Qwen2.5-1.5B-Instruct`, revision

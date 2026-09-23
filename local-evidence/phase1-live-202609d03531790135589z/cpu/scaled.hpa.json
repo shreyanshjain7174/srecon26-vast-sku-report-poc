@@ -1,0 +1,108 @@
+{
+    "apiVersion": "autoscaling/v2",
+    "kind": "HorizontalPodAutoscaler",
+    "metadata": {
+        "annotations": {
+            "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"autoscaling/v2\",\"kind\":\"HorizontalPodAutoscaler\",\"metadata\":{\"annotations\":{},\"name\":\"hpa-target\",\"namespace\":\"srecon26-local\"},\"spec\":{\"behavior\":{\"scaleUp\":{\"stabilizationWindowSeconds\":0}},\"maxReplicas\":2,\"metrics\":[{\"containerResource\":{\"container\":\"server\",\"name\":\"cpu\",\"target\":{\"averageUtilization\":60,\"type\":\"Utilization\"}},\"type\":\"ContainerResource\"}],\"minReplicas\":1,\"scaleTargetRef\":{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"name\":\"hpa-target\"}}}\n"
+        },
+        "creationTimestamp": "2026-09-23T03:54:45Z",
+        "labels": {
+            "srecon26.io/owner": "srecon26-phase1-phase1-live-202609d03531790135589z"
+        },
+        "name": "hpa-target",
+        "namespace": "srecon26-local",
+        "resourceVersion": "955",
+        "uid": "d639cedb-8dbf-4bd2-8dae-6595e26934fb"
+    },
+    "spec": {
+        "behavior": {
+            "scaleDown": {
+                "policies": [
+                    {
+                        "periodSeconds": 15,
+                        "type": "Percent",
+                        "value": 100
+                    }
+                ],
+                "selectPolicy": "Max"
+            },
+            "scaleUp": {
+                "policies": [
+                    {
+                        "periodSeconds": 15,
+                        "type": "Pods",
+                        "value": 4
+                    },
+                    {
+                        "periodSeconds": 15,
+                        "type": "Percent",
+                        "value": 100
+                    }
+                ],
+                "selectPolicy": "Max",
+                "stabilizationWindowSeconds": 0
+            }
+        },
+        "maxReplicas": 2,
+        "metrics": [
+            {
+                "containerResource": {
+                    "container": "server",
+                    "name": "cpu",
+                    "target": {
+                        "averageUtilization": 60,
+                        "type": "Utilization"
+                    }
+                },
+                "type": "ContainerResource"
+            }
+        ],
+        "minReplicas": 1,
+        "scaleTargetRef": {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "name": "hpa-target"
+        }
+    },
+    "status": {
+        "conditions": [
+            {
+                "lastTransitionTime": "2026-09-23T03:55:00Z",
+                "message": "the HPA controller was able to update the target scale to 2",
+                "reason": "SucceededRescale",
+                "status": "True",
+                "type": "AbleToScale"
+            },
+            {
+                "lastTransitionTime": "2026-09-23T03:55:00Z",
+                "message": "the HPA was able to successfully calculate a replica count from cpu container resource utilization (percentage of request)",
+                "reason": "ValidMetricFound",
+                "status": "True",
+                "type": "ScalingActive"
+            },
+            {
+                "lastTransitionTime": "2026-09-23T03:57:31Z",
+                "message": "the desired replica count is more than the maximum replica count",
+                "reason": "TooManyReplicas",
+                "status": "True",
+                "type": "ScalingLimited"
+            }
+        ],
+        "currentMetrics": [
+            {
+                "containerResource": {
+                    "container": "server",
+                    "current": {
+                        "averageUtilization": 863,
+                        "averageValue": "863m"
+                    },
+                    "name": "cpu"
+                },
+                "type": "ContainerResource"
+            }
+        ],
+        "currentReplicas": 1,
+        "desiredReplicas": 2,
+        "lastScaleTime": "2026-09-23T03:57:31Z"
+    }
+}

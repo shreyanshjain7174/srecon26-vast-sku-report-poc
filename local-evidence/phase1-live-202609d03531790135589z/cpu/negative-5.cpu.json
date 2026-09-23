@@ -1,0 +1,1 @@
+{"kind":"PodMetrics","apiVersion":"metrics.k8s.io/v1beta1","metadata":{"name":"hpa-target-9898bfb8d-cc9sg","namespace":"srecon26-local","creationTimestamp":"2026-09-23T03:56:27Z","labels":{"app":"hpa-target","pod-template-hash":"9898bfb8d"}},"timestamp":"2026-09-23T03:56:24Z","window":"16.79s","containers":[{"name":"server","usage":{"cpu":"27350684n","memory":"13868Ki"}}]}

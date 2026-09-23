@@ -1,0 +1,5 @@
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting 0.0
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc 1.0
+

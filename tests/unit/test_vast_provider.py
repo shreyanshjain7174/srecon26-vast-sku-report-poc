@@ -155,8 +155,14 @@ def test_create_requires_explicit_frozen_kvm_launch_contract_and_exact_arguments
     assert created.instance_id == 77
     assert calls == [[
         "fixture", "--raw", "--no-color", "create", "instance", "101",
-        "--template_hash", OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, "--disk", "130", "--ssh", "--cancel-unavail", "--label", "run-nonce-label",
+        "--template_hash", OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, "--disk", "130", "--ssh", "--direct", "--cancel-unavail", "--label", "run-nonce-label",
     ]]
+
+
+def test_launch_manifest_records_that_direct_ssh_was_requested() -> None:
+    launch = VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE)
+
+    assert launch.to_json()["direct_ssh_requested"] is True
 
 
 def test_destroy_uses_noninteractive_yes_after_exact_label_check() -> None:
@@ -221,6 +227,7 @@ def test_absence_capture_persists_three_fresh_zero_match_reads(tmp_path: Path) -
         VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE, disk_gib=129),
         VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, "docker.io/vastai/kvm:latest"),
         VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE, ssh=False),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE, request_direct_ssh=False),
         VastLaunchContract(ubuntu_template_hash="not-a-template", image_contract=OFFICIAL_KVM_IMAGE),
     ],
 )

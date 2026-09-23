@@ -1,0 +1,7 @@
+{
+  "guard_anchor_root": "e41a6683538ef846f7bb579acece9751ae6339c8e2a3ec65057ccaa3b5ec5f18",
+  "limitation": "missing directly observed GPU identity; missing directly observed CUDA version; observed model id differs from frozen workload contract; observed model revision differs from frozen workload contract; observed vLLM image digest differs from frozen workload contract; missing KVM capability probe",
+  "provenance": "live-limitation",
+  "real_gpu_claim": false,
+  "status": "FAILED_SAFE"
+}

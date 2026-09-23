@@ -1,0 +1,6 @@
+{
+  "acknowledged": "e41a6683538ef846f7bb579acece9751ae6339c8e2a3ec65057ccaa3b5ec5f18",
+  "pre_anchor_manifest": "pre-anchor/run-manifest.json",
+  "pre_anchor_sums": "pre-anchor/SHA256SUMS",
+  "root_hash": "e41a6683538ef846f7bb579acece9751ae6339c8e2a3ec65057ccaa3b5ec5f18"
+}

@@ -371,6 +371,53 @@ class VastSshResolver:
         if hard_deadline is not None and datetime.now(UTC) >= hard_deadline - REPORT_MARGIN:
             raise LiveFactoryError(f"{operation} reached immutable teardown margin")
 
+    @staticmethod
+    def _endpoint_candidates(raw: Mapping[str, object]) -> tuple[tuple[str, int] | None, tuple[str, int] | None, str]:
+        """Return the direct and proxy candidates without inferring either route.
+
+        Vast exposes two materially different SSH paths.  A direct connection
+        is usable only when the instance's public address is paired with the
+        explicit Docker-style ``22/tcp`` host-port mapping.  ``ssh_host`` and
+        ``ssh_port`` are instead the provider's proxy route.  In particular,
+        a proxy port must never be paired with ``public_ipaddr``.
+        """
+
+        direct_host = _normalized_host(raw.get("public_ipaddr"))
+        direct_port = _host_port(raw.get("ports"))
+        proxy_host = _normalized_host(raw.get("ssh_host"))
+        proxy_port = _normalized_port(raw.get("ssh_port"))
+
+        direct = (direct_host, direct_port) if direct_host is not None and direct_port is not None else None
+        proxy = (proxy_host, proxy_port) if proxy_host is not None and proxy_port is not None else None
+        if direct is not None:
+            return direct, proxy, "direct_public_ipaddr_22_tcp_hostport"
+        if proxy is not None:
+            return direct, proxy, "proxy_ssh_host_ssh_port"
+        return direct, proxy, "no_safe_endpoint_candidate"
+
+    @staticmethod
+    def _endpoint_evidence(raw: Mapping[str, object], direct: tuple[str, int] | None, proxy: tuple[str, int] | None, *, selected_route: str | None, selection_reason: str) -> dict[str, object]:
+        """Make route selection auditable without retaining raw provider fields."""
+
+        direct_host = _normalized_host(raw.get("public_ipaddr"))
+        direct_port = _host_port(raw.get("ports"))
+        proxy_host = _normalized_host(raw.get("ssh_host"))
+        proxy_port = _normalized_port(raw.get("ssh_port"))
+        return {
+            "direct_endpoint_host": direct_host,
+            "direct_endpoint_port": direct_port,
+            "proxy_endpoint_host": proxy_host,
+            "proxy_endpoint_port": proxy_port,
+            "direct_endpoint_candidate": (
+                {"host": direct[0], "port": direct[1]} if direct is not None else None
+            ),
+            "proxy_endpoint_candidate": (
+                {"host": proxy[0], "port": proxy[1]} if proxy is not None else None
+            ),
+            "selected_ssh_route": selected_route,
+            "ssh_route_selection_reason": selection_reason,
+        }
+
     def resolve(self, instance: InstanceContract, *, hard_deadline: datetime | None = None, heartbeat: Callable[[], None] | None = None, status_log: Path | None = None) -> SshEndpoint:
         terminal = {"error", "offline", "stopped", "exited"}
         for attempt in range(self.attempts):
@@ -388,17 +435,35 @@ class VastSshResolver:
                 label = raw.get("label")
                 if current_id != instance.instance_id or label != instance.label:
                     raise LiveFactoryError("exact instance SSH lookup changed ID or nonce-bound label")
-                host = raw.get("ssh_host", raw.get("public_ipaddr", raw.get("public_ip", raw.get("ipaddr"))))
-                port = raw.get("ssh_port", raw.get("port"))
+                direct, proxy, selection_reason = self._endpoint_candidates(raw)
+                selected = direct or proxy
+                selected_route = "direct" if direct is not None else "proxy" if proxy is not None else None
                 status = str(raw.get("actual_status", "")).lower()
                 if status_log is not None:
                     status_log.parent.mkdir(parents=True, exist_ok=True)
                     with status_log.open("a", encoding="utf-8") as handle:
-                        handle.write(json.dumps({"attempt": attempt + 1, "instance_id": current_id, "label": label, "actual_status": status, "endpoint_published": isinstance(host, str) and port is not None, "observed_at": _stamp(datetime.now(UTC))}, sort_keys=True) + "\n")
+                        evidence = {
+                            "attempt": attempt + 1,
+                            "instance_id": current_id,
+                            "label": label,
+                            "actual_status": status,
+                            "endpoint_published": selected is not None,
+                            "observed_at": _stamp(datetime.now(UTC)),
+                        }
+                        evidence.update(
+                            self._endpoint_evidence(
+                                raw,
+                                direct,
+                                proxy,
+                                selected_route=selected_route,
+                                selection_reason=selection_reason,
+                            )
+                        )
+                        handle.write(json.dumps(evidence, sort_keys=True) + "\n")
                 if status in terminal:
                     raise LiveFactoryError(f"exact instance entered terminal provider status: {status}")
-                if status == "running" and isinstance(host, str) and _safe_host(host) and port is not None:
-                    return SshEndpoint(host, _integer(port, "SSH port", minimum=1, maximum=65535))
+                if status == "running" and selected is not None:
+                    return SshEndpoint(*selected)
             if attempt + 1 < self.attempts:
                 if heartbeat is not None:
                     heartbeat()
@@ -465,6 +530,38 @@ def _safe_host(host: str) -> bool:
     except ValueError:
         return bool(_HOST.fullmatch(host)) and host not in {"localhost", "localhost.localdomain"}
     return not (address.is_loopback or address.is_unspecified or address.is_multicast)
+
+
+def _normalized_host(value: object) -> str | None:
+    """Return a safe canonical host, or reject an untrusted provider field."""
+
+    if not isinstance(value, str) or not _safe_host(value):
+        return None
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return value.lower()
+
+
+def _normalized_port(value: object) -> int | None:
+    try:
+        return _integer(value, "SSH port", minimum=1, maximum=65535)
+    except LiveFactoryError:
+        return None
+
+
+def _host_port(value: object) -> int | None:
+    """Extract only the explicit first published host port for container SSH."""
+
+    if not isinstance(value, Mapping):
+        return None
+    mappings = value.get("22/tcp")
+    if not isinstance(mappings, Sequence) or isinstance(mappings, (str, bytes)) or not mappings:
+        return None
+    first = mappings[0]
+    if not isinstance(first, Mapping):
+        return None
+    return _normalized_port(first.get("HostPort"))
 
 
 @dataclass(frozen=True, slots=True)

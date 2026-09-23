@@ -2,13 +2,90 @@
 /* Build the editable SRECon26 evidence deck. */
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const childProcess = require('child_process');
 const pptxgen = require('pptxgenjs');
 
 const root = path.resolve(__dirname, '..');
 const outputDir = path.join(root, 'artifacts', 'presentation');
 const output = path.join(outputDir, 'srecon26-llm-hpa-evidence-poc.pptx');
+const verdictPath = path.join(outputDir, 'verdict.json');
+const deckManifestPath = path.join(outputDir, 'DECK-MANIFEST.json');
 const chart = (name) => path.join(outputDir, name);
 fs.mkdirSync(outputDir, { recursive: true });
+
+const chartBuild = childProcess.spawnSync('python3', [path.join(root, 'scripts', 'build_results_charts.py')], {
+  cwd: root,
+  encoding: 'utf8',
+});
+if (chartBuild.status !== 0) {
+  throw new Error(`refusing deck: current evidence/chart build failed: ${chartBuild.stderr || chartBuild.stdout}`);
+}
+
+if (!fs.existsSync(verdictPath)) {
+  throw new Error(`refusing to build a claim deck without machine-readable evidence verdict: ${verdictPath}`);
+}
+let verdict;
+try {
+  verdict = JSON.parse(fs.readFileSync(verdictPath, 'utf8'));
+} catch (error) {
+  throw new Error(`refusing unreadable evidence verdict ${verdictPath}: ${error.message}`);
+}
+if (verdict.schema_version !== 2 || !verdict.input_bindings) {
+  throw new Error('refusing deck: evidence verdict is not pinned schema version 2');
+}
+const claim = (id) => verdict.claims && verdict.claims[id];
+const requireClaim = (id, expectedAllowed) => {
+  const result = claim(id);
+  if (!result || typeof result.allowed !== 'boolean' || !['VALID', 'INVALID', 'EXPLORATORY'].includes(result.verdict)) {
+    throw new Error(`refusing deck: malformed or missing claim verdict for ${id}`);
+  }
+  if (result.allowed !== expectedAllowed) {
+    throw new Error(`refusing deck: ${id} allowed=${result.allowed}, expected ${expectedAllowed}`);
+  }
+  if (expectedAllowed && result.verdict !== 'VALID') {
+    throw new Error(`refusing deck: allowed claim ${id} is not VALID`);
+  }
+};
+requireClaim('local_hpa_signal_plumbing', true);
+requireClaim('failed_safe_lifecycle', true);
+requireClaim('real_gpu_metric_path', false);
+requireClaim('paired_hpa_performance', false);
+const localArms = new Map((verdict.local_evidence && verdict.local_evidence.arms || []).map((item) => [item.arm, item]));
+const queueArm = localArms.get('queue');
+const queuePeak = queueArm && queueArm.observations && queueArm.observations.negative_cpu_max_millicores;
+if (typeof queuePeak !== 'number' || !Number.isFinite(queuePeak)) {
+  throw new Error('refusing deck: validated queue-arm CPU observation is missing');
+}
+
+const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const artifact = (file) => ({ path: path.relative(root, file), sha256: sha256(file) });
+const localAnchor = path.join(root, '.planning', 'phases', '01-safety-foundation-and-local-evidence', '01-LOCAL-EVIDENCE-ANCHOR.json');
+const localSources = [
+  localAnchor,
+  path.join(root, 'local-evidence', 'phase1-live-202609d03531790135589z', 'cpu', 'EVIDENCE-MANIFEST.json'),
+  path.join(root, 'local-evidence', 'phase1-live-202609d03531790135589z', 'cpu', 'SHA256SUMS'),
+  path.join(root, 'local-evidence', 'phase1-live-202609d03531790135589z', 'cpu', 'ROOT-HASH.txt'),
+  path.join(root, 'local-evidence', 'phase1-live-202609d04271790137679z', 'queue', 'EVIDENCE-MANIFEST.json'),
+  path.join(root, 'local-evidence', 'phase1-live-202609d04271790137679z', 'queue', 'SHA256SUMS'),
+  path.join(root, 'local-evidence', 'phase1-live-202609d04271790137679z', 'queue', 'ROOT-HASH.txt'),
+  path.join(root, 'local-evidence', 'phase1-live-202609d04031790136227z', 'kv', 'EVIDENCE-MANIFEST.json'),
+  path.join(root, 'local-evidence', 'phase1-live-202609d04031790136227z', 'kv', 'SHA256SUMS'),
+  path.join(root, 'local-evidence', 'phase1-live-202609d04031790136227z', 'kv', 'ROOT-HASH.txt'),
+];
+const liveRun = path.join(root, 'artifacts', 'live-runs', 'gpu-smoke-distinct-20260923101734');
+const liveSources = [
+  path.join(liveRun, 'run-manifest.json'),
+  path.join(liveRun, 'limitation.json'),
+  path.join(liveRun, 'guard-anchor.json'),
+  path.join(liveRun, 'SHA256SUMS'),
+  path.join(liveRun, 'ROOT-HASH.txt'),
+  path.join(liveRun, 'pre-anchor', 'SHA256SUMS'),
+  path.join(liveRun, 'pre-anchor', 'ROOT-HASH.txt'),
+];
+for (const source of [...localSources, ...liveSources]) {
+  if (!fs.existsSync(source)) throw new Error(`refusing deck: declared source artifact is missing: ${source}`);
+}
 
 const pptx = new pptxgen();
 pptx.layout = 'LAYOUT_WIDE';
@@ -158,7 +235,7 @@ const resultBadge = (slide, x, y, label, color) => {
   const s = base('queue local arm • d042');
   heading(s, 'Queue arm: waiting work scaled while CPU stayed low', 'local result');
   s.addImage({ path: chart('queue-cpu-control.png'), x: 0.50, y: 1.25, w: 12.33, h: 5.85 });
-  notes(s, 'd042 is useful because it makes the separation concrete. The seven negative-control CPU captures peak at 16.456944 millicores, far below the 48 millicore independence ceiling, while the queue signal drove the HPA transition.');
+  notes(s, `d042 is useful because it makes the separation concrete. The seven negative-control CPU captures peak at ${queuePeak} millicores, far below the 48 millicore independence ceiling, while the queue signal drove the HPA transition.`);
 }
 
 // 8
@@ -166,7 +243,7 @@ const resultBadge = (slide, x, y, label, color) => {
   const s = base('queue local arm • native editable chart');
   heading(s, 'The queue control is also preserved as an editable chart', 'audit-friendly visual');
   tx(s, 'd042 CPU (millicores)', { x: 0.86, y: 1.43, w: 3.1, h: 0.26, fontSize: 15, bold: true, color: C.muted });
-  s.addChart(CH.bar, [{ name: 'CPU', labels: ['observed peak', 'independence ceiling'], values: [16.456944, 48] }], {
+  s.addChart(CH.bar, [{ name: 'CPU', labels: ['observed peak', 'independence ceiling'], values: [queuePeak, 48] }], {
     x: 0.82, y: 1.82, w: 6.6, h: 3.92, catAxisLabelFontFace: 'Arial', catAxisLabelFontSize: 14,
     valAxisLabelFontFace: 'Arial', valAxisLabelFontSize: 11, valAxisMinVal: 0, valAxisMaxVal: 60,
     valAxisMajorUnit: 12, chartColors: [C.teal], showLegend: false, showTitle: false,
@@ -178,7 +255,7 @@ const resultBadge = (slide, x, y, label, color) => {
   tx(s, 'Verified inference', { x: 8.44, y: 2.20, w: 3.0, h: 0.30, fontSize: 22, bold: true, color: C.gold });
   tx(s, 'CPU remained below the independence ceiling while the queue arm reached its HPA transition.', { x: 8.44, y: 2.92, w: 3.0, h: 1.10, fontSize: 21, bold: true });
   tx(s, 'Not a user-latency or GPU utilization measurement.', { x: 8.44, y: 4.65, w: 3.0, h: 0.38, fontSize: 14, color: C.muted, italic: true });
-  notes(s, 'The chart is deliberately simple and native to PowerPoint so the numeric source can be audited or restyled. It repeats one exact evidence value: 16.456944 millicores against a 48 millicore ceiling.');
+  notes(s, `The chart is deliberately simple and native to PowerPoint so the numeric source can be audited or restyled. It repeats one exact evidence value: ${queuePeak} millicores against a 48 millicore ceiling.`);
 }
 
 // 9
@@ -293,7 +370,7 @@ const resultBadge = (slide, x, y, label, color) => {
 
 // 15
 {
-  const s = base('lightning talk arc • 5 minutes');
+  const s = base('lightning talk arc • 4 minutes');
   heading(s, 'A four-minute talk arc', 'delivery');
   const beats = [
     ['0:00', 'Question', 'When can CPU be late?'], ['0:30', 'Model', 'CPU, queue, synthetic KV'], ['1:00', 'Evidence', 'three local 1→2 transitions'], ['2:10', 'Boundary', 'what GPU work did not prove'], ['2:55', 'Method', 'safe live proof requirements'], ['3:35', 'Takeaway', 'measure before you claim'],
@@ -323,5 +400,40 @@ const resultBadge = (slide, x, y, label, color) => {
   notes(s, 'Close by repeating the boundary: this deck proves a local, independently anchored plumbing result. It deliberately does not turn an incomplete GPU path into a success story.');
 }
 
-pptx.writeFile({ fileName: output });
-console.log(output);
+const slideCategories = [
+  'scope', 'hypothesis', 'background', 'experiment-contract',
+  'validated-local-evidence', 'validated-local-evidence', 'validated-local-evidence',
+  'validated-local-evidence', 'validated-local-evidence', 'validated-local-evidence',
+  'validated-failed-safe-lifecycle', 'validated-failed-safe-lifecycle', 'claim-boundary',
+  'future-work', 'delivery', 'takeaway',
+];
+const sourcesForSlide = (number) => {
+  if (number >= 5 && number <= 10) return [...localSources, verdictPath];
+  if (number >= 11 && number <= 13) return [...liveSources, verdictPath];
+  return [verdictPath, path.join(root, 'docs', 'superpowers', 'specs', '2026-09-23-srecon26-llm-hpa-poc-design.md')];
+};
+
+async function writeDeck() {
+  if (pptx._slides.length !== 16) throw new Error(`deck must contain exactly 16 slides; found ${pptx._slides.length}`);
+  await pptx.writeFile({ fileName: output });
+  const manifest = {
+    schema_version: 1,
+    slide_count: 16,
+    deck: artifact(output),
+    evidence_verdict: artifact(verdictPath),
+    claims: verdict.claims,
+    slides: slideCategories.map((claim_category, index) => ({
+      number: index + 1,
+      claim_category,
+      source_artifacts: sourcesForSlide(index + 1).map(artifact),
+    })),
+  };
+  fs.writeFileSync(deckManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  console.log(output);
+  console.log(deckManifestPath);
+}
+
+writeDeck().catch((error) => {
+  console.error(error.stack || error.message);
+  process.exitCode = 1;
+});

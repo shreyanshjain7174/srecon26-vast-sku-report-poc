@@ -8,7 +8,7 @@ Three phases enforced by a hard dependency chain: build the safety envelope and 
 
 - [x] **Phase 1: Safety Foundation and Local Evidence** - Safety envelope (budget, guard, journal, semgrep gate) complete; all three local HPA arm independence proofs validated and anchored (completed 2026-09-23)
 - [ ] **Phase 2: Live GPU Canary and Paired Comparison** - Real GPU metric-path canary end-to-end on Vast.ai; conditional A/B/A paired comparison if budget and topology allow
-- [ ] **Phase 3: Evidence, Charts, and Deck** - All artifacts analyzed, charts generated from validated results, 16-slide deck assembled and validated for Google Slides import
+- [ ] **Phase 3: Evidence, Charts, and Deck** - Analyzer, claim-gated charts, and 16-slide deck are complete; actual Google Slides import remains unverified
 
 ## Phase Details
 
@@ -47,12 +47,14 @@ Plans:
 - [ ] 02-01-PLAN.md — Add a read-only, current-contract Vast CLI adapter and preflight
 - [ ] 02-02-PLAN.md — Implement the concrete independently hosted deadline guard
 - [ ] 02-03-PLAN.md — Prove exact-target provider reporting with a non-submitting fixture
-- [ ] 02-04-PLAN.md — Define and validate the KVM k3s GPU metric-path gate offline
-- [ ] 02-05-PLAN.md — Exercise the canary lifecycle entirely in offline simulation
-- [ ] 02-06-PLAN.md — Run paid GPU smoke and metric path only through fresh passing gates
-- [ ] 02-07-PLAN.md — Validate matched three-block comparison eligibility offline
+- [x] 02-04-PLAN.md — Define and validate the KVM k3s GPU metric-path gate offline
+- [x] 02-05-PLAN.md — Exercise the canary lifecycle entirely in offline simulation
+- [ ] 02-06-PLAN.md — Paid smoke completed `FAILED_SAFE`; safe lifecycle proved, GPU metric path still unproved
+- [x] 02-07-PLAN.md — Validate matched three-block comparison eligibility offline
 - [ ] 02-08-PLAN.md — Run the conditional paid paired comparison or record its limitation
 **UI hint**: no
+
+**Latest live result:** The one final distinct-machine canary charged `$0.025`, then failed closed after 36 unusable SSH attempts. Exact instance teardown and three zero-match reads succeeded. This is valid lifecycle evidence, not GPU/vLLM evidence. No paired comparison was eligible.
 
 ### Phase 3: Evidence, Charts, and Deck
 **Goal**: All validated artifacts are analyzed, charts are generated only from VALID bundles, and the 16-slide deck is assembled and confirmed importable into Google Slides
@@ -73,5 +75,5 @@ Phases execute in numeric order: 1 → 2 → 3
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Safety Foundation and Local Evidence | 5/5 | Complete   | 2026-09-23 |
-| 2. Live GPU Canary and Paired Comparison | 0/8 | Planned; paid execution blocked pending Phase 1 re-verification | - |
-| 3. Evidence, Charts, and Deck | 0/? | Not started | - |
+| 2. Live GPU Canary and Paired Comparison | 3/8 complete; 1 failed-safe attempt | GPU path and A/B remain unproved | - |
+| 3. Evidence, Charts, and Deck | implementation complete except Google import | Partial | - |

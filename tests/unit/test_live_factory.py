@@ -198,15 +198,83 @@ def test_ssh_resolver_rejects_an_instance_record_that_does_not_preserve_exact_la
         VastSshResolver("vastai", runner=runner).resolve(instance)
 
 
-def test_ssh_resolver_accepts_only_safe_endpoint_from_exact_instance_record() -> None:
+def test_ssh_resolver_selects_explicit_direct_route_and_records_normalized_evidence(tmp_path: Path) -> None:
     instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
 
     def runner(_arguments, *, timeout: int) -> str:
         del timeout
-        return json.dumps({"id": 417, "label": LABEL, "actual_status": "running", "public_ipaddr": "203.0.113.8", "ssh_port": "2222"})
+        return json.dumps({
+            "id": 417,
+            "label": LABEL,
+            "actual_status": "running",
+            "public_ipaddr": "203.0.113.8",
+            "ports": {"22/tcp": [{"HostPort": "2222"}]},
+            "ssh_host": "proxy.example.test",
+            "ssh_port": "12345",
+        })
 
-    endpoint = VastSshResolver("vastai", runner=runner).resolve(instance)
+    log = tmp_path / "status.ndjson"
+    endpoint = VastSshResolver("vastai", runner=runner).resolve(instance, status_log=log)
     assert (endpoint.host, endpoint.port, endpoint.destination("root")) == ("203.0.113.8", 2222, "root@203.0.113.8")
+    evidence = json.loads(log.read_text())
+    assert (evidence["direct_endpoint_host"], evidence["direct_endpoint_port"]) == ("203.0.113.8", 2222)
+    assert (evidence["proxy_endpoint_host"], evidence["proxy_endpoint_port"]) == ("proxy.example.test", 12345)
+    assert evidence["direct_endpoint_candidate"] == {"host": "203.0.113.8", "port": 2222}
+    assert evidence["proxy_endpoint_candidate"] == {"host": "proxy.example.test", "port": 12345}
+    assert evidence["selected_ssh_route"] == "direct"
+    assert evidence["ssh_route_selection_reason"] == "direct_public_ipaddr_22_tcp_hostport"
+
+
+def test_ssh_resolver_safely_falls_back_to_proxy_when_direct_mapping_is_unavailable(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+
+    def runner(_arguments, *, timeout: int) -> str:
+        del timeout
+        return json.dumps({
+            "id": 417,
+            "label": LABEL,
+            "actual_status": "running",
+            "public_ipaddr": "203.0.113.8",
+            "ports": {"22/tcp": []},
+            "ssh_host": "proxy.example.test",
+            "ssh_port": "12345",
+        })
+
+    log = tmp_path / "status.ndjson"
+    endpoint = VastSshResolver("vastai", runner=runner).resolve(instance, status_log=log)
+
+    assert (endpoint.host, endpoint.port) == ("proxy.example.test", 12345)
+    evidence = json.loads(log.read_text())
+    assert (evidence["direct_endpoint_host"], evidence["direct_endpoint_port"]) == ("203.0.113.8", None)
+    assert evidence["direct_endpoint_candidate"] is None
+    assert evidence["selected_ssh_route"] == "proxy"
+    assert evidence["ssh_route_selection_reason"] == "proxy_ssh_host_ssh_port"
+
+
+def test_ssh_resolver_never_pairs_public_ip_with_malformed_or_proxy_port(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+
+    def runner(_arguments, *, timeout: int) -> str:
+        del timeout
+        return json.dumps({
+            "id": 417,
+            "label": LABEL,
+            "actual_status": "running",
+            "public_ipaddr": "203.0.113.8",
+            "ports": {"22/tcp": [{"HostPort": "not-a-port"}]},
+            "ssh_port": "2222",
+        })
+
+    log = tmp_path / "status.ndjson"
+    with pytest.raises(LiveFactoryError, match="did not reach running with a safe SSH endpoint"):
+        VastSshResolver("vastai", runner=runner, attempts=1).resolve(instance, status_log=log)
+
+    evidence = json.loads(log.read_text())
+    assert (evidence["direct_endpoint_host"], evidence["direct_endpoint_port"]) == ("203.0.113.8", None)
+    assert evidence["direct_endpoint_candidate"] is None
+    assert evidence["proxy_endpoint_candidate"] is None
+    assert evidence["selected_ssh_route"] is None
+    assert evidence["ssh_route_selection_reason"] == "no_safe_endpoint_candidate"
 
 
 def test_ssh_resolver_waits_for_running_even_when_endpoint_is_published(tmp_path: Path) -> None:

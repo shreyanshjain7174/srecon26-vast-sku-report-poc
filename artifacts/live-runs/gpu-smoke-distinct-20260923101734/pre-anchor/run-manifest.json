@@ -1,0 +1,58 @@
+{
+  "absence_reads": 3,
+  "evidence_blockers": [
+    "missing directly observed GPU identity",
+    "missing directly observed CUDA version",
+    "observed model id differs from frozen workload contract",
+    "observed model revision differs from frozen workload contract",
+    "observed vLLM image digest differs from frozen workload contract",
+    "missing KVM capability probe"
+  ],
+  "gate_hashes": {
+    "guard": "28939f316dfa3130227fc748010069fe0a17121e3cf06c59eee8388dca1c6d9e",
+    "phase1": "6010516a30da080d93d7536f112340e8dc9f904c436e4e2fe935d2652a8e71cf",
+    "provider": "05d59d91ba6e176f4ef3fd2ec1ec1acfe24524c9bffeba683122ba30a63db8fa",
+    "report": "de5f8daf9faa238f8026ca07f8fdf5b2019f582e6a9e33a5e446407dabf22b39",
+    "semgrep": "065164070dc6d809fdb8fe2da26ea5a02b72491ae5b06cff56a9ae0173df9903"
+  },
+  "hard_deadline": "2026-09-23T10:38:00Z",
+  "label": "srecon26-gpu-smoke--nonce-distinct20260923095500",
+  "launch": {
+    "cancel_unavail": true,
+    "disk_gib": 130,
+    "image_contract": "docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16",
+    "ssh": true,
+    "ubuntu_template_hash": "b7942f6bbc4374893ff66eb78145bbac"
+  },
+  "limitation": "missing directly observed GPU identity; missing directly observed CUDA version; observed model id differs from frozen workload contract; observed model revision differs from frozen workload contract; observed vLLM image digest differs from frozen workload contract; missing KVM capability probe",
+  "nonce": "distinct20260923095500",
+  "offer_contract": {
+    "compute_capability": "8.9",
+    "dph_total": "0.2227777777777778",
+    "gpu_name": "RTX 4000Ada",
+    "gpu_ram_mib": 20475,
+    "label": "srecon26-gpu-smoke--nonce-distinct20260923095500",
+    "machine_id": 147086,
+    "num_gpus": 1,
+    "offer_id": 52180811
+  },
+  "project_cap": "5.00",
+  "provenance": "live-limitation",
+  "provider_create_calls": 1,
+  "provider_destroy_calls": 1,
+  "real_gpu_claim": false,
+  "report": {
+    "attempted": false,
+    "confirmed": false
+  },
+  "report_start_by": "2026-09-23T10:35:15Z",
+  "reserve": "0.25",
+  "run_id": "gpu-smoke-distinct-20260923101734",
+  "stage": "gpu-smoke",
+  "status": "FAILED_SAFE",
+  "workload_contract": {
+    "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+    "model_revision": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+    "vllm_image_digest": "sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b"
+  }
+}

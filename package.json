@@ -1,0 +1,17 @@
+{
+  "name": "srecon26-vast-sku-report-poc",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "analyze:evidence": "python3 scripts/analyze_evidence.py",
+    "build:charts": "python3 scripts/build_results_charts.py",
+    "build:deck": "node scripts/build_talk_deck.js",
+    "build:presentation": "node scripts/build_talk_deck.js"
+  },
+  "devDependencies": {
+    "pptxgenjs": "4.0.1"
+  }
+}
