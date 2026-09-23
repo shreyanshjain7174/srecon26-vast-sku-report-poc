@@ -28,6 +28,7 @@ def _responses() -> dict[tuple[str, str], object]:
         ("group", "show"): {"name": GROUP, "location": LOCATION, "tags": TAGS},
         ("identity", "show"): {
             "id": IDENTITY_ID,
+            "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
             "location": LOCATION,
             "principalId": PRINCIPAL,
             "clientId": CLIENT,
@@ -102,4 +103,45 @@ def test_preflight_rejects_a_controller_without_the_exact_identity() -> None:
         return json.dumps(responses[(args[1], args[2])])
 
     with pytest.raises(AzureLifecycleError, match="different user-assigned identity"):
+        preflight(_config(), runner=runner)
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"type": "SystemAssigned", "userAssignedIdentities": {IDENTITY_ID: {}}},
+        {
+            "type": "UserAssigned",
+            "userAssignedIdentities": {
+                IDENTITY_ID: {},
+                "/subscriptions/other/resourceGroups/other/providers/Microsoft.ManagedIdentity/userAssignedIdentities/extra": {},
+            },
+        },
+    ],
+)
+def test_preflight_requires_exact_user_assigned_type_and_singleton_identity(identity: dict[str, object]) -> None:
+    responses = _responses()
+    vm = dict(responses[("vm", "show")])
+    vm["identity"] = identity
+    responses[("vm", "show")] = vm
+
+    def runner(arguments, timeout: int) -> str:
+        args = list(arguments)
+        return json.dumps(responses[(args[1], args[2])])
+
+    with pytest.raises(AzureLifecycleError):
+        preflight(_config(), runner=runner)
+
+
+def test_preflight_rejects_a_different_identity_resource_type() -> None:
+    responses = _responses()
+    identity = dict(responses[("identity", "show")])
+    identity["type"] = "Microsoft.Compute/virtualMachines"
+    responses[("identity", "show")] = identity
+
+    def runner(arguments, timeout: int) -> str:
+        args = list(arguments)
+        return json.dumps(responses[(args[1], args[2])])
+
+    with pytest.raises(AzureLifecycleError, match="identity differs"):
         preflight(_config(), runner=runner)

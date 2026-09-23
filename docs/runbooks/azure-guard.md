@@ -45,11 +45,13 @@ restrict,command="/usr/local/sbin/guardctl" ssh-ed25519 <runtime-public-key>
 
 `guardctl` must reject every `SSH_ORIGINAL_COMMAND` except the literal
 `guardctl`, read at most one bounded `srecon26-guard-v1` JSON request from
-stdin, dispatch only `preflight`, `arm`, `heartbeat`, `status`, or `anchor`, and
-write exactly one JSON object to stdout. It must never start a shell. The
-client additionally disables configuration files, PTY allocation, agent and
-port forwarding, local commands, password/interactive authentication, and
-host-key TOFU.
+stdin, dispatch only `preflight`, `arm`, `heartbeat`, `status`, `anchor`, or
+`export`, and write exactly one JSON object to stdout. It must never start a
+shell. The client additionally disables configuration files, PTY allocation,
+agent and port forwarding, local commands, password/interactive
+authentication, and host-key TOFU. Both stdout and stderr are read
+incrementally; the client terminates SSH as soon as stdout exceeds 64 KiB or
+stderr exceeds 4 KiB.
 
 ## Install the provider credential manually
 
@@ -66,7 +68,7 @@ Then invoke only that literal command and pass the credential on stdin:
 ```sh
 ssh -F /dev/null -T -o BatchMode=yes -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile=/secure/azure-guard-known-hosts \
-  -o GlobalKnownHostsFile=/dev/null -o ForwardAgent=no \
+  -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ForwardAgent=no \
   -o ClearAllForwardings=yes -i /secure/bootstrap-key \
   root@guard.example.test 'guardctl install-credential' \
   < /secure/vast-api-key
@@ -90,12 +92,34 @@ receipt only when it has all of the following:
 - a 64-character lowercase journal root hash.
 
 Call `preflight` after arming so `GuardClient` can construct and validate the
-attestation. Send bounded heartbeats during the run. Anchor the local evidence
-root, then collect `status` receipts and copy the hash-chained controller
-journal through the approved evidence export path. Redact infrastructure
-details as needed, but retain timestamps, worker hash, receipt roots, exact
-instance ID and label, and the provider observation outcomes. Never include
-the credential or private SSH keys.
+attestation. The transport rejects a preflight receipt unless it restates the
+exact nonce, label, and immutable deadline from its validated `ARMED` receipt.
+Send bounded heartbeats during the run. Anchor the local evidence root, then
+collect `status` receipts.
+
+After the final `status` response, invoke the bounded export RPC with that
+receipt's nonce and journal root:
+
+```python
+exported = transport.export_evidence(
+    nonce=status_receipt["nonce"],
+    root_hash=status_receipt["root_hash"],
+)
+with open("azure-guard-journal.jsonl", "x", encoding="utf-8") as output:
+    output.write(exported.journal)
+```
+
+The forced `guardctl` command must answer `export` with one JSON object whose
+status is `EVIDENCE_EXPORTED` and whose `nonce` and `root_hash` exactly echo the
+request. It returns the complete journal as `journal`, the literal encoding
+`utf-8-jsonl`, and `journal_sha256`. The client streams the enclosing response
+under the 64 KiB cap and verifies SHA-256 before returning
+`GuardEvidenceExport`; a larger journal must be collected through a separately
+approved bounded artifact channel and is not accepted by this RPC. Preserve
+the JSONL file and its SHA-256 alongside the final receipt. Redact
+infrastructure details as needed, but retain timestamps, worker hash, receipt
+roots, exact instance ID and label, and provider observation outcomes. Never
+include the credential or private SSH keys.
 
 ## Cleanup gate
 
@@ -105,6 +129,8 @@ timer, and journal intact through errors and `ABSENCE_PENDING`. Azure cleanup
 is allowed only after the durable controller returns `ABSENCE_CONFIRMED` with
 three distinct successful post-teardown provider reads showing no match for
 both the exact numeric instance ID and exact nonce-bound label. Export and
-verify the final journal before manually deleting the dedicated Azure resource
-group. If ownership changes, inventory is unknown, or any read fails, retain
-the controller and escalate; do not disarm or delete it.
+verify the final journal as described above before manually deleting the
+dedicated Azure resource group. If ownership changes, inventory is unknown,
+any read fails, the three timestamps repeat or arrive out of order, or export
+hash verification fails, retain the controller and escalate; do not disarm or
+delete it.

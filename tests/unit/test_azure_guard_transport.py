@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from srecon26_poc.azure_guard_transport import (
     AzureGuardSshConfig,
     AzureGuardTransportError,
     AzureSshGuardTransport,
+    _run,
 )
 
 
@@ -128,3 +131,152 @@ def test_transport_refuses_missing_known_hosts_file(tmp_path: Path) -> None:
                 known_hosts_file=tmp_path / "missing-known-hosts",
             )
         )
+
+
+@pytest.mark.parametrize(
+    "response_override",
+    [
+        {"status": "ABSENCE_PENDING"},
+        {"nonce": "other_nonce_1234"},
+        {"label": "other--nonce-nonce_12345678"},
+        {"hard_deadline": "2026-09-24T04:00:01Z"},
+    ],
+)
+def test_arm_response_must_be_armed_and_exactly_bound_to_the_request(tmp_path: Path, response_override: dict[str, object]) -> None:
+    response: dict[str, object] = {
+        "status": "ARMED",
+        "root_hash": ROOT,
+        "nonce": NONCE,
+        "label": LABEL,
+        "hard_deadline": "2026-09-24T04:00:00Z",
+    }
+    response.update(response_override)
+
+    def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(response), stderr="")
+
+    with pytest.raises(AzureGuardTransportError):
+        _transport(tmp_path, runner).call(
+            "arm",
+            {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "hard_deadline": "2026-09-24T04:00:00Z"},
+        )
+
+
+def test_preflight_must_restate_the_validated_arm_binding(tmp_path: Path) -> None:
+    responses = iter(
+        [
+            {
+                "status": "ARMED",
+                "root_hash": ROOT,
+                "nonce": NONCE,
+                "label": LABEL,
+                "hard_deadline": "2026-09-24T04:00:00Z",
+            },
+            {
+                "status": "ARMED",
+                "root_hash": "b" * 64,
+                "nonce": NONCE,
+                "label": LABEL,
+                "hard_deadline": "2026-09-24T04:00:00Z",
+                "host_identity": "azure-guard-01",
+                "script_hash": "c" * 64,
+            },
+        ]
+    )
+
+    def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(next(responses)), stderr="")
+
+    transport = _transport(tmp_path, runner)
+    transport.call(
+        "arm",
+        {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "hard_deadline": "2026-09-24T04:00:00Z"},
+    )
+    assert transport.call("preflight", {})["host_identity"] == "azure-guard-01"
+
+
+@pytest.mark.parametrize(
+    "observations",
+    [
+        ["2026-09-24T04:01:00Z", "2026-09-24T04:02:00Z"],
+        ["2026-09-24T04:01:00Z", "2026-09-24T04:01:00Z", "2026-09-24T04:03:00Z"],
+        ["2026-09-24T04:02:00Z", "2026-09-24T04:01:00Z", "2026-09-24T04:03:00Z"],
+    ],
+)
+def test_absence_confirmed_requires_three_distinct_ordered_observations(tmp_path: Path, observations: list[str]) -> None:
+    def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        response = {
+            "status": "ABSENCE_CONFIRMED",
+            "root_hash": ROOT,
+            "nonce": NONCE,
+            "label": LABEL,
+            "hard_deadline": "2026-09-24T04:00:00Z",
+            "teardown_authority_at": "2026-09-24T04:00:00Z",
+            "absence_observations": observations,
+        }
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(response), stderr="")
+
+    with pytest.raises(AzureGuardTransportError, match="observations"):
+        _transport(tmp_path, runner).call("status", {"nonce": NONCE})
+
+
+def test_absence_confirmed_accepts_exactly_three_distinct_ordered_observations(tmp_path: Path) -> None:
+    observations = ["2026-09-24T04:01:00Z", "2026-09-24T04:02:00Z", "2026-09-24T04:03:00Z"]
+
+    def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        response = {
+            "status": "ABSENCE_CONFIRMED",
+            "root_hash": ROOT,
+            "nonce": NONCE,
+            "label": LABEL,
+            "hard_deadline": "2026-09-24T04:00:00Z",
+            "teardown_authority_at": "2026-09-24T04:00:00Z",
+            "absence_observations": observations,
+        }
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(response), stderr="")
+
+    assert _transport(tmp_path, runner).call("status", {"nonce": NONCE})["absence_observations"] == observations
+
+
+def test_evidence_export_is_bounded_and_hash_verified(tmp_path: Path) -> None:
+    journal = '{"event":"armed","root_hash":"' + ROOT + '"}\n'
+    journal_sha256 = hashlib.sha256(journal.encode()).hexdigest()
+
+    def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        response = {
+            "status": "EVIDENCE_EXPORTED",
+            "root_hash": ROOT,
+            "nonce": NONCE,
+            "journal": journal,
+            "journal_sha256": journal_sha256,
+            "journal_encoding": "utf-8-jsonl",
+        }
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(response), stderr="")
+
+    exported = _transport(tmp_path, runner).export_evidence(nonce=NONCE, root_hash=ROOT)
+
+    assert exported.journal == journal
+    assert exported.journal_sha256 == journal_sha256
+
+
+def test_evidence_export_rejects_a_journal_hash_mismatch(tmp_path: Path) -> None:
+    journal = '{"event":"armed"}\n'
+
+    def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        response = {
+            "status": "EVIDENCE_EXPORTED",
+            "root_hash": ROOT,
+            "nonce": NONCE,
+            "journal": journal,
+            "journal_sha256": "f" * 64,
+            "journal_encoding": "utf-8-jsonl",
+        }
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(response), stderr="")
+
+    with pytest.raises(AzureGuardTransportError, match="hash verification"):
+        _transport(tmp_path, runner).export_evidence(nonce=NONCE, root_hash=ROOT)
+
+
+def test_streaming_runner_terminates_when_stdout_exceeds_the_hard_cap() -> None:
+    with pytest.raises(AzureGuardTransportError, match="size limit"):
+        _run([sys.executable, "-c", "import sys; sys.stdout.write('x' * 70000)"], "{}\n", 5)

@@ -112,7 +112,11 @@ def preflight(config: AzureGuardLifecycleConfig, *, runner: Runner = _run) -> di
         config.resource_group,
         f"Microsoft.ManagedIdentity/userAssignedIdentities/{config.identity_name}",
     )
-    if str(identity.get("id", "")).lower() != identity_id.lower() or identity.get("location") != config.location:
+    if (
+        str(identity.get("id", "")).lower() != identity_id.lower()
+        or identity.get("location") != config.location
+        or identity.get("type") != "Microsoft.ManagedIdentity/userAssignedIdentities"
+    ):
         raise AzureLifecycleError("Azure controller identity differs from the approved plan")
     principal_id = _uuid(str(identity.get("principalId", "")), "controller principal ID")
     client_id = _uuid(str(identity.get("clientId", "")), "controller client ID")
@@ -123,10 +127,10 @@ def preflight(config: AzureGuardLifecycleConfig, *, runner: Runner = _run) -> di
         raise AzureLifecycleError("Azure controller VM differs from the approved plan")
     _tags(vm.get("tags"), "Azure controller VM")
     vm_identity = vm.get("identity")
-    if not isinstance(vm_identity, dict) or "UserAssigned" not in str(vm_identity.get("type", "")):
+    if not isinstance(vm_identity, dict) or vm_identity.get("type") != "UserAssigned":
         raise AzureLifecycleError("Azure controller VM lacks the approved user-assigned identity")
     assigned = vm_identity.get("userAssignedIdentities")
-    if not isinstance(assigned, dict) or identity_id.lower() not in {str(key).lower() for key in assigned}:
+    if not isinstance(assigned, dict) or {str(key).lower() for key in assigned} != {identity_id.lower()}:
         raise AzureLifecycleError("Azure controller VM has a different user-assigned identity")
 
     resource_ids: list[str] = []
