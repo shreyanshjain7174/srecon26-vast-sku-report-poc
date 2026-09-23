@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--worker-guard-repository", required=True)
     parser.add_argument("--worker-guard-issue", type=int, required=True)
     parser.add_argument("--guard-author", required=True)
+    parser.add_argument("--heartbeat-seconds", type=int, default=300)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -70,6 +71,8 @@ def main() -> int:
         raise SystemExit("output path already exists; refusing replay")
     if args.server_offer == args.worker_offer or args.server_machine == args.worker_machine:
         raise SystemExit("server and worker need distinct offers and machines")
+    if not 30 <= args.heartbeat_seconds <= 600:
+        raise SystemExit("heartbeat seconds must be from 30 to 600")
     args.output.mkdir(parents=True, mode=0o700)
     deadline = datetime.now(UTC) + timedelta(minutes=42)
     provider = VastCliProvider("vastai", reconcile_attempts=24, reconcile_interval_seconds=5)
@@ -83,8 +86,14 @@ def main() -> int:
     worker_offer = provider.get_vms_enabled_offer(args.worker_offer, machine_id=args.worker_machine, label=worker_label)
     if args.server_guard_repository == args.worker_guard_repository and args.server_guard_issue == args.worker_guard_issue:
         raise SystemExit("server and worker must use distinct independent guard channels")
-    server_guard = DynamicGitHubGuard(GitHubGuardConfig(repository=args.server_guard_repository, ref="main", issue_number=args.server_guard_issue, trusted_author=args.guard_author))
-    worker_guard = DynamicGitHubGuard(GitHubGuardConfig(repository=args.worker_guard_repository, ref="main", issue_number=args.worker_guard_issue, trusted_author=args.guard_author))
+    server_guard = DynamicGitHubGuard(GitHubGuardConfig(
+        repository=args.server_guard_repository, ref="main", issue_number=args.server_guard_issue,
+        trusted_author=args.guard_author, heartbeat_seconds=args.heartbeat_seconds,
+    ))
+    worker_guard = DynamicGitHubGuard(GitHubGuardConfig(
+        repository=args.worker_guard_repository, ref="main", issue_number=args.worker_guard_issue,
+        trusted_author=args.guard_author, heartbeat_seconds=args.heartbeat_seconds,
+    ))
     work = SshRemoteWorkload(
         VastSshResolver("vastai"),
         SshWorkloadConfig(
@@ -106,6 +115,7 @@ def main() -> int:
         "schema": "srecon26.two-node-run.v1",
         "started_at": datetime.now(UTC).isoformat(),
         "hard_deadline": deadline.isoformat(),
+        "heartbeat_seconds": args.heartbeat_seconds,
         "status": "preflighted",
         "server": {"nonce": server_nonce, "offer": contract_record(server_offer)},
         "worker": {"nonce": worker_nonce, "offer": contract_record(worker_offer)},
