@@ -15,6 +15,9 @@ from .journal import InvalidJournal, RunJournal
 MAX_EXPOSURE = Decimal("5.00")
 CATEGORY_CAPS = {
     "gpu-smoke": Decimal("1.00"),
+    # Up to three separately bounded direct-inference attempts.  This is not
+    # a retry of (or prerequisite for) the KVM smoke entitlement.
+    "gpu-inference-smoke": Decimal("2.25"),
     # One durable retry entitlement while exactly one original smoke invoice
     # remains pending.  It cannot be split across multiple retry reservations.
     "gpu-smoke-retry": Decimal("0.90"),
@@ -109,6 +112,14 @@ class ExposureLedger:
         proof = entry.get("absence_proof")
         if not amount.is_finite() or amount <= 0 or category not in CATEGORY_CAPS:
             raise ValueError("invalid reservation amount or category")
+        machine_id = entry.get("machine_id")
+        if machine_id is not None and (
+            category != "gpu-inference-smoke"
+            or isinstance(machine_id, bool)
+            or not isinstance(machine_id, int)
+            or machine_id <= 0
+        ):
+            raise ValueError("invalid inference machine reservation binding")
         if actual is None and proof is None:
             return
         if actual is None or not isinstance(proof, Mapping) or proof.get("reads") != 3:
@@ -203,7 +214,7 @@ class ExposureLedger:
             Decimal("0.00"),
         )
 
-    def reserve(self, run_id: str, amount: Decimal, category: str) -> Decimal:
+    def reserve(self, run_id: str, amount: Decimal, category: str, *, machine_id: int | None = None) -> Decimal:
         amount = self._decimal(amount)
         if amount <= 0 or category not in CATEGORY_CAPS:
             raise BudgetExceeded("invalid budget reservation")
@@ -211,9 +222,21 @@ class ExposureLedger:
             data = self._read()
             reservations = data["reservations"]
             assert isinstance(reservations, dict)
+            if machine_id is not None and (
+                category != "gpu-inference-smoke"
+                or isinstance(machine_id, bool)
+                or not isinstance(machine_id, int)
+                or machine_id <= 0
+            ):
+                raise BudgetExceeded("machine binding is restricted to a valid inference machine")
             if run_id in reservations:
                 existing = reservations[run_id]
-                if isinstance(existing, Mapping) and self._decimal(existing["amount"]) == amount and existing["category"] == category:
+                if (
+                    isinstance(existing, Mapping)
+                    and self._decimal(existing["amount"]) == amount
+                    and existing["category"] == category
+                    and existing.get("machine_id") == machine_id
+                ):
                     return MAX_EXPOSURE - self._exposure(data)
                 raise BudgetExceeded("run already has a different reservation")
             if category == "gpu-smoke-retry":
@@ -227,10 +250,21 @@ class ExposureLedger:
                 settled_retries = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == "gpu-smoke-retry" and entry.get("actual") is not None and entry.get("absence_proof") is not None]
                 if recoveries or len(pending_smokes) != 1 or len(settled_retries) != 1:
                     raise BudgetExceeded("distinct-machine smoke requires one pending original, one settled retry, and one unused entitlement")
+            if category == "gpu-inference-smoke":
+                inference_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
+                if len(inference_smokes) >= 3:
+                    raise BudgetExceeded("direct inference smoke allows at most three reservation attempts")
+                if amount > Decimal("0.75"):
+                    raise BudgetExceeded("direct inference smoke reservation must be no greater than 0.75")
+                if machine_id is not None and any(entry.get("machine_id") == machine_id for entry in inference_smokes):
+                    raise BudgetExceeded("direct inference smoke machine is already reserved by another attempt")
             category_total = self._category_exposure(data, category)
             if category_total + amount > CATEGORY_CAPS[category] or self._exposure(data) + amount > MAX_EXPOSURE:
                 raise BudgetExceeded("reservation would exceed approved exposure")
-            reservations[run_id] = {"amount": str(amount), "category": category, "actual": None, "absence_proof": None}
+            entry: dict[str, object] = {"amount": str(amount), "category": category, "actual": None, "absence_proof": None}
+            if machine_id is not None:
+                entry["machine_id"] = machine_id
+            reservations[run_id] = entry
             self._write(data)
             return MAX_EXPOSURE - self._exposure(data)
 
@@ -252,6 +286,25 @@ class ExposureLedger:
                     if isinstance(run_id, str)
                     and isinstance(entry, Mapping)
                     and str(entry.get("category", "")).startswith("gpu-smoke")
+                )
+            )
+
+    def run_ids_for_category(self, category: str) -> tuple[str, ...]:
+        """Return validated reservation IDs for one exact approved category."""
+
+        if category not in CATEGORY_CAPS:
+            raise ValueError("unknown budget category")
+        with self._lock():
+            data = self._read()
+            reservations = data["reservations"]
+            assert isinstance(reservations, Mapping)
+            return tuple(
+                sorted(
+                    run_id
+                    for run_id, entry in reservations.items()
+                    if isinstance(run_id, str)
+                    and isinstance(entry, Mapping)
+                    and entry.get("category") == category
                 )
             )
 

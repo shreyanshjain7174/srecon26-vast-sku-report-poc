@@ -43,7 +43,7 @@ from srecon26_poc.vast_provider import VastLaunchContract
 
 
 NON_GPU_PROVENANCE = "offline-fixture"
-REPORT_MARGIN = timedelta(seconds=165)  # 60 report + 60 teardown + 45 absence
+REPORT_MARGIN = timedelta(seconds=420)  # 180 report + 180 teardown + 60 absence
 REQUIRED_GATES = (
     "phase1_passed",
     "semgrep_current",
@@ -282,12 +282,14 @@ def run_fixture(
 ) -> CanaryResult:
     """Exercise a complete offline lifecycle with an in-memory provider only."""
 
-    if stage not in {"gpu-smoke", "metric-path"}:
-        raise ValueError("stage must be gpu-smoke or metric-path")
+    if stage not in {"gpu-smoke", "inference-smoke", "metric-path"}:
+        raise ValueError("stage must be gpu-smoke, inference-smoke, or metric-path")
     if not isinstance(reserve, Decimal) or not reserve.is_finite() or reserve <= 0:
         raise ValueError("reserve must be a positive Decimal")
     if reserve > Decimal("1.00"):
         raise ValueError("reserve exceeds the stage ceiling")
+    if stage == "inference-smoke" and reserve > Decimal("0.75"):
+        raise ValueError("inference-smoke reserve exceeds the 0.75 entitlement")
     started = (now or datetime.now(UTC)).astimezone(UTC)
     clock = FixtureClock(started)
     label = f"srecon26-{stage}--nonce-fixture-nonce-01234567"
@@ -320,9 +322,9 @@ def run_fixture(
     provider = FixtureProvider(scenario, offer)
     guard = FixtureGuard("fixture-nonce-01234567", clock)
     report_adapter = FixtureReportAdapter(timeout=scenario is FixtureScenario.REPORT_TIMEOUT)
-    controller = ExperimentController(journal, provider, guard, ReportGate(report_adapter))
+    controller = ExperimentController(journal, provider, guard, ReportGate(report_adapter, now=clock.now))
     ledger = ExposureLedger(Path(output_root) / "fixture-exposure-ledger.json")
-    category = "gpu-smoke" if stage == "gpu-smoke" else "canary"
+    category = {"gpu-smoke": "gpu-smoke", "inference-smoke": "gpu-inference-smoke", "metric-path": "canary"}[stage]
     status, limitation, instance, absence_reads = "FAILED_SAFE", None, None, 0
     report_receipt: ReportReceipt | None = None
     try:
@@ -488,9 +490,9 @@ def _load_dispatcher(spec: str) -> LiveCanaryDispatcher:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Offline-only bounded canary lifecycle simulator")
-    parser.add_argument("--stage", choices=("gpu-smoke", "metric-path"), required=True)
+    parser.add_argument("--stage", choices=("gpu-smoke", "inference-smoke", "metric-path"), required=True)
     parser.add_argument("--reserve", type=Decimal, default=Decimal("1.00"))
-    parser.add_argument("--budget-category", choices=("gpu-smoke-retry", "gpu-smoke-distinct-machine"))
+    parser.add_argument("--budget-category", choices=("gpu-inference-smoke", "gpu-smoke-retry", "gpu-smoke-distinct-machine"))
     parser.add_argument("--require-zero-instances", action="store_true")
     parser.add_argument("--fixture", action="store_true", help="run only an in-memory fixture")
     parser.add_argument("--live", action="store_true", help="dispatch only through explicit gate artifacts and an injected integration factory")

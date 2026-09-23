@@ -24,14 +24,21 @@ readonly DEFAULT_LOAD_CONCURRENCY=8
 readonly DEFAULT_LOAD_PROMPT_REPETITIONS=512
 readonly DEFAULT_LOAD_MAX_TOKENS=256
 readonly DEFAULT_LOAD_REQUEST_TIMEOUT_SECONDS=90
+readonly DEFAULT_INFERENCE_PHASE_SECONDS=1200
+readonly DEFAULT_INFERENCE_CONCURRENCY=2
+readonly DEFAULT_INFERENCE_PROMPT_REPETITIONS=256
+readonly DEFAULT_INFERENCE_MAX_TOKENS=96
+readonly DEFAULT_INFERENCE_REQUEST_TIMEOUT_SECONDS=120
+readonly DEFAULT_INFERENCE_MAX_MODEL_LEN=4096
+readonly INFERENCE_CONTAINER_CLEANUP_RESERVE_SECONDS=15
 # Preserve the controller's report, exact teardown, and absence-proof budget.
 # The remote phase is never allowed to consume this immutable margin.
-readonly MIN_HARD_DEADLINE_MARGIN_SECONDS=165
-readonly DEFAULT_HARD_DEADLINE_MARGIN_SECONDS=180
+readonly MIN_HARD_DEADLINE_MARGIN_SECONDS=420
+readonly DEFAULT_HARD_DEADLINE_MARGIN_SECONDS=420
 
 usage() {
   cat <<'USAGE'
-Usage: remote_host_canary.sh <probe|install|deploy|collect|cleanup>
+Usage: remote_host_canary.sh <probe|install|deploy|collect|cleanup|inference-smoke>
 
 This program is inert until one of the listed subcommands is supplied.
 
@@ -41,8 +48,15 @@ Required for deploy/cleanup: CANARY_EVIDENCE_DIR, CANARY_MANIFEST_DIR,
   CANARY_MANIFEST_SHA256.  Deploy additionally needs CANARY_VLLM_IMAGE,
   CANARY_MODEL, CANARY_MODEL_REVISION, and CANARY_HARD_DEADLINE (an RFC3339
   UTC deadline).  Deploy runs one bounded, concurrent localhost-only load
-  phase and preserves at least 165 seconds for report, teardown, and absence
+  phase and preserves at least 420 seconds for report, teardown, and absence
   proof.
+
+Required for inference-smoke: CANARY_EVIDENCE_DIR, CANARY_VLLM_IMAGE pinned
+by immutable SHA256 digest, CANARY_MODEL, CANARY_MODEL_REVISION, and
+CANARY_HARD_DEADLINE.  It starts one direct Docker vLLM server bound only to
+127.0.0.1, performs bounded streamed inference, captures raw timing/GPU
+evidence, then stops that container.  It never installs or starts k3s and
+never creates or destroys a provider instance.
 
 The pinned k3s source is recorded in this script, but installation never
 downloads it.  The supplied binary must verify to the recorded SHA256.
@@ -103,6 +117,13 @@ bounded_value() {
   printf '%s\n' "$value"
 }
 
+require_local_tcp_port() {
+  local variable_name="$1"
+  local value="$2"
+  [[ "$value" =~ ^[0-9]+$ ]] && (( 10#$value >= 1024 && 10#$value <= 65535 )) \
+    || die "$variable_name must be a numeric TCP port between 1024 and 65535"
+}
+
 load_seconds() {
   bounded_value CANARY_LOAD_SECONDS "$DEFAULT_LOAD_SECONDS" 120
 }
@@ -123,6 +144,34 @@ load_request_timeout_seconds() {
   bounded_value CANARY_LOAD_REQUEST_TIMEOUT_SECONDS "$DEFAULT_LOAD_REQUEST_TIMEOUT_SECONDS" 120
 }
 
+inference_phase_seconds() {
+  local value
+  value="$(bounded_value CANARY_INFERENCE_PHASE_SECONDS "$DEFAULT_INFERENCE_PHASE_SECONDS" 1800)"
+  (( value > INFERENCE_CONTAINER_CLEANUP_RESERVE_SECONDS )) \
+    || die "CANARY_INFERENCE_PHASE_SECONDS must leave time to stop the direct inference container"
+  printf '%s\n' "$value"
+}
+
+inference_concurrency() {
+  bounded_value CANARY_INFERENCE_CONCURRENCY "$DEFAULT_INFERENCE_CONCURRENCY" 4
+}
+
+inference_prompt_repetitions() {
+  bounded_value CANARY_INFERENCE_PROMPT_REPETITIONS "$DEFAULT_INFERENCE_PROMPT_REPETITIONS" 2048
+}
+
+inference_max_tokens() {
+  bounded_value CANARY_INFERENCE_MAX_TOKENS "$DEFAULT_INFERENCE_MAX_TOKENS" 512
+}
+
+inference_request_timeout_seconds() {
+  bounded_value CANARY_INFERENCE_REQUEST_TIMEOUT_SECONDS "$DEFAULT_INFERENCE_REQUEST_TIMEOUT_SECONDS" 180
+}
+
+inference_max_model_len() {
+  bounded_value CANARY_INFERENCE_MAX_MODEL_LEN "$DEFAULT_INFERENCE_MAX_MODEL_LEN" 32768
+}
+
 hard_deadline_epoch() {
   local hard_deadline="${CANARY_HARD_DEADLINE:-}"
   [[ -n "$hard_deadline" ]] || die "CANARY_HARD_DEADLINE must be an RFC3339 UTC timestamp"
@@ -138,8 +187,8 @@ hard_deadline_epoch() {
 hard_deadline_margin_seconds() {
   local value="${CANARY_HARD_DEADLINE_MARGIN_SECONDS:-$DEFAULT_HARD_DEADLINE_MARGIN_SECONDS}"
   positive_integer "$value"
-  (( value >= MIN_HARD_DEADLINE_MARGIN_SECONDS && value <= 300 )) \
-    || die "CANARY_HARD_DEADLINE_MARGIN_SECONDS must be between $MIN_HARD_DEADLINE_MARGIN_SECONDS and 300"
+  (( value >= MIN_HARD_DEADLINE_MARGIN_SECONDS && value <= 600 )) \
+    || die "CANARY_HARD_DEADLINE_MARGIN_SECONDS must be between $MIN_HARD_DEADLINE_MARGIN_SECONDS and 600"
   printf '%s\n' "$value"
 }
 
@@ -161,6 +210,21 @@ pressure_phase_deadline_epoch() {
   (( latest_safe_phase_deadline > now && latest_safe_phase_deadline - now >= duration )) \
     || die "CANARY_HARD_DEADLINE does not leave enough time for the bounded load phase and teardown margin"
   phase_deadline="$(( now + duration ))"
+  printf '%s\n' "$phase_deadline"
+}
+
+inference_phase_deadline_epoch() {
+  local hard_deadline margin duration now latest_safe_phase_deadline phase_deadline
+  hard_deadline="$(hard_deadline_epoch)"
+  margin="$(hard_deadline_margin_seconds)"
+  duration="$(inference_phase_seconds)"
+  now="$(date -u +%s)"
+  latest_safe_phase_deadline="$(( hard_deadline - margin ))"
+  (( latest_safe_phase_deadline > now && latest_safe_phase_deadline - now >= duration )) \
+    || die "CANARY_HARD_DEADLINE does not leave enough time for the bounded direct inference phase and teardown margin"
+  # Hold back local container shutdown time inside the bounded phase.  The
+  # resulting deadline is still before the immutable external teardown margin.
+  phase_deadline="$(( now + duration - INFERENCE_CONTAINER_CLEANUP_RESERVE_SECONDS ))"
   printf '%s\n' "$phase_deadline"
 }
 
@@ -382,7 +446,7 @@ run_request_pair() {
   require_command curl
   require_command jq
   local port="${CANARY_LOCAL_PORT:-18000}"
-  [[ "$port" =~ ^[1-9][0-9]{3,4}$ ]] || die "CANARY_LOCAL_PORT must be a local high TCP port"
+  require_local_tcp_port CANARY_LOCAL_PORT "$port"
   local endpoint="http://127.0.0.1:${port}/v1/completions"
   local prompt="${CANARY_PROMPT:-Reply with the word ready.}"
   local payload
@@ -523,8 +587,8 @@ run_pressure_load() {
   max_tokens="$(load_max_tokens)"
   local vllm_port="${CANARY_LOCAL_PORT:-18000}"
   local prometheus_port="${CANARY_PROMETHEUS_LOCAL_PORT:-19090}"
-  [[ "$vllm_port" =~ ^[1-9][0-9]{3,4}$ ]] || die "CANARY_LOCAL_PORT must be a local high TCP port"
-  [[ "$prometheus_port" =~ ^[1-9][0-9]{3,4}$ ]] || die "CANARY_PROMETHEUS_LOCAL_PORT must be a local high TCP port"
+  require_local_tcp_port CANARY_LOCAL_PORT "$vllm_port"
+  require_local_tcp_port CANARY_PROMETHEUS_LOCAL_PORT "$prometheus_port"
   [[ "$vllm_port" != "$prometheus_port" ]] || die "vLLM and Prometheus localhost ports must differ"
 
   local baseline_prompt="${CANARY_PROMPT:-Reply with the word ready.}"
@@ -596,6 +660,277 @@ run_pressure_load() {
   (( request_failures == 0 )) || die "one or more concurrent pressure requests failed"
 }
 
+# The direct smoke deliberately avoids Kubernetes.  It is intended for an
+# already-created GPU host where the lifecycle controller owns instance
+# teardown.  Every operation below is capped by ``phase_deadline`` which is
+# itself strictly before CANARY_HARD_DEADLINE by the immutable teardown margin.
+capture_inference_until_deadline() {
+  local output="$1"
+  local deadline_epoch="$2"
+  shift 2
+  local remaining
+  remaining="$(remaining_seconds_until "$deadline_epoch")" \
+    || die "direct inference phase reached its deadline before capturing evidence"
+  if timeout --foreground "$remaining" "$@" 2>&1 | redact_stream >"$output"; then
+    return 0
+  fi
+  local result=${PIPESTATUS[0]}
+  printf 'command exited %s\n' "$result" >>"$output"
+  return "$result"
+}
+
+inference_timeout_until_deadline() {
+  local deadline_epoch="$1"
+  local configured_timeout="$2"
+  local remaining
+  remaining="$(remaining_seconds_until "$deadline_epoch")" \
+    || die "direct inference phase reached its deadline before an HTTP request"
+  (( remaining < configured_timeout )) && configured_timeout="$remaining"
+  (( configured_timeout >= 1 )) || die "direct inference phase has no time remaining for an HTTP request"
+  printf '%s\n' "$configured_timeout"
+}
+
+wait_for_inference_endpoint_until_deadline() {
+  local url="$1"
+  local deadline_epoch="$2"
+  local request_timeout
+  while true; do
+    request_timeout="$(inference_timeout_until_deadline "$deadline_epoch" 5)"
+    if curl --silent --show-error --fail --max-time "$request_timeout" "$url" >/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+capture_inference_gpu_snapshot() {
+  local out="$1"
+  local phase="$2"
+  local deadline_epoch="$3"
+  capture_inference_until_deadline "$out/inference-nvidia-smi-${phase}.csv" "$deadline_epoch" \
+    nvidia-smi --query-gpu=timestamp,name,uuid,driver_version,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw --format=csv,noheader,nounits \
+    || die "cannot capture ${phase} GPU utilization and memory evidence"
+}
+
+assert_inference_ssh_only_public_listeners() {
+  local out="$1"
+  local deadline_epoch="$2"
+  capture_inference_until_deadline "$out/inference-public-listeners.txt" "$deadline_epoch" ss -H -lntu \
+    || die "cannot inspect direct-inference listening ports"
+  if awk '$5 ~ /(^\*|0\.0\.0\.0|\[::\]):/ && $5 !~ /:22$/ { found=1 } END { exit(found ? 0 : 1) }' "$out/inference-public-listeners.txt"; then
+    die "a non-SSH wildcard listener is present; refusing direct inference"
+  fi
+}
+
+capture_inference_queue_metrics() {
+  local out="$1"
+  local phase="$2"
+  local endpoint="$3"
+  local deadline_epoch="$4"
+  local request_timeout
+  request_timeout="$(inference_timeout_until_deadline "$deadline_epoch" 15)"
+  # vLLM's Prometheus endpoint is optional across versions.  Preserve the raw
+  # response and a clear availability record, but do not pretend that a build
+  # without it supplied queue pressure evidence.
+  if curl --silent --show-error --fail --max-time "$request_timeout" "$endpoint/metrics" | redact_stream >"$out/inference-metrics-${phase}.txt"; then
+    grep -E '^(vllm(:|_)(num_requests_waiting|num_requests_running|kv_cache_usage_perc)|vllm_(num_requests_waiting|num_requests_running|gpu_cache_usage_perc))' \
+      "$out/inference-metrics-${phase}.txt" >"$out/inference-queue-${phase}.txt" || true
+    jq -n --arg status "AVAILABLE" --arg endpoint "$endpoint/metrics" \
+      '{status: $status, endpoint: $endpoint, note: "raw vLLM metrics retained; queue/KV matching lines are in inference-queue evidence"}' \
+      >"$out/inference-queue-${phase}-status.json"
+    return 0
+  fi
+  printf '# vLLM /metrics was unavailable at the localhost-only endpoint\n' >"$out/inference-metrics-${phase}.txt"
+  : >"$out/inference-queue-${phase}.txt"
+  jq -n --arg status "UNAVAILABLE" --arg endpoint "$endpoint/metrics" \
+    '{status: $status, endpoint: $endpoint, note: "vLLM did not expose Prometheus metrics during this phase"}' \
+    >"$out/inference-queue-${phase}-status.json"
+}
+
+run_inference_stream_request() {
+  local out="$1"
+  local label="$2"
+  local endpoint="$3"
+  local payload="$4"
+  local deadline_epoch="$5"
+  local request_timeout body raw_timing timing usage stream_model
+  request_timeout="$(inference_timeout_until_deadline "$deadline_epoch" "$(inference_request_timeout_seconds)")"
+  body="$out/inference-${label}-body.ndjson"
+  raw_timing="$out/inference-${label}-curl-timing.json"
+  timing="$out/inference-${label}-timing.json"
+  # curl's first response byte is explicitly retained as raw transport timing.
+  # The derived TTFT names that limitation instead of implying an application
+  # token timestamp.  ``include_usage`` provides server token counts on the
+  # final streaming event, from which TPOT and completion throughput follow.
+  if ! curl --no-buffer --silent --show-error --fail --max-time "$request_timeout" \
+    --output >(redact_stream >"$body") \
+    --write-out "{\\\"request\\\":\\\"${label}\\\",\\\"ttft_method\\\":\\\"curl_time_starttransfer_first_stream_response_byte\\\",\\\"ttft_seconds\\\":%{time_starttransfer},\\\"e2e_seconds\\\":%{time_total},\\\"http_code\\\":%{http_code}}\\n" \
+    --header 'content-type: application/json' --data "$payload" "$endpoint/v1/completions" >"$raw_timing"; then
+    jq -n --arg request "$label" --arg status "FAILED_OR_TIMED_OUT" \
+      '{request: $request, status: $status}' >"$timing"
+    return 1
+  fi
+  usage="$(sed -n 's/^data: //p' "$body" | sed '/^\[DONE\]$/d' | jq -ces 'map(select(.usage? != null) | .usage) | last // empty')" \
+    || { jq -n --arg request "$label" --arg status "MISSING_STREAM_USAGE" '{request: $request, status: $status}' >"$timing"; return 1; }
+  stream_model="$(sed -n 's/^data: //p' "$body" | sed '/^\[DONE\]$/d' | jq -res 'map(select(.model? != null) | .model) | last // empty')" \
+    || { jq -n --arg request "$label" --arg status "MISSING_STREAM_MODEL" '{request: $request, status: $status}' >"$timing"; return 1; }
+  jq -e --slurpfile raw "$raw_timing" --argjson usage "$usage" --arg requested_model "$CANARY_MODEL" --arg response_model "$stream_model" '
+    ($raw[0] + {status: "PASSED", model: $requested_model, response_model: $response_model, usage: $usage})
+    | .prompt_tokens = ($usage.prompt_tokens // null)
+    | .completion_tokens = ($usage.completion_tokens // null)
+    | .total_tokens = ($usage.total_tokens // null)
+    | .tpot_seconds = (if (.completion_tokens != null and .completion_tokens >= 2 and .e2e_seconds > .ttft_seconds) then ((.e2e_seconds - .ttft_seconds) / (.completion_tokens - 1)) else null end)
+    | .completion_tokens_per_second = (if (.completion_tokens != null and .e2e_seconds > 0) then (.completion_tokens / .e2e_seconds) else null end)
+    | .generation_tokens_per_second = (if (.completion_tokens != null and .completion_tokens >= 2 and .e2e_seconds > .ttft_seconds) then ((.completion_tokens - 1) / (.e2e_seconds - .ttft_seconds)) else null end)
+    | select(.http_code == 200 and .model == .response_model and .prompt_tokens != null and .completion_tokens != null and .total_tokens != null)
+  ' >"$timing" || return 1
+}
+
+cleanup_inference_container() {
+  local out="$1"
+  local container="$2"
+  local deadline_epoch="$3"
+  local remaining log_timeout stop_timeout
+  docker inspect "$container" >/dev/null 2>&1 || return 0
+  remaining="$(remaining_seconds_until "$deadline_epoch")" || return 1
+  log_timeout="$remaining"
+  (( log_timeout > 5 )) && log_timeout=5
+  timeout --foreground "$log_timeout" docker logs --tail=500 "$container" 2>&1 | redact_stream >"$out/inference-container-logs.txt" || return 1
+  remaining="$(remaining_seconds_until "$deadline_epoch")" || return 1
+  stop_timeout="$remaining"
+  (( stop_timeout > 10 )) && stop_timeout=10
+  timeout --foreground "$stop_timeout" docker stop --time "$stop_timeout" "$container" >>"$out/inference-container-stop.txt" 2>&1
+}
+
+run_direct_inference_smoke() {
+  require_root
+  require_command timeout
+  require_command docker
+  require_command curl
+  require_command jq
+  require_command nvidia-smi
+  require_command ss
+  require_frozen_vllm_contract
+  local out
+  out="$(evidence_dir)"
+  local phase_deadline local_port container max_model_len concurrency prompt_repetitions max_tokens endpoint
+  phase_deadline="$(inference_phase_deadline_epoch)"
+  local_port="${CANARY_INFERENCE_LOCAL_PORT:-28000}"
+  require_local_tcp_port CANARY_INFERENCE_LOCAL_PORT "$local_port"
+  container="${CANARY_INFERENCE_CONTAINER_NAME:-srecon26-vllm-inference-smoke}"
+  [[ "$container" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{1,62}$ ]] || die "CANARY_INFERENCE_CONTAINER_NAME is invalid"
+  max_model_len="$(inference_max_model_len)"
+  concurrency="$(inference_concurrency)"
+  prompt_repetitions="$(inference_prompt_repetitions)"
+  max_tokens="$(inference_max_tokens)"
+  endpoint="http://127.0.0.1:${local_port}"
+  assert_inference_ssh_only_public_listeners "$out" "$phase_deadline"
+  if docker inspect "$container" >/dev/null 2>&1; then
+    die "direct inference container name is already in use; refusing to touch an existing container"
+  fi
+  if ss -H -ltn "sport = :${local_port}" | grep -q .; then
+    die "CANARY_INFERENCE_LOCAL_PORT is already listening; refusing to share an endpoint"
+  fi
+  jq -n --arg model "$CANARY_MODEL" --arg revision "$CANARY_MODEL_REVISION" \
+    --arg image "$CANARY_VLLM_IMAGE" --arg endpoint "$endpoint" --argjson max_model_len "$max_model_len" \
+    '{model: $model, model_revision: $revision, image: $image, endpoint: $endpoint, max_model_len: $max_model_len, network_exposure: "published only on 127.0.0.1"}' \
+    >"$out/inference-contract.json"
+  capture_inference_until_deadline "$out/inference-gpu-identity.txt" "$phase_deadline" nvidia-smi -L \
+    || die "cannot capture direct-inference GPU identity"
+  capture_inference_until_deadline "$out/inference-cuda.txt" "$phase_deadline" nvidia-smi \
+    || die "cannot capture direct-inference CUDA evidence"
+  capture_inference_gpu_snapshot "$out" before "$phase_deadline"
+  capture_inference_until_deadline "$out/inference-image-pull.txt" "$phase_deadline" docker pull "$CANARY_VLLM_IMAGE" \
+    || die "cannot pull the pinned vLLM image before the bounded deadline"
+  # Retain the digest attestations in a JSON shape that cannot include an
+  # image's arbitrary environment metadata.  Full Docker inspect output can
+  # contain image-authored values that are irrelevant to this evidence and
+  # should never be persisted as potential credentials.
+  capture_inference_until_deadline "$out/inference-image-inspect.json" "$phase_deadline" \
+    docker image inspect --format '{{json .RepoDigests}}' "$CANARY_VLLM_IMAGE" \
+    || die "cannot inspect the pinned vLLM image"
+  jq -e --arg digest "${CANARY_VLLM_IMAGE##*@}" 'map(select(endswith("@" + $digest))) | length > 0' "$out/inference-image-inspect.json" >/dev/null \
+    || die "Docker image inspection did not attest the requested immutable vLLM digest"
+  capture_inference_until_deadline "$out/inference-container-run.txt" "$phase_deadline" \
+    docker run --detach --rm --name "$container" --gpus all --publish "127.0.0.1:${local_port}:8000" \
+      "$CANARY_VLLM_IMAGE" --model "$CANARY_MODEL" --revision "$CANARY_MODEL_REVISION" \
+      --served-model-name "$CANARY_MODEL" --host 0.0.0.0 --port 8000 --max-model-len "$max_model_len" \
+    || die "cannot start the direct localhost-only vLLM container"
+  trap 'cleanup_inference_container "$out" "$container" "$phase_deadline" || true' EXIT
+  wait_for_inference_endpoint_until_deadline "$endpoint/health" "$phase_deadline" \
+    || die "vLLM direct localhost health check did not become ready before the bounded deadline"
+  capture_inference_until_deadline "$out/inference-vllm-models.json" "$phase_deadline" curl --silent --show-error --fail "$endpoint/v1/models" \
+    || die "cannot capture the direct vLLM model identity"
+  grep -F -- "$CANARY_MODEL" "$out/inference-vllm-models.json" >/dev/null \
+    || die "direct vLLM endpoint did not attest the requested model identity"
+  capture_inference_until_deadline "$out/inference-container-command.json" "$phase_deadline" \
+    docker inspect --format '{{json .Config.Cmd}}' "$container" \
+    || die "cannot inspect the direct vLLM command"
+  capture_inference_until_deadline "$out/inference-container-port-bindings.json" "$phase_deadline" \
+    docker inspect --format '{{json .HostConfig.PortBindings}}' "$container" \
+    || die "cannot inspect direct vLLM port bindings"
+  jq -e --arg container "$container" --arg image "$CANARY_VLLM_IMAGE" \
+    --slurpfile command "$out/inference-container-command.json" \
+    --slurpfile ports "$out/inference-container-port-bindings.json" \
+    '{container: $container, image: $image, command: $command[0], port_bindings: $ports[0]}' \
+    >"$out/inference-container-inspect.json" \
+    || die "direct vLLM container inspection was not valid JSON"
+  assert_inference_ssh_only_public_listeners "$out" "$phase_deadline"
+
+  local base_prompt="${CANARY_PROMPT:-Reply with the word ready.}"
+  local pressure_prompt="$base_prompt"
+  local repetition
+  for ((repetition = 0; repetition < prompt_repetitions; repetition++)); do
+    pressure_prompt+=" pressure"
+  done
+  local warmup_payload pressure_payload
+  warmup_payload="$(jq -cn --arg model "$CANARY_MODEL" --arg prompt "$base_prompt" \
+    '{model: $model, prompt: $prompt, max_tokens: 16, temperature: 0, stream: true, stream_options: {include_usage: true}}')"
+  pressure_payload="$(jq -cn --arg model "$CANARY_MODEL" --arg prompt "$pressure_prompt" --argjson max_tokens "$max_tokens" \
+    '{model: $model, prompt: $prompt, max_tokens: $max_tokens, temperature: 0, stream: true, stream_options: {include_usage: true}}')"
+  capture_inference_queue_metrics "$out" before "$endpoint" "$phase_deadline"
+  run_inference_stream_request "$out" warmup "$endpoint" "$warmup_payload" "$phase_deadline" \
+    || die "direct vLLM warmup streaming request did not return token usage"
+  capture_inference_queue_metrics "$out" after-warmup "$endpoint" "$phase_deadline"
+
+  local -a request_pids=()
+  local request_number
+  for ((request_number = 1; request_number <= concurrency; request_number++)); do
+    run_inference_stream_request "$out" "request-${request_number}" "$endpoint" "$pressure_payload" "$phase_deadline" &
+    request_pids+=("$!")
+  done
+  # Leave a short, bounded window for the concurrent streams to enter the
+  # scheduler so the during sample can show real GPU and queue pressure.
+  local snapshot_delay=2 remaining_before_snapshot
+  remaining_before_snapshot="$(remaining_seconds_until "$phase_deadline")" \
+    || die "direct inference phase reached its deadline before the during snapshot"
+  (( remaining_before_snapshot < snapshot_delay )) && snapshot_delay="$remaining_before_snapshot"
+  (( snapshot_delay >= 1 )) || die "direct inference phase has no time for the during snapshot"
+  sleep "$snapshot_delay"
+  capture_inference_gpu_snapshot "$out" during "$phase_deadline"
+  capture_inference_until_deadline "$out/inference-nvidia-compute-during.csv" "$phase_deadline" \
+    nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory,gpu_uuid --format=csv,noheader,nounits \
+    || die "cannot capture during direct-inference GPU compute-process evidence"
+  capture_inference_queue_metrics "$out" during "$endpoint" "$phase_deadline"
+  local request_failures=0 request_pid
+  for request_pid in "${request_pids[@]}"; do
+    wait "$request_pid" || request_failures=$(( request_failures + 1 ))
+  done
+  capture_inference_gpu_snapshot "$out" after "$phase_deadline"
+  capture_inference_queue_metrics "$out" after "$endpoint" "$phase_deadline"
+  cleanup_inference_container "$out" "$container" "$phase_deadline" \
+    || die "cannot capture logs and stop the direct vLLM container before the bounded deadline"
+  jq -n --arg status "$([[ "$request_failures" -eq 0 ]] && printf PASSED || printf FAILED)" \
+    --arg hard_deadline "$CANARY_HARD_DEADLINE" --argjson phase_deadline_epoch "$phase_deadline" \
+    --arg model "$CANARY_MODEL" --arg model_revision "$CANARY_MODEL_REVISION" --arg image "$CANARY_VLLM_IMAGE" \
+    --argjson concurrency "$concurrency" --argjson prompt_repetitions "$prompt_repetitions" --argjson max_tokens "$max_tokens" \
+    --argjson failed_requests "$request_failures" \
+    '{status: $status, hard_deadline: $hard_deadline, phase_deadline_epoch: $phase_deadline_epoch, model: $model, model_revision: $model_revision, image: $image, concurrency: $concurrency, prompt_repetitions: $prompt_repetitions, max_tokens: $max_tokens, failed_requests: $failed_requests, ttft_method: "curl_time_starttransfer_first_stream_response_byte", network_exposure: "127.0.0.1 only"}' \
+    >"$out/inference-status.json"
+  (( request_failures == 0 )) || die "one or more direct vLLM streaming requests failed"
+  trap - EXIT
+}
+
 deploy_canary() {
   require_root
   require_command timeout
@@ -641,7 +976,7 @@ collect_evidence() {
   capture "$out/hpa.txt" kubectl -n "$NAMESPACE" get hpa vllm-observer -o yaml || die "cannot capture HPA"
   capture "$out/events.txt" kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp || die "cannot capture namespace events"
   local prometheus_port="${CANARY_PROMETHEUS_LOCAL_PORT:-19090}"
-  [[ "$prometheus_port" =~ ^[1-9][0-9]{3,4}$ ]] || die "CANARY_PROMETHEUS_LOCAL_PORT must be a local high TCP port"
+  require_local_tcp_port CANARY_PROMETHEUS_LOCAL_PORT "$prometheus_port"
   kubectl_cmd -n "$NAMESPACE" port-forward --address 127.0.0.1 "svc/prometheus" "${prometheus_port}:9090" >"$out/prometheus-port-forward.txt" 2>&1 &
   local prometheus_pid=$!
   trap 'kill "$prometheus_pid" >/dev/null 2>&1 || true' RETURN
@@ -686,6 +1021,7 @@ main() {
     deploy) deploy_canary ;;
     collect) collect_evidence ;;
     cleanup) cleanup_canary ;;
+    inference-smoke) run_direct_inference_smoke ;;
     -h|--help) usage ;;
     *) usage >&2; exit 64 ;;
   esac

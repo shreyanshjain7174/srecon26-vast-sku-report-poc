@@ -32,8 +32,8 @@ def test_remote_host_script_is_syntax_valid_and_inert_without_an_explicit_subcom
 def test_only_explicit_lifecycle_subcommands_are_exposed() -> None:
     script = _script()
 
-    assert "<probe|install|deploy|collect|cleanup>" in script
-    for command in ("probe", "install", "deploy", "collect", "cleanup"):
+    assert "<probe|install|deploy|collect|cleanup|inference-smoke>" in script
+    for command in ("probe", "install", "deploy", "collect", "cleanup", "inference-smoke"):
         assert f"{command})" in script
     assert "*) usage >&2; exit 64" in script
 
@@ -128,7 +128,7 @@ def test_deploy_runs_a_bounded_concurrent_pressure_phase_before_cleanup() -> Non
     assert "run_pressure_load \"$out\"" in script
     assert "CANARY_HARD_DEADLINE" in script
     assert "CANARY_HARD_DEADLINE does not leave enough time for the bounded load phase and teardown margin" in script
-    assert "MIN_HARD_DEADLINE_MARGIN_SECONDS=165" in script
+    assert "MIN_HARD_DEADLINE_MARGIN_SECONDS=420" in script
     assert "CANARY_LOAD_SECONDS" in script
     assert "CANARY_LOAD_CONCURRENCY" in script
     assert "CANARY_LOAD_PROMPT_REPETITIONS" in script
@@ -168,3 +168,93 @@ def test_cleanup_is_idempotent_and_scoped_to_the_checksumbound_bundle() -> None:
     assert "-f \"$CANARY_MANIFEST_DIR\"" in script
     assert "namespace remains after cleanup" in script
     assert "cleanup-status.json" in script
+
+
+def test_direct_inference_smoke_is_a_pinned_localhost_only_non_k3s_path() -> None:
+    script = _script()
+    start = script.index("run_direct_inference_smoke()")
+    end = script.index("\ndeploy_canary()", start)
+    direct_smoke = script[start:end]
+
+    assert "require_frozen_vllm_contract" in direct_smoke
+    assert "docker image inspect" in direct_smoke
+    assert "docker run --detach --rm" in direct_smoke
+    assert '--publish "127.0.0.1:${local_port}:8000"' in direct_smoke
+    assert "--revision \"$CANARY_MODEL_REVISION\"" in direct_smoke
+    assert "--served-model-name \"$CANARY_MODEL\"" in direct_smoke
+    assert "kubectl" not in direct_smoke
+    assert "--network host" not in direct_smoke
+    assert "direct inference container name is already in use" in direct_smoke
+    assert "CANARY_INFERENCE_LOCAL_PORT is already listening" in direct_smoke
+
+
+def test_direct_inference_evidence_contract_retains_raw_stream_timing_tokens_queue_and_gpu_samples() -> None:
+    script = _script()
+
+    for filename in (
+        "inference-contract.json",
+        "inference-image-inspect.json",
+        "inference-gpu-identity.txt",
+        "inference-cuda.txt",
+        "inference-nvidia-smi-${phase}.csv",
+        "inference-nvidia-compute-during.csv",
+        "inference-vllm-models.json",
+        "inference-${label}-body.ndjson",
+        "inference-${label}-curl-timing.json",
+        "inference-${label}-timing.json",
+        "inference-metrics-${phase}.txt",
+        "inference-queue-${phase}.txt",
+        "inference-queue-${phase}-status.json",
+        "inference-container-inspect.json",
+        "inference-container-logs.txt",
+        "inference-status.json",
+    ):
+        assert filename in script
+
+    for required_measurement in (
+        "stream_options: {include_usage: true}",
+        "curl_time_starttransfer_first_stream_response_byte",
+        ".prompt_tokens",
+        ".completion_tokens",
+        ".tpot_seconds",
+        ".completion_tokens_per_second",
+        ".generation_tokens_per_second",
+        "capture_inference_gpu_snapshot \"$out\" before",
+        "capture_inference_gpu_snapshot \"$out\" during",
+        "capture_inference_gpu_snapshot \"$out\" after",
+        "--query-compute-apps=pid,process_name,used_gpu_memory,gpu_uuid",
+        "capture_inference_queue_metrics \"$out\" during",
+    ):
+        assert required_measurement in script
+
+
+def test_direct_inference_fails_closed_before_the_immutable_teardown_margin() -> None:
+    script = _script()
+
+    assert "MIN_HARD_DEADLINE_MARGIN_SECONDS=420" in script
+    assert "INFERENCE_CONTAINER_CLEANUP_RESERVE_SECONDS=15" in script
+    assert "CANARY_HARD_DEADLINE does not leave enough time for the bounded direct inference phase and teardown margin" in script
+    assert "CANARY_INFERENCE_PHASE_SECONDS must leave time to stop the direct inference container" in script
+    assert "capture_inference_until_deadline" in script
+    assert 'trap \'cleanup_inference_container "$out" "$container" "$phase_deadline" || true\' EXIT' in script
+
+
+def test_local_tcp_ports_are_strictly_numeric_and_unprivileged() -> None:
+    script = _script()
+
+    assert '[[ "$value" =~ ^[0-9]+$ ]] && (( 10#$value >= 1024 && 10#$value <= 65535 ))' in script
+    for variable in (
+        "CANARY_LOCAL_PORT",
+        "CANARY_PROMETHEUS_LOCAL_PORT",
+        "CANARY_INFERENCE_LOCAL_PORT",
+    ):
+        assert f"require_local_tcp_port {variable}" in script
+
+
+def test_direct_stream_request_fails_closed_without_an_http_200_matching_model_and_usage() -> None:
+    script = _script()
+
+    assert 'select(.http_code == 200 and .model == .response_model' in script
+    assert 'response_model: $response_model' in script
+    assert 'MISSING_STREAM_USAGE' in script
+    assert 'MISSING_STREAM_MODEL' in script

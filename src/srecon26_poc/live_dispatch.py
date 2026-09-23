@@ -32,12 +32,15 @@ REAL_GPU_PROVENANCE = "real-gpu"
 LIMITATION_PROVENANCE = "live-limitation"
 MAX_STAGE_RESERVE = Decimal("1.00")
 PROJECT_CAP = Decimal("5.00")
-REPORT_MARGIN = timedelta(seconds=165)  # report 60s + teardown 60s + absence 45s
+REPORT_MARGIN = timedelta(seconds=420)  # report 180s + teardown 180s + absence 60s
 MAX_GATE_AGE = timedelta(minutes=5)
 MAX_STAGE_RUNTIME = timedelta(minutes=45)
+INFERENCE_SMOKE_RESERVATION_CAP = Decimal("0.75")
+INFERENCE_SMOKE_EXCLUDED_MACHINE_IDS = frozenset({99239, 17545, 150513, 147086})
 APPROVED_GPU_PROFILES = frozenset(
     {
         ("RTX 3090", 24576, "8.6"),
+        ("RTX 4090", 24564, "8.9"),
         # Capacity fallback for the same small-model metric-path PoC.  This is
         # never presented as 3090 evidence; the frozen offer and manifest retain
         # the observed SKU verbatim.
@@ -134,6 +137,17 @@ class GateArtifactPaths:
 
 
 @dataclass(frozen=True, slots=True)
+class InferenceAttemptHistory:
+    """Operator-supplied machine identity when a prior manifest is unavailable."""
+
+    run_id: str
+    machine_id: int
+
+    def valid(self) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z0-9_-]{8,128}", self.run_id)) and not isinstance(self.machine_id, bool) and isinstance(self.machine_id, int) and self.machine_id > 0
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderFaultEvidence:
     """A resolved, attributable fault emitted by the injected remote probe."""
 
@@ -143,6 +157,54 @@ class ProviderFaultEvidence:
 
     def valid(self) -> bool:
         return self.category in {"contract", "gpu", "cuda", "image", "host"} and bool(self.description) and self.artifact.is_file()
+
+
+@dataclass(frozen=True, slots=True)
+class InferenceMeasurementEvidence:
+    """A remote vLLM response measurement, distinct from host/GPU probes."""
+
+    artifact: Path
+
+    def blockers_for(self, workload: WorkloadContract, *, now: datetime, evidence_files: tuple[Path, ...], run_id: str, instance: InstanceContract) -> tuple[str, ...]:
+        blockers: list[str] = []
+        try:
+            artifact = self.artifact.resolve(strict=True)
+            declared = {path.resolve(strict=True) for path in evidence_files if path.is_file()}
+            if artifact not in declared:
+                blockers.append("direct inference measurement is not a declared evidence file")
+            payload = _json(artifact)
+        except (OSError, LiveDispatchError):
+            return ("missing readable direct inference measurement artifact",)
+        if payload.get("schema") != "srecon26-direct-inference-measurement/v1":
+            blockers.append("direct inference measurement schema is invalid")
+        if payload.get("source") != "RemoteWorkload.direct_inference/v1":
+            blockers.append("direct inference measurement source is invalid")
+        if payload.get("model_id") != workload.model_id or payload.get("model_revision") != workload.model_revision or payload.get("vllm_image_digest") != workload.vllm_image_digest:
+            blockers.append("direct inference measurement is not bound to the frozen workload contract")
+        if payload.get("run_id") != run_id or payload.get("instance_id") != instance.instance_id or payload.get("label") != instance.label:
+            blockers.append("direct inference measurement is not bound to the exact created instance")
+        request = payload.get("request")
+        timing = payload.get("timing")
+        if not isinstance(request, Mapping) or request.get("succeeded") is not True or not isinstance(request.get("output_tokens"), int) or isinstance(request.get("output_tokens"), bool) or request["output_tokens"] <= 0:
+            blockers.append("direct inference measurement lacks a successful non-empty response")
+        if not isinstance(timing, Mapping):
+            blockers.append("direct inference measurement lacks timing")
+        else:
+            try:
+                ttft = Decimal(str(timing.get("ttft_seconds")))
+                latency = Decimal(str(timing.get("latency_seconds")))
+                if not ttft.is_finite() or not latency.is_finite() or ttft < 0 or latency < ttft:
+                    raise InvalidOperation
+            except (InvalidOperation, ValueError):
+                blockers.append("direct inference measurement timing is invalid")
+        observed_at = payload.get("observed_at")
+        try:
+            observed = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+            if observed.tzinfo is None or observed.astimezone(UTC) > now.astimezone(UTC):
+                raise ValueError
+        except ValueError:
+            blockers.append("direct inference measurement timestamp is invalid")
+        return tuple(dict.fromkeys(blockers))
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,8 +226,9 @@ class LiveEvidence:
     probe_outcome: ProbeOutcome = ProbeOutcome.PASS
     provider_fault: ProviderFaultEvidence | None = None
     evidence_files: tuple[Path, ...] = ()
+    inference_measurement: InferenceMeasurementEvidence | None = None
 
-    def complete_for(self, stage: str, *, now: datetime, workload: WorkloadContract) -> tuple[bool, tuple[str, ...]]:
+    def complete_for(self, stage: str, *, now: datetime, workload: WorkloadContract, run_id: str | None = None, instance: InstanceContract | None = None) -> tuple[bool, tuple[str, ...]]:
         blockers: list[str] = []
         if not self.gpu_identity:
             blockers.append("missing directly observed GPU identity")
@@ -184,6 +247,13 @@ class LiveEvidence:
             blockers.extend(decision.blockers)
         if not self.evidence_files or any(not path.is_file() for path in self.evidence_files):
             blockers.append("missing remote evidence files")
+        if stage == "inference-smoke":
+            if self.inference_measurement is None:
+                blockers.append("missing actual direct inference measurement evidence")
+            elif run_id is None or instance is None:
+                blockers.append("direct inference measurement has no exact run and instance binding")
+            else:
+                blockers.extend(self.inference_measurement.blockers_for(workload, now=now, evidence_files=self.evidence_files, run_id=run_id, instance=instance))
         if stage == "metric-path":
             if self.snapshot is None:
                 blockers.append("missing metric-path readiness snapshot")
@@ -217,11 +287,12 @@ class LiveCanaryRequest:
     launch: VastLaunchContract
     workload: WorkloadContract
     budget_category: str | None = None
+    inference_history: tuple[InferenceAttemptHistory, ...] = ()
 
     def validate(self, *, now: datetime) -> tuple[str, ...]:
         failures: list[str] = []
-        if self.stage not in {"gpu-smoke", "metric-path"}:
-            failures.append("stage must be gpu-smoke or metric-path")
+        if self.stage not in {"gpu-smoke", "inference-smoke", "metric-path"}:
+            failures.append("stage must be gpu-smoke, inference-smoke, or metric-path")
         if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", self.run_id):
             failures.append("run id must be 8-128 URL-safe characters")
         if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", self.nonce):
@@ -230,7 +301,20 @@ class LiveCanaryRequest:
             failures.append("label must bind exactly this nonce")
         if not isinstance(self.reserve, Decimal) or not self.reserve.is_finite() or not Decimal("0") < self.reserve <= MAX_STAGE_RESERVE:
             failures.append("reserve must be a positive Decimal no greater than 1.00")
-        if self.budget_category is not None:
+        if self.stage == "inference-smoke":
+            if self.reserve > INFERENCE_SMOKE_RESERVATION_CAP:
+                failures.append("direct inference smoke reserve must be no greater than 0.75")
+            if self.budget_category != "gpu-inference-smoke":
+                failures.append("inference-smoke requires the gpu-inference-smoke budget category")
+            if len({item.run_id for item in self.inference_history}) != len(self.inference_history) or any(not item.valid() for item in self.inference_history):
+                failures.append("inference history must contain unique valid run and machine identities")
+            if any(item.run_id == self.run_id for item in self.inference_history):
+                failures.append("inference history cannot contain the current run")
+            if len({item.machine_id for item in self.inference_history}) != len(self.inference_history):
+                failures.append("inference history machine identities must be distinct")
+        elif self.inference_history:
+            failures.append("inference history is restricted to inference-smoke")
+        elif self.budget_category is not None:
             if self.stage != "gpu-smoke" or self.budget_category not in {"gpu-smoke-retry", "gpu-smoke-distinct-machine"}:
                 failures.append("budget category override is restricted to an audited gpu-smoke entitlement")
             elif self.budget_category == "gpu-smoke-retry" and self.reserve > Decimal("0.90"):
@@ -424,6 +508,8 @@ def validate_live_gates(request: LiveCanaryRequest, *, now: datetime) -> tuple[t
         failures.append("live guard artifact does not attest exact nonce, label, deadline, and host")
     if not _report_fixture_passed(report):
         failures.append("report fixture did not prove a zero-request exact-target submission")
+    if request.stage == "inference-smoke" and frozen.machine_id in INFERENCE_SMOKE_EXCLUDED_MACHINE_IDS:
+        failures.append("inference-smoke offer uses an excluded historical machine")
     if request.stage == "metric-path":
         assert paths.smoke_manifest is not None
         try:
@@ -530,6 +616,54 @@ def _historical_smoke_machine_ids(
     return frozenset(machines)
 
 
+def _inference_history_machine_ids(
+    output_root: Path,
+    run_ids: tuple[str, ...],
+    explicit_history: tuple[InferenceAttemptHistory, ...],
+) -> frozenset[int]:
+    """Resolve prior inference machine IDs from finalized bundles or supplied history.
+
+    A durable reservation with a created instance cannot be silently ignored:
+    its terminal manifest must prove exact teardown and guard anchoring unless
+    the operator supplies an explicit exact-run machine record.
+    """
+
+    explicit = {item.run_id: item.machine_id for item in explicit_history}
+    root = Path(output_root).resolve()
+    machines = set(explicit.values())
+    for run_id in run_ids:
+        if not run_id or Path(run_id).name != run_id:
+            raise LiveDispatchError("inference reservation run id is not a safe directory name")
+        if run_id in explicit:
+            continue
+        directory = root / run_id
+        if directory.is_symlink() or directory.resolve().parent != root:
+            raise LiveDispatchError(f"inference history is missing a safe finalized bundle for {run_id}; provide explicit history")
+        manifest_path = directory / "run-manifest.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise LiveDispatchError(f"inference history is missing a finalized manifest for {run_id}; provide explicit history")
+        manifest = _json(manifest_path)
+        if manifest.get("run_id") != run_id or manifest.get("stage") != "inference-smoke" or manifest.get("budget_category") != "gpu-inference-smoke":
+            raise LiveDispatchError(f"inference manifest identity is invalid for {run_id}")
+        creates = manifest.get("provider_create_calls")
+        if creates == 0:
+            continue
+        if creates != 1 or manifest.get("status") not in {"COMPLETED", "FAILED_SAFE", "REPORT_UNCONFIRMED", "HALTED"} or manifest.get("absence_reads") != 3:
+            raise LiveDispatchError(f"inference manifest is not finalized with exact absence proof for {run_id}")
+        anchor_path = directory / "guard-anchor.json"
+        if anchor_path.is_symlink() or not anchor_path.is_file():
+            raise LiveDispatchError(f"inference manifest lacks independent guard anchor for {run_id}")
+        anchor = _json(anchor_path)
+        guard_root = manifest.get("guard_anchor_root")
+        if not isinstance(guard_root, str) or not guard_root or anchor.get("root_hash") != guard_root or anchor.get("acknowledged") != guard_root:
+            raise LiveDispatchError(f"inference manifest guard anchor is invalid for {run_id}")
+        offer = manifest.get("offer_contract")
+        if not isinstance(offer, Mapping):
+            raise LiveDispatchError(f"inference manifest lacks exact offer contract for {run_id}")
+        machines.add(_to_int(offer.get("machine_id"), "historical inference machine id"))
+    return frozenset(machines)
+
+
 class LiveCanaryDispatcher:
     """Exactly-once paid dispatcher with injected guard, report, and workload."""
 
@@ -572,6 +706,7 @@ class LiveCanaryDispatcher:
             "hard_deadline": _stamp(request.hard_deadline),
             "report_start_by": _stamp(request.report_start_by),
             "reserve": str(request.reserve),
+            "budget_category": request.budget_category,
             "project_cap": str(PROJECT_CAP),
             "provider_create_calls": provider_create_calls,
             "provider_destroy_calls": provider_destroy_calls,
@@ -636,6 +771,19 @@ class LiveCanaryDispatcher:
             return self._blocked(request, f"current exact offer cannot be frozen: {error}", gate_hashes=gate_hashes)
         if current_offer != frozen_offer:
             return self._blocked(request, "current offer differs from frozen vms_enabled contract", gate_hashes=gate_hashes)
+        if request.stage == "inference-smoke" and current_offer.machine_id in INFERENCE_SMOKE_EXCLUDED_MACHINE_IDS:
+            return self._blocked(request, "inference-smoke offer uses an excluded historical machine", gate_hashes=gate_hashes)
+        if request.stage == "inference-smoke":
+            try:
+                historical_machines = _inference_history_machine_ids(
+                    self.output_root,
+                    self.ledger.run_ids_for_category("gpu-inference-smoke"),
+                    request.inference_history,
+                )
+            except (BudgetWriteFailure, LiveDispatchError, OSError, UnicodeError) as error:
+                return self._blocked(request, f"cannot verify prior inference machines: {error}", gate_hashes=gate_hashes)
+            if current_offer.machine_id in historical_machines:
+                return self._blocked(request, "inference-smoke offer reuses a prior inference machine", gate_hashes=gate_hashes)
         if request.budget_category == "gpu-smoke-distinct-machine":
             try:
                 historical_machines = _historical_smoke_machine_ids(self.output_root, self.ledger.smoke_run_ids())
@@ -663,7 +811,13 @@ class LiveCanaryDispatcher:
         guard_armed = False
         try:
             self._append(journal, RunState.OFFLINE_VALIDATED, "gates.passed", {"gate_hashes": dict(gate_hashes)})
-            self.ledger.reserve(request.run_id, request.reserve, request.budget_category or ("gpu-smoke" if request.stage == "gpu-smoke" else "canary"))
+            reservation_category = request.budget_category or ("gpu-smoke" if request.stage == "gpu-smoke" else "canary")
+            self.ledger.reserve(
+                request.run_id,
+                request.reserve,
+                reservation_category,
+                machine_id=current_offer.machine_id if request.stage == "inference-smoke" else None,
+            )
             self._append(journal, RunState.BUDGET_RESERVED, "budget.reserved", {"reserve": str(request.reserve), "project_cap": str(PROJECT_CAP)})
             self._append(journal, RunState.OFFER_PINNED, "offer.pinned", {"offer_id": current_offer.offer_id, "machine_id": current_offer.machine_id, "dph_total": str(current_offer.dph_total), "label": current_offer.label, "vms_enabled": True})
             if self.report_gate is None:
@@ -683,8 +837,9 @@ class LiveCanaryDispatcher:
                 raise LiveDispatchError("guard setup consumed the paid-stage execution window")
 
             worst_case = (current_offer.dph_total * Decimal(str(MAX_STAGE_RUNTIME.total_seconds())) / Decimal("3600")).quantize(Decimal("0.000001"))
-            if worst_case > request.reserve:
-                raise LiveDispatchError("frozen offer can exceed the stage reservation before the hard deadline")
+            buffered_worst_case = (worst_case * Decimal("1.25") + Decimal("0.05")).quantize(Decimal("0.000001"))
+            if buffered_worst_case > request.reserve:
+                raise LiveDispatchError("frozen offer plus billing and teardown buffer can exceed the stage reservation")
 
             # Exactly one provider create can occur.  Any transport uncertainty
             # is reconciled only by this run's unique nonce-bound label.
@@ -738,7 +893,7 @@ class LiveCanaryDispatcher:
                 self._append(journal, RunState.RUNNING_CANARY, "canary.started", {"instance_id": instance.instance_id})
                 evidence = self.workload.run(stage=request.stage, workload=request.workload, instance=instance, run_directory=run_directory, hard_deadline=request.hard_deadline, heartbeat=heartbeat)
                 evidence_files = evidence.evidence_files
-                completed, evidence_blockers = evidence.complete_for(request.stage, now=self.clock.now(), workload=request.workload)
+                completed, evidence_blockers = evidence.complete_for(request.stage, now=self.clock.now(), workload=request.workload, run_id=request.run_id, instance=instance)
                 remote_fault = evidence.provider_fault is not None and evidence.provider_fault.valid()
                 if remote_fault:
                     self._append(journal, RunState.CAPTURING_FAULT, "provider.fault_confirmed", {"automatic_contract_mismatch": False, "remote_category": evidence.provider_fault.category if evidence.provider_fault else None})

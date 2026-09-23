@@ -74,9 +74,12 @@ instance record supplies `public_ipaddr` plus `ports["22/tcp"][0].HostPort`;
 otherwise it records and uses the exact record's proxy pair. It never combines
 fields across routes or guesses a port. The exact create argument order is
 recorded in unit tests; provider CLI calls use an argument vector, never a
-shell string. The one authorized paid attempt is exhausted. If a later run is
-explicitly re-authorized, a fresh read-only CLI/schema preflight is mandatory
-because this combination has not been live-validated.
+shell string. The earlier one-attempt scope is exhausted. On 2026-09-23 the
+user explicitly authorized up to three new, distinct `inference-smoke`
+attempts when needed for a credible conference PoC. Each attempt uses budget
+category `gpu-inference-smoke`, reserves at most `$0.75`, and still requires a
+fresh read-only CLI/schema preflight because the corrected direct route has not
+yet been live-validated.
 
 The workload contract is equally frozen and explicit: model
 `Qwen/Qwen2.5-1.5B-Instruct`, revision
@@ -88,13 +91,15 @@ provenance.
 
 ## Lifecycle and deadline
 
-For any separately authorized later create, the orchestrator must first journal
-the Decimal reservation, exact offer contract, immutable `hard_deadline`, and
-`report_start_by`. The current project state grants no such authorization. The
+For an authorized create, the orchestrator must first journal the Decimal
+reservation, exact offer contract, immutable `hard_deadline`, and
+`report_start_by`. The current inference PoC is authorized for as many as three
+distinct guarded attempts; it begins with one machine and expands only when an
+actionable failure or a materially useful comparison justifies another. The
 report start cutoff is:
 
 ```
-hard_deadline - 60s report - 60s exact teardown - 45s three-read absence proof
+hard_deadline - 180s report - 180s exact teardown - 60s three-read absence proof
 ```
 
 The independent guard remains authoritative at the hard deadline.  A confirmed
@@ -118,6 +123,16 @@ All other terminal paths are `live-limitation` bundles.
 `gpu-smoke` records the frozen offer/instance contract, GPU and CUDA facts,
 KVM decision, lifecycle timestamps, cost reservation, diagnosis/report result,
 exact teardown, and absence proof.
+
+`inference-smoke` is the current proof path. It does not bootstrap k3s. On the
+created VM it starts the immutable vLLM image on loopback only, loads the frozen
+model revision, performs a warm-up and bounded concurrent streamed requests,
+and captures raw stream bodies, TTFT transport timing, end-to-end latency,
+token counts, derived TPOT/throughput, vLLM queue/KV metrics when exposed, and
+GPU utilization/memory samples before, during, and after load. Real-GPU success
+also requires a sealed measurement bound to the exact run ID, instance ID,
+nonce label, model revision, and image digest. Missing measurements are a safe
+failure, never a successful smoke.
 
 `metric-path` remains an unexecuted protocol, not an authorized next action. If
 a later paid dispatcher is explicitly authorized, it is permitted only after a

@@ -22,12 +22,12 @@ def _manifest(result):
     return json.loads(result.manifest_path.read_text(encoding="utf-8"))
 
 
-def _run(tmp_path, scenario=FixtureScenario.SUCCESS, *, stage="gpu-smoke", evidence=None):
+def _run(tmp_path, scenario=FixtureScenario.SUCCESS, *, stage="gpu-smoke", reserve=Decimal("1.00"), evidence=None):
     return run_fixture(
         output_root=tmp_path,
         stage=stage,
         scenario=scenario,
-        reserve=Decimal("1.00"),
+        reserve=reserve,
         evidence=evidence,
         now=NOW,
         run_id=f"{stage}-{scenario.value}",
@@ -56,6 +56,20 @@ def test_metric_path_requires_and_records_complete_fixture_path(tmp_path) -> Non
     assert manifest["stage"] == "metric-path"
     assert manifest["contract_and_gpu_facts"]["fixture_only"] is True
     assert result.absence_reads == 3
+
+
+def test_inference_smoke_fixture_accepts_the_distinct_half_dollar_stage(tmp_path) -> None:
+    result = _run(tmp_path, stage="inference-smoke", reserve=Decimal("0.50"))
+    manifest = _manifest(result)
+
+    assert result.status == "COMPLETED"
+    assert manifest["stage"] == "inference-smoke"
+    assert manifest["cost"]["reserved"] == "0.50"
+
+
+def test_inference_smoke_fixture_refuses_to_exceed_its_entitlement(tmp_path) -> None:
+    with pytest.raises(ValueError, match="0.75 entitlement"):
+        _run(tmp_path, stage="inference-smoke", reserve=Decimal("0.750001"))
 
 
 def test_metric_path_blocks_until_smoke_is_finalized(tmp_path) -> None:

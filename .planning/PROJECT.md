@@ -2,7 +2,12 @@
 
 ## What This Is
 
-A presentation-grade evidence pipeline for a four-minute SRECon lightning talk demonstrating that CPU-only Kubernetes HPA can miss LLM demand because queue depth, KV-cache pressure, and time-to-first-token can worsen before CPU utilization creates a useful scaling signal. The project produces checksummed, externally-anchored artifacts — local signal independence proofs, a real GPU metric-path canary, and optionally a paired CPU-vs-queue/KV comparison — then assembles them into a 16-slide PowerPoint deck with speaker notes. Every slide claim must trace to a captured artifact or be labeled as background, hypothesis, or future work.
+A presentation-grade evidence pipeline whose immediate proof obligation is one
+real, measured LLM inference run on rented Vast.ai GPU hardware. Local inference,
+synthetic metrics, controller rehearsals, and cited background do not satisfy the
+PoC. Only after the Vast run has captured raw request and GPU measurements may
+the project assemble a 16-slide deck; every slide claim must trace to that
+captured evidence or be labeled as hypothesis or future work.
 
 ## Core Value
 
@@ -16,6 +21,9 @@ Every slide claim traces to a checksummed, independently-anchored artifact — n
 
 ### Active
 
+- [ ] Up to three independently guarded Vast.ai GPU inference attempts when needed to obtain or strengthen the conference PoC, with every attempt measured and torn down
+- [ ] Actual inference server executing on the rented GPU, with raw TTFT, TPOT/inter-token latency, throughput, concurrency, errors, GPU utilization, GPU memory, runtime, SKU identity, and cost evidence
+- [ ] Exact-ID teardown followed by three provider absence reads and invoice reconciliation
 - [ ] Crash-safe experiment controller with hash-chained append-only run journal and idempotent resume
 - [ ] Strict $5.00 project exposure ledger using Decimal arithmetic; blocks creation if reservation would breach it
 - [ ] Report-before-destroy contract: qualifying provider SKU faults capture evidence, click Report, then teardown — in that order
@@ -29,6 +37,8 @@ Every slide claim traces to a checksummed, independently-anchored artifact — n
 
 ### Out of Scope
 
+- Treating local Ollama/Apple GPU/CPU inference, synthetic queue/KV values, citations, or controller-only rehearsals as completion evidence
+- Building or polishing the final deck before real Vast GPU inference measurements exist
 - Multi-region or production clusters — PoC is bounded to a single rented GPU VM and local k3s
 - Production KServe, llm-d, or sharded/distributed inference — talk covers what they expose, not deploying them
 - General claim that CPU HPA always fails — conclusion is limited to the evidence captured
@@ -53,6 +63,7 @@ Implementation is in three milestone phases:
 
 - **Tech Stack**: Python 3.14, standard library only for core safety logic (dataclasses, Decimal, protocols), pytest 9, `autoscaling/v2` — no shortcuts that hide Decimal precision or add external budget-path dependencies
 - **Budget**: Maximum $5.00 new Vast.ai exposure across all paid runs in this project ledger; $1.00 reserved for GPU/CUDA smoke, $1.00 for vLLM canary, up to $3.00 remaining for paired comparison
+- **Revised paid scope**: On 2026-09-23 the user explicitly authorized up to three distinct Vast GPU attempts when needed for a credible conference PoC. Cost is a safety ceiling rather than the optimization target. Start with one GPU and use another only when the preceding run produces an actionable learning or a second arm materially strengthens the result; every instance still requires independent guard, exact teardown, absence proof, and invoice evidence.
 - **Safety**: Independent teardown guard must be armed and independently reachable before any provider create; laptop sleep or loss must not affect it
 - **Credential hygiene**: Provider credential read from root-owned `0600` secret file; never in repo, run artifacts, process arguments, or logs
 - **Commits**: All commits signed off with `git commit -s`; no Codex coauthor trailer

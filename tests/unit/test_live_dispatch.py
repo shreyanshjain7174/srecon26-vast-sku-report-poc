@@ -16,6 +16,8 @@ from srecon26_poc.contracts import InstanceContract, OfferContract, ProbeOutcome
 from srecon26_poc.guard import GuardAttestation
 from srecon26_poc.live_dispatch import (
     GateArtifactPaths,
+    InferenceAttemptHistory,
+    InferenceMeasurementEvidence,
     LiveCanaryDispatcher,
     LiveDispatchError,
     LiveCanaryRequest,
@@ -144,15 +146,37 @@ class Reporter:
 
 
 class Workload:
-    def __init__(self, *, complete: bool = True, remote_fault: bool = False) -> None:
-        self.complete, self.remote_fault = complete, remote_fault
+    def __init__(self, *, complete: bool = True, remote_fault: bool = False, direct_inference: bool = True) -> None:
+        self.complete, self.remote_fault, self.direct_inference = complete, remote_fault, direct_inference
 
     def run(self, *, stage: str, workload: WorkloadContract, instance: InstanceContract, run_directory: Path, hard_deadline: datetime, heartbeat) -> LiveEvidence:
         heartbeat()
         evidence = run_directory / "metrics" / "captured.json"
         evidence.parent.mkdir(parents=True, exist_ok=True)
-        evidence.write_text(json.dumps({"instance_id": instance.instance_id}), encoding="utf-8")
         now = hard_deadline - timedelta(minutes=20)
+        measurement = None
+        if stage == "inference-smoke" and self.direct_inference:
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "schema": "srecon26-direct-inference-measurement/v1",
+                        "source": "RemoteWorkload.direct_inference/v1",
+                        "run_id": run_directory.name,
+                        "instance_id": instance.instance_id,
+                        "label": instance.label,
+                        "model_id": workload.model_id,
+                        "model_revision": workload.model_revision,
+                        "vllm_image_digest": workload.vllm_image_digest,
+                        "request": {"succeeded": True, "output_tokens": 4},
+                        "timing": {"ttft_seconds": "0.01", "latency_seconds": "0.02"},
+                        "observed_at": now.isoformat().replace("+00:00", "Z"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            measurement = InferenceMeasurementEvidence(evidence)
+        else:
+            evidence.write_text(json.dumps({"instance_id": instance.instance_id}), encoding="utf-8")
         facts = KvmFacts(True, True, True, True, True, True, True, VLLM_IMAGE_DIGEST, now)
         if not self.complete:
             facts = replace(facts, cuda=False)
@@ -175,6 +199,7 @@ class Workload:
             probe_outcome=ProbeOutcome.PASS,
             provider_fault=fault,
             evidence_files=(evidence,),
+            inference_measurement=measurement,
         )
 
 
@@ -199,10 +224,10 @@ def _request(tmp_path: Path, now: datetime, *, bad_semgrep: bool = False) -> tup
     )
 
 
-def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, machine_mismatch: bool = False, remote_fault: bool = False, anchor_error: bool = False, external_absence: bool = False, report_session_ok: bool = True):
+def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, machine_mismatch: bool = False, remote_fault: bool = False, anchor_error: bool = False, external_absence: bool = False, report_session_ok: bool = True, direct_inference: bool = True):
     events: list[str] = []
     provider = Provider(offer, events, ambiguous=ambiguous, mismatch=mismatch, machine_mismatch=machine_mismatch, external_absence=external_absence)
-    dispatcher = LiveCanaryDispatcher(provider=provider, guard=Guard(request.nonce, events, anchor_error=anchor_error), report_gate=ReportGate(Reporter(events, session_ok=report_session_ok)), workload=Workload(complete=complete, remote_fault=remote_fault), ledger=ExposureLedger(tmp_path / "ledger.json"), output_root=tmp_path / "runs", clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)), absence_interval_seconds=0)
+    dispatcher = LiveCanaryDispatcher(provider=provider, guard=Guard(request.nonce, events, anchor_error=anchor_error), report_gate=ReportGate(Reporter(events, session_ok=report_session_ok)), workload=Workload(complete=complete, remote_fault=remote_fault, direct_inference=direct_inference), ledger=ExposureLedger(tmp_path / "ledger.json"), output_root=tmp_path / "runs", clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)), absence_interval_seconds=0)
     return dispatcher, provider, events
 
 
@@ -233,6 +258,108 @@ def test_retry_budget_override_is_bounded_and_smoke_only(tmp_path: Path) -> None
     assert "audited distinct-machine smoke reserve must be no greater than 0.25" in replace(request, reserve=Decimal("0.250001"), budget_category="gpu-smoke-distinct-machine").validate(now=now)
     failures = replace(request, stage="metric-path", reserve=Decimal("0.25"), budget_category="gpu-smoke-distinct-machine").validate(now=now)
     assert "budget category override is restricted to an audited gpu-smoke entitlement" in failures
+
+
+def test_inference_smoke_is_a_separate_half_dollar_entitlement(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, _ = _request(tmp_path, now)
+
+    request = replace(request, stage="inference-smoke", reserve=Decimal("0.50"), budget_category="gpu-inference-smoke")
+    assert not request.validate(now=now)
+    assert "inference-smoke requires the gpu-inference-smoke budget category" in replace(request, budget_category=None).validate(now=now)
+    assert "direct inference smoke reserve must be no greater than 0.75" in replace(request, reserve=Decimal("0.750001")).validate(now=now)
+
+
+def test_inference_smoke_completes_only_with_direct_inference_measurement(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    request = replace(request, stage="inference-smoke", reserve=Decimal("0.50"), budget_category="gpu-inference-smoke")
+    dispatcher, provider, _events = _dispatcher(tmp_path, request, offer)
+
+    result = dispatcher.run(request)
+
+    assert result.status == "COMPLETED"
+    assert result.real_gpu_claim is True
+    assert provider.create_calls == 1
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["budget_category"] == "gpu-inference-smoke"
+
+
+def test_inference_smoke_rejects_gpu_kvm_only_evidence(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    request = replace(request, stage="inference-smoke", reserve=Decimal("0.50"), budget_category="gpu-inference-smoke")
+    dispatcher, provider, _events = _dispatcher(tmp_path, request, offer, direct_inference=False)
+
+    result = dispatcher.run(request)
+
+    assert result.status == "FAILED_SAFE"
+    assert provider.create_calls == 1
+    assert "missing actual direct inference measurement evidence" in (result.limitation or "")
+    assert result.real_gpu_claim is False
+
+
+def test_inference_smoke_rejects_a_machine_from_a_finalized_prior_inference_manifest(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    first, offer = _request(tmp_path, now)
+    first = replace(first, stage="inference-smoke", run_id="inference-run-one", reserve=Decimal("0.50"), budget_category="gpu-inference-smoke")
+    first_dispatcher, first_provider, _first_events = _dispatcher(tmp_path, first, offer)
+
+    first_result = first_dispatcher.run(first)
+
+    assert first_result.status == "COMPLETED"
+    assert first_provider.create_calls == 1
+    second = replace(first, run_id="inference-run-two", nonce="nonce_87654321", label="srecon26-inference-smoke--nonce-nonce_87654321")
+    guard_payload = json.loads(second.gates.guard_attestation.read_text())
+    guard_payload.update({"nonce": second.nonce, "label": second.label})
+    second.gates.guard_attestation.write_text(json.dumps(guard_payload), encoding="utf-8")
+    second_dispatcher, second_provider, second_events = _dispatcher(tmp_path, second, replace(offer, label=second.label))
+
+    second_result = second_dispatcher.run(second)
+
+    assert second_result.status == "BLOCKED"
+    assert second_result.limitation == "inference-smoke offer reuses a prior inference machine"
+    assert second_provider.create_calls == 0
+    assert "arm" not in second_events
+
+
+def test_inference_smoke_rejects_a_machine_in_explicit_request_history(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    request = replace(
+        request,
+        stage="inference-smoke",
+        reserve=Decimal("0.50"),
+        budget_category="gpu-inference-smoke",
+        inference_history=(InferenceAttemptHistory("inference-run-prior", offer.machine_id),),
+    )
+    dispatcher, provider, events = _dispatcher(tmp_path, request, offer)
+
+    result = dispatcher.run(request)
+
+    assert result.status == "BLOCKED"
+    assert result.limitation == "inference-smoke offer reuses a prior inference machine"
+    assert provider.create_calls == 0
+    assert "arm" not in events
+
+
+@pytest.mark.parametrize("machine_id", (99239, 17545, 150513, 147086))
+def test_inference_smoke_rejects_excluded_historical_machines_before_guard_or_create(tmp_path: Path, machine_id: int) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    request = replace(request, stage="inference-smoke", reserve=Decimal("0.50"), budget_category="gpu-inference-smoke")
+    provider_payload = json.loads(request.gates.provider_preflight.read_text())
+    provider_payload["offers"][0]["machine_id"] = machine_id
+    request.gates.provider_preflight.write_text(json.dumps(provider_payload), encoding="utf-8")
+    offer = replace(offer, machine_id=machine_id)
+    dispatcher, provider, events = _dispatcher(tmp_path, request, offer)
+
+    result = dispatcher.run(request)
+
+    assert result.status == "BLOCKED"
+    assert result.limitation == "inference-smoke offer uses an excluded historical machine"
+    assert provider.create_calls == 0
+    assert "arm" not in events
 
 
 def test_historical_machine_ids_require_hash_sealed_ledger_bound_manifests(tmp_path: Path) -> None:

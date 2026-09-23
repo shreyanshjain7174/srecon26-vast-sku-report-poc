@@ -10,15 +10,17 @@ from pathlib import Path
 import pytest
 
 from srecon26_poc.contracts import InstanceContract
+from srecon26_poc.canary import VLLM_IMAGE_DIGEST
 from srecon26_poc.guard_client import GuardClient
 from srecon26_poc.live_factory import (
     GitHubGuardConfig,
     GitHubGuardTransport,
     LiveFactoryError,
+    SshRemoteWorkload,
     VastSshResolver,
     _load_report_gate,
 )
-from srecon26_poc.live_dispatch import REPORT_MARGIN
+from srecon26_poc.live_dispatch import FROZEN_MODEL_ID, FROZEN_MODEL_REVISION, REPORT_MARGIN, WorkloadContract
 from srecon26_poc.reporting import ReportGate
 from srecon26_poc.types import RunIdentity
 
@@ -45,6 +47,144 @@ def test_live_factory_rejects_report_adapter_without_authenticated_session_prefl
     with pytest.raises(LiveFactoryError, match="authenticated-session preflight"):
         _load_report_gate("old_report_adapter:create")
 
+
+def test_direct_inference_evidence_is_bound_to_exact_instance_and_raw_measurement(tmp_path: Path) -> None:
+    evidence = tmp_path / "remote-evidence"
+    transport = tmp_path / "remote-transport"
+    manifests = tmp_path / "manifests"
+    evidence.mkdir()
+    transport.mkdir()
+    manifests.mkdir()
+    (manifests / "vllm.yaml").write_text("REQUIRED_AT_RUN_TIME_MODEL REQUIRED_AT_RUN_TIME_REVISION", encoding="utf-8")
+    workload = WorkloadContract(FROZEN_MODEL_ID, FROZEN_MODEL_REVISION, VLLM_IMAGE_DIGEST)
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 145338, Decimal("0.2975"), LABEL)
+    (evidence / "probe-status.json").write_text('{"status":"PASSED"}', encoding="utf-8")
+    (evidence / "inference-status.json").write_text(
+        json.dumps(
+            {
+                "status": "PASSED",
+                "image": f"docker.io/vllm/vllm-openai@{VLLM_IMAGE_DIGEST}",
+                "model": FROZEN_MODEL_ID,
+                "model_revision": FROZEN_MODEL_REVISION,
+                "failed_requests": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (evidence / "inference-image-inspect.json").write_text(json.dumps([f"vllm/vllm-openai@{VLLM_IMAGE_DIGEST}"]), encoding="utf-8")
+    (evidence / "inference-container-inspect.json").write_text(json.dumps({"image": f"docker.io/vllm/vllm-openai@{VLLM_IMAGE_DIGEST}", "command": ["--model", FROZEN_MODEL_ID, "--revision", FROZEN_MODEL_REVISION]}), encoding="utf-8")
+    (evidence / "inference-vllm-models.json").write_text(json.dumps({"data": [{"id": FROZEN_MODEL_ID}]}), encoding="utf-8")
+    (evidence / "inference-gpu-identity.txt").write_text("GPU 0: NVIDIA GeForce RTX 3090", encoding="utf-8")
+    (evidence / "inference-cuda.txt").write_text("CUDA Version: 12.8", encoding="utf-8")
+    usage = {"prompt_tokens": 32, "completion_tokens": 64, "total_tokens": 96}
+    (evidence / "inference-request-1-timing.json").write_text(
+        json.dumps(
+            {
+                "status": "PASSED",
+                "request": "request-1",
+                "http_code": 200,
+                "model": FROZEN_MODEL_ID,
+                "response_model": FROZEN_MODEL_ID,
+                "usage": usage,
+                **usage,
+                "ttft_seconds": 0.12,
+                "e2e_seconds": 1.4,
+                "tpot_seconds": 0.02,
+                "generation_tokens_per_second": 49.2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (evidence / "inference-request-1-body.ndjson").write_text(
+        f"data: {json.dumps({'model': FROZEN_MODEL_ID, 'usage': usage})}\n"
+        "data: [DONE]\n",
+        encoding="utf-8",
+    )
+    (evidence / "inference-nvidia-smi-before.csv").write_text(
+        "2026/09/23 04:00:00, NVIDIA GeForce RTX 3090, GPU-123, 535.1, 0, 0, 100, 24576, 80\n",
+        encoding="utf-8",
+    )
+    (evidence / "inference-nvidia-smi-during.csv").write_text(
+        "2026/09/23 04:00:02, NVIDIA GeForce RTX 3090, GPU-123, 535.1, 87, 20, 2048, 24576, 250\n",
+        encoding="utf-8",
+    )
+    (evidence / "inference-nvidia-smi-after.csv").write_text(
+        "2026/09/23 04:00:04, NVIDIA GeForce RTX 3090, GPU-123, 535.1, 0, 0, 2048, 24576, 90\n",
+        encoding="utf-8",
+    )
+    (evidence / "inference-nvidia-compute-during.csv").write_text(
+        "1234, python, 2048, GPU-123\n",
+        encoding="utf-8",
+    )
+    files = tuple(path for path in evidence.rglob("*") if path.is_file())
+    remote = object.__new__(SshRemoteWorkload)
+    remote.config = types.SimpleNamespace(local_manifest_dir=manifests)
+
+    observed = remote._evidence("inference-smoke", evidence, transport, workload, files, run_id="inference-run-1", instance=instance)
+
+    complete, blockers = observed.complete_for("inference-smoke", now=datetime.now(UTC), workload=workload, run_id="inference-run-1", instance=instance)
+    assert complete is True
+    assert blockers == ()
+    assert observed.inference_measurement is not None
+    measurement = json.loads(observed.inference_measurement.artifact.read_text(encoding="utf-8"))
+    assert (measurement["run_id"], measurement["instance_id"], measurement["label"]) == ("inference-run-1", 417, LABEL)
+    assert measurement["request"]["output_tokens"] == 64
+    assert measurement["hardware_attribution"]["gpu_uuid"] == "GPU-123"
+    assert measurement["hardware_attribution"]["active_compute_processes"] == 1
+
+
+@pytest.mark.parametrize(
+    ("artifact", "replacement"),
+    (
+        ("inference-nvidia-compute-during.csv", ""),
+        ("inference-nvidia-compute-during.csv", "1234, python, 2048, GPU-other\n"),
+        ("inference-request-1-timing.json", json.dumps({"status": "PASSED", "request": "request-1", "http_code": 201})),
+        (
+            "inference-request-1-timing.json",
+            json.dumps(
+                {
+                    "status": "PASSED",
+                    "request": "request-1",
+                    "http_code": 200,
+                    "model": FROZEN_MODEL_ID,
+                    "response_model": "other-model",
+                    "usage": {"prompt_tokens": 32, "completion_tokens": 64, "total_tokens": 96},
+                    "prompt_tokens": 32,
+                    "completion_tokens": 64,
+                    "total_tokens": 96,
+                    "ttft_seconds": 0.12,
+                    "e2e_seconds": 1.4,
+                }
+            ),
+        ),
+        ("inference-nvidia-smi-during.csv", "2026/09/23 04:00:02, NVIDIA GeForce RTX 3090, GPU-123, 535.1, 0, 0, 100, 24576, 80\n"),
+    ),
+)
+def test_direct_inference_measurement_is_not_emitted_without_request_or_hardware_attribution(
+    tmp_path: Path, artifact: str, replacement: str
+) -> None:
+    # Build the fully attested shape first, then invalidate exactly one link in
+    # the request-to-GPU evidence chain.
+    test_direct_inference_evidence_is_bound_to_exact_instance_and_raw_measurement(tmp_path)
+    evidence = tmp_path / "remote-evidence"
+    (evidence / artifact).write_text(replacement, encoding="utf-8")
+    (evidence / "direct-inference-measurement.json").unlink()
+    workload = WorkloadContract(FROZEN_MODEL_ID, FROZEN_MODEL_REVISION, VLLM_IMAGE_DIGEST)
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 145338, Decimal("0.2975"), LABEL)
+    remote = object.__new__(SshRemoteWorkload)
+    remote.config = types.SimpleNamespace(local_manifest_dir=tmp_path / "manifests")
+
+    observed = remote._evidence(
+        "inference-smoke",
+        evidence,
+        tmp_path / "remote-transport",
+        workload,
+        tuple(path for path in evidence.rglob("*") if path.is_file()),
+        run_id="inference-run-1",
+        instance=instance,
+    )
+
+    assert observed.inference_measurement is None
 
 class GitHubRunner:
     def __init__(self) -> None:

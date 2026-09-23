@@ -124,6 +124,44 @@ def test_audited_smoke_retry_envelope_keeps_pending_reservation_charged(tmp_path
         ledger.reserve("overflow", Decimal("0.01"), "gpu-smoke-retry")
 
 
+def test_direct_inference_smoke_allows_three_bounded_reservations(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+
+    for run_id in ("inference-attempt-1", "inference-attempt-2", "inference-attempt-3"):
+        ledger.reserve(run_id, Decimal("0.50"), "gpu-inference-smoke")
+    assert ledger.headroom() == Decimal("3.50")
+    assert ledger.run_ids_for_category("gpu-inference-smoke") == (
+        "inference-attempt-1",
+        "inference-attempt-2",
+        "inference-attempt-3",
+    )
+    with pytest.raises(BudgetExceeded, match="at most three reservation attempts"):
+        ledger.reserve("inference-attempt-4", Decimal("0.01"), "gpu-inference-smoke")
+
+
+def test_direct_inference_smoke_rejects_a_reservation_over_fifty_cents(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+
+    with pytest.raises(BudgetExceeded):
+        ledger.reserve("inference-attempt", Decimal("0.750001"), "gpu-inference-smoke")
+
+
+def test_direct_inference_machine_binding_is_atomic_and_distinct(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+
+    ledger.reserve("inference-attempt-1", Decimal("0.50"), "gpu-inference-smoke", machine_id=145338)
+    with pytest.raises(BudgetExceeded, match="already reserved"):
+        ledger.reserve("inference-attempt-2", Decimal("0.50"), "gpu-inference-smoke", machine_id=145338)
+    ledger.reserve("inference-attempt-2", Decimal("0.50"), "gpu-inference-smoke", machine_id=145339)
+
+
+def test_machine_binding_is_rejected_outside_inference(tmp_path):
+    ledger = ExposureLedger(tmp_path / "ledger.json")
+
+    with pytest.raises(BudgetExceeded, match="restricted"):
+        ledger.reserve("canary-attempt", Decimal("0.50"), "canary", machine_id=145338)
+
+
 def test_distinct_machine_smoke_is_single_use_after_settled_retry(tmp_path):
     ledger = ExposureLedger(tmp_path / "ledger.json")
     ledger.reserve("pending-original", Decimal("0.97"), "gpu-smoke")

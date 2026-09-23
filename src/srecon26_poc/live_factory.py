@@ -29,6 +29,7 @@ from .guard import GuardAttestation
 from .guard_client import GuardClient, GuardClientError, GuardRemoteReceipt, GuardTransport
 from .live_dispatch import (
     REPORT_MARGIN,
+    InferenceMeasurementEvidence,
     LiveCanaryDispatcher,
     LiveDispatchError,
     LiveEvidence,
@@ -610,7 +611,7 @@ class SshRemoteWorkload:
         remaining = int((hard_deadline - REPORT_MARGIN - datetime.now(UTC)).total_seconds())
         if remaining <= 0:
             raise LiveFactoryError("remote workload reached immutable teardown margin")
-        return min(remaining, 900)
+        return min(remaining, 1800)
 
     def _stream(self, arguments: Sequence[str], *, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> None:
         heartbeat()
@@ -692,28 +693,43 @@ class SshRemoteWorkload:
             self._wait_for_ssh(endpoint, hard_deadline=hard_deadline, heartbeat=heartbeat, transport=transport)
             self._remote(endpoint, ["install", "-d", "-m", "0700", root], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "mkdir.log")
             self._copy(endpoint, self.config.local_script, f"{root}/remote_host_canary.sh", recursive=False, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-script.log")
-            self._copy(endpoint, self.config.local_manifest_dir, f"{root}/manifests", recursive=True, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-manifests.log")
-            self._copy(endpoint, self.config.k3s_binary, f"{root}/k3s", recursive=False, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-k3s.log")
-            self._copy(endpoint, self.config.nvidia_runtime_template, f"{root}/nvidia-runtime.toml", recursive=False, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-runtime.log")
             base_env = [
-                f"CANARY_EVIDENCE_DIR={remote_evidence}", f"CANARY_MANIFEST_DIR={root}/manifests",
-                f"CANARY_MANIFEST_SHA256={self._manifest_hash(self.config.local_manifest_dir)}",
+                f"CANARY_EVIDENCE_DIR={remote_evidence}",
                 f"CANARY_VLLM_IMAGE=docker.io/vllm/vllm-openai@{workload.vllm_image_digest}",
                 f"CANARY_MODEL={workload.model_id}", f"CANARY_MODEL_REVISION={workload.model_revision}",
                 f"CANARY_HARD_DEADLINE={_stamp(hard_deadline)}",
+                f"CANARY_HARD_DEADLINE_MARGIN_SECONDS={int(REPORT_MARGIN.total_seconds())}",
                 "CANARY_WAIT_SECONDS=600", "CANARY_COMMAND_TIMEOUT_SECONDS=120",
             ]
             script = f"{root}/remote_host_canary.sh"
             self._remote(endpoint, ["env", *base_env, "bash", script, "probe"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "probe.log")
+            if stage == "inference-smoke":
+                self._remote(
+                    endpoint,
+                    ["env", *base_env, "CANARY_INFERENCE_PHASE_SECONDS=600", "CANARY_INFERENCE_CONCURRENCY=4", "CANARY_INFERENCE_MAX_TOKENS=128", "bash", script, "inference-smoke"],
+                    hard_deadline=hard_deadline,
+                    heartbeat=heartbeat,
+                    log=transport / "inference-smoke.log",
+                )
+                self._fetch(endpoint, remote_evidence, local_evidence, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-evidence.log")
+                evidence_files = tuple(path for path in local_evidence.rglob("*") if path.is_file()) + tuple(path for path in transport.rglob("*") if path.is_file())
+                return self._evidence(stage, local_evidence, transport, workload, evidence_files, run_id=run_directory.name, instance=instance)
+            self._copy(endpoint, self.config.local_manifest_dir, f"{root}/manifests", recursive=True, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-manifests.log")
+            self._copy(endpoint, self.config.k3s_binary, f"{root}/k3s", recursive=False, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-k3s.log")
+            self._copy(endpoint, self.config.nvidia_runtime_template, f"{root}/nvidia-runtime.toml", recursive=False, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-runtime.log")
+            manifest_env = [
+                f"CANARY_MANIFEST_DIR={root}/manifests",
+                f"CANARY_MANIFEST_SHA256={self._manifest_hash(self.config.local_manifest_dir)}",
+            ]
             if stage == "gpu-smoke":
                 self._remote(endpoint, ["sha256sum", f"{root}/manifests/vllm.yaml", script], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "staged-contract-sha256.txt")
                 self._fetch(endpoint, remote_evidence, local_evidence, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-evidence.log")
                 evidence_files = tuple(path for path in local_evidence.rglob("*") if path.is_file()) + tuple(path for path in transport.rglob("*") if path.is_file())
-                return self._evidence(stage, local_evidence, transport, workload, evidence_files)
-            self._remote(endpoint, ["env", *base_env, f"K3S_BINARY_PATH={root}/k3s", f"NVIDIA_RUNTIME_TEMPLATE={root}/nvidia-runtime.toml", "bash", script, "install"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "install.log")
+                return self._evidence(stage, local_evidence, transport, workload, evidence_files, run_id=run_directory.name, instance=instance)
+            self._remote(endpoint, ["env", *base_env, *manifest_env, f"K3S_BINARY_PATH={root}/k3s", f"NVIDIA_RUNTIME_TEMPLATE={root}/nvidia-runtime.toml", "bash", script, "install"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "install.log")
             cleanup_needed = True
-            self._remote(endpoint, ["env", *base_env, "bash", script, "deploy"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "deploy.log")
-            self._remote(endpoint, ["env", *base_env, "bash", script, "collect"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "collect.log")
+            self._remote(endpoint, ["env", *base_env, *manifest_env, "bash", script, "deploy"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "deploy.log")
+            self._remote(endpoint, ["env", *base_env, *manifest_env, "bash", script, "collect"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "collect.log")
             # The script captures operational evidence.  This direct, read-only
             # query additionally records the immutable image and GPU allocation
             # actually running, rather than inferring either from the template.
@@ -721,7 +737,7 @@ class SshRemoteWorkload:
             self._remote(endpoint, ["/usr/local/bin/k3s", "kubectl", "-n", "srecon26-canary", "get", "pods", "-l", "app.kubernetes.io/name=vllm", "-o", "json"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "vllm-pods.json")
             self._fetch(endpoint, remote_evidence, local_evidence, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-evidence.log")
             evidence_files = tuple(path for path in local_evidence.rglob("*") if path.is_file()) + tuple(path for path in transport.rglob("*") if path.is_file())
-            return self._evidence(stage, local_evidence, transport, workload, evidence_files)
+            return self._evidence(stage, local_evidence, transport, workload, evidence_files, run_id=run_directory.name, instance=instance)
         except Exception as error:
             # SSH readiness, controller networking, local staging, model pulls,
             # and Kubernetes bootstrap errors are unresolved diagnoses.  They
@@ -739,7 +755,7 @@ class SshRemoteWorkload:
                     # cleanup failure is retained in evidence and cannot claim success.
                     pass
 
-    def _evidence(self, stage: str, evidence: Path, transport: Path, workload: WorkloadContract, files: tuple[Path, ...]) -> LiveEvidence:
+    def _evidence(self, stage: str, evidence: Path, transport: Path, workload: WorkloadContract, files: tuple[Path, ...], *, run_id: str, instance: InstanceContract) -> LiveEvidence:
         now = datetime.now(UTC)
         def text(name: str) -> str:
             try:
@@ -751,14 +767,88 @@ class SshRemoteWorkload:
                 return json.loads((evidence / name).read_text(encoding="utf-8")).get("status") == "PASSED"
             except (OSError, json.JSONDecodeError, AttributeError):
                 return False
+        def json_object(name: str) -> Mapping[str, object] | None:
+            try:
+                payload = json.loads((evidence / name).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            return payload if isinstance(payload, Mapping) else None
+        def option_value(command: object, option: str) -> str | None:
+            if not isinstance(command, list):
+                return None
+            for index, value in enumerate(command[:-1]):
+                if value == option and isinstance(command[index + 1], str):
+                    return command[index + 1]
+            return None
+        def finite_nonnegative(value: object) -> Decimal:
+            number = Decimal(str(value))
+            if not number.is_finite() or number < 0:
+                raise ValueError("expected a finite non-negative decimal")
+            return number
+        def gpu_samples(name: str) -> dict[str, tuple[Decimal, Decimal]]:
+            samples: dict[str, tuple[Decimal, Decimal]] = {}
+            for line in text(name).splitlines():
+                fields = [field.strip().strip('"') for field in line.split(",")]
+                if len(fields) < 8:
+                    continue
+                uuid = fields[2]
+                if not uuid:
+                    continue
+                samples[uuid] = (finite_nonnegative(fields[4]), finite_nonnegative(fields[6]))
+            if not samples:
+                raise ValueError("missing usable GPU sample")
+            return samples
+        def active_compute_processes(name: str, allowed_uuids: set[str]) -> list[tuple[str, Decimal]]:
+            processes: list[tuple[str, Decimal]] = []
+            for line in text(name).splitlines():
+                fields = [field.strip().strip('"') for field in line.split(",")]
+                if len(fields) < 4 or not fields[1] or fields[3] not in allowed_uuids:
+                    continue
+                used_memory = finite_nonnegative(fields[2])
+                if used_memory > 0:
+                    processes.append((fields[3], used_memory))
+            if not processes:
+                raise ValueError("missing active GPU compute process")
+            return processes
         probe = status("probe-status.json")
         deployment = text_from(transport / "vllm-deployment.json")
         pods = text_from(transport / "vllm-pods.json")
         staged_manifest = text_from(self.config.local_manifest_dir / "vllm.yaml")
+        inference_status = json_object("inference-status.json")
+        inference_image_digests: object = None
+        try:
+            inference_image_digests = json.loads(text("inference-image-inspect.json"))
+        except json.JSONDecodeError:
+            pass
+        inference_container = json_object("inference-container-inspect.json")
+        inference_models = json_object("inference-vllm-models.json")
         image_ok = workload.vllm_image_digest in deployment or (stage == "gpu-smoke" and workload.vllm_image_digest in staged_manifest and bool(text_from(transport / "staged-contract-sha256.txt")))
         model_ok = (workload.model_id in deployment and workload.model_revision in deployment) or (stage == "gpu-smoke" and "REQUIRED_AT_RUN_TIME_MODEL" in staged_manifest and "REQUIRED_AT_RUN_TIME_REVISION" in staged_manifest)
-        gpu = text("nvidia-smi.txt").strip() or None
-        cuda = text("cuda.txt").strip() or None
+        if stage == "inference-smoke":
+            image_ok = (
+                isinstance(inference_status, Mapping)
+                and inference_status.get("status") == "PASSED"
+                and inference_status.get("image") == f"docker.io/vllm/vllm-openai@{workload.vllm_image_digest}"
+                and isinstance(inference_image_digests, list)
+                and any(isinstance(value, str) and value.endswith(f"@{workload.vllm_image_digest}") for value in inference_image_digests)
+                and isinstance(inference_container, Mapping)
+                and inference_container.get("image") == f"docker.io/vllm/vllm-openai@{workload.vllm_image_digest}"
+            )
+            served_models = inference_models.get("data") if isinstance(inference_models, Mapping) else None
+            model_ok = (
+                isinstance(inference_status, Mapping)
+                and inference_status.get("status") == "PASSED"
+                and inference_status.get("model") == workload.model_id
+                and inference_status.get("model_revision") == workload.model_revision
+                and inference_status.get("failed_requests") == 0
+                and isinstance(inference_container, Mapping)
+                and option_value(inference_container.get("command"), "--model") == workload.model_id
+                and option_value(inference_container.get("command"), "--revision") == workload.model_revision
+                and isinstance(served_models, list)
+                and any(isinstance(model, Mapping) and model.get("id") == workload.model_id for model in served_models)
+            )
+        gpu = (text("inference-gpu-identity.txt") if stage == "inference-smoke" else text("nvidia-smi.txt")).strip() or None
+        cuda = (text("inference-cuda.txt") if stage == "inference-smoke" else text("cuda.txt")).strip() or None
         facts = KvmFacts(probe, probe, probe, probe, probe, bool(gpu), bool(cuda), workload.vllm_image_digest if image_ok else None, now if image_ok else None)
         metric = MetricSample(Decimal("1"), now)
         snapshot = CanarySnapshot(
@@ -773,12 +863,94 @@ class SshRemoteWorkload:
             '"http_code":200' in text("warmup-timing.json"),
             '"http_code":200' in text("measured-timing.json"),
         )
+        inference_measurement = None
+        if stage == "inference-smoke" and image_ok and model_ok:
+            try:
+                timing = json_object("inference-request-1-timing.json")
+                if timing is None:
+                    raise ValueError("missing direct inference request timing")
+                usage = timing.get("usage")
+                output_tokens = timing.get("completion_tokens")
+                prompt_tokens = timing.get("prompt_tokens")
+                total_tokens = timing.get("total_tokens")
+                if (
+                    timing.get("status") != "PASSED"
+                    or timing.get("request") != "request-1"
+                    or timing.get("http_code") != 200
+                    or timing.get("model") != workload.model_id
+                    or timing.get("response_model") != workload.model_id
+                    or not isinstance(usage, Mapping)
+                    or any(not isinstance(value, int) or isinstance(value, bool) for value in (prompt_tokens, output_tokens, total_tokens))
+                    or prompt_tokens < 0 or output_tokens <= 0 or total_tokens != prompt_tokens + output_tokens
+                    or any(usage.get(key) != value for key, value in (("prompt_tokens", prompt_tokens), ("completion_tokens", output_tokens), ("total_tokens", total_tokens)))
+                ):
+                    raise ValueError("invalid direct inference timing")
+                ttft = finite_nonnegative(timing["ttft_seconds"])
+                latency = finite_nonnegative(timing["e2e_seconds"])
+                if latency < ttft:
+                    raise ValueError("direct inference end-to-end latency precedes TTFT")
+                stream_chunks: list[Mapping[str, object]] = []
+                for line in text("inference-request-1-body.ndjson").splitlines():
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    payload = json.loads(line.removeprefix("data: "))
+                    if isinstance(payload, Mapping):
+                        stream_chunks.append(payload)
+                stream_usage = next((chunk.get("usage") for chunk in reversed(stream_chunks) if isinstance(chunk.get("usage"), Mapping)), None)
+                if (
+                    not stream_chunks
+                    or not any(chunk.get("model") == workload.model_id for chunk in stream_chunks)
+                    or not isinstance(stream_usage, Mapping)
+                    or any(stream_usage.get(key) != value for key, value in (("prompt_tokens", prompt_tokens), ("completion_tokens", output_tokens), ("total_tokens", total_tokens)))
+                ):
+                    raise ValueError("stream body does not attest the timed direct model response")
+                before = gpu_samples("inference-nvidia-smi-before.csv")
+                during = gpu_samples("inference-nvidia-smi-during.csv")
+                after = gpu_samples("inference-nvidia-smi-after.csv")
+                shared_uuids = set(before) & set(during) & set(after)
+                active_processes = active_compute_processes("inference-nvidia-compute-during.csv", shared_uuids)
+                attributed_uuid = next(
+                    (
+                        uuid for uuid in sorted(shared_uuids)
+                        if during[uuid][0] > 0 or during[uuid][1] > before[uuid][1]
+                    ),
+                    None,
+                )
+                if attributed_uuid is None or not any(uuid == attributed_uuid for uuid, _used_memory in active_processes):
+                    raise ValueError("during GPU sample has neither utilization nor added memory attribution")
+                measurement_path = evidence / "direct-inference-measurement.json"
+                measurement_path.write_text(
+                    json.dumps(
+                        {
+                            "schema": "srecon26-direct-inference-measurement/v1",
+                            "source": "RemoteWorkload.direct_inference/v1",
+                            "run_id": run_id,
+                            "instance_id": instance.instance_id,
+                            "label": instance.label,
+                            "model_id": workload.model_id,
+                            "model_revision": workload.model_revision,
+                            "vllm_image_digest": workload.vllm_image_digest,
+                            "request": {"succeeded": True, "model": workload.model_id, "http_code": 200, "prompt_tokens": prompt_tokens, "output_tokens": output_tokens, "total_tokens": total_tokens, "raw_timing_artifact": "inference-request-1-timing.json", "raw_stream_artifact": "inference-request-1-body.ndjson"},
+                            "timing": {"ttft_seconds": str(ttft), "latency_seconds": str(latency), "tpot_seconds": timing.get("tpot_seconds"), "generation_tokens_per_second": timing.get("generation_tokens_per_second")},
+                            "hardware_attribution": {"gpu_uuid": attributed_uuid, "before_gpu_csv": "inference-nvidia-smi-before.csv", "during_gpu_csv": "inference-nvidia-smi-during.csv", "after_gpu_csv": "inference-nvidia-smi-after.csv", "during_compute_process_csv": "inference-nvidia-compute-during.csv", "during_utilization_percent": str(during[attributed_uuid][0]), "before_memory_mib": str(before[attributed_uuid][1]), "during_memory_mib": str(during[attributed_uuid][1]), "active_compute_processes": sum(1 for uuid, _used_memory in active_processes if uuid == attributed_uuid)},
+                            "observed_at": _stamp(now),
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ) + "\n",
+                    encoding="utf-8",
+                )
+                files = (*files, measurement_path)
+                inference_measurement = InferenceMeasurementEvidence(measurement_path)
+            except (KeyError, TypeError, ValueError, InvalidOperation, json.JSONDecodeError):
+                inference_measurement = None
         return LiveEvidence(
             gpu_identity=gpu, cuda_version=cuda, kvm_facts=facts, model_id=workload.model_id if model_ok else None,
             model_revision=workload.model_revision if model_ok else None, vllm_image_digest=workload.vllm_image_digest if image_ok else None,
             snapshot=snapshot, resource_metrics_api=bool(text("resource-metrics.txt")), custom_metrics_api=bool(text("custom-metrics.txt")),
             hpa_observed=bool(text("hpa.txt")), events_captured=bool(text("events.txt")), timing_captured=bool(text("request-timing.json")),
-            probe_outcome=ProbeOutcome.PASS if probe else ProbeOutcome.CONTROLLER_FAILED, evidence_files=files,
+            probe_outcome=ProbeOutcome.PASS if probe and (stage != "inference-smoke" or status("inference-status.json")) else ProbeOutcome.CONTROLLER_FAILED, evidence_files=files,
+            inference_measurement=inference_measurement,
         )
 
 
