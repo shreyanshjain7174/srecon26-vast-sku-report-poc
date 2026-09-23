@@ -1,0 +1,223 @@
+"""Bounded Vast CLI adapter; read-only calls are the default integration surface."""
+from __future__ import annotations
+
+import json
+import subprocess
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Callable, Mapping, Sequence
+
+from .contracts import InstanceContract, OfferContract
+from .provider import AccountSnapshot, AmbiguousCreate
+
+
+class VastProviderError(RuntimeError):
+    """The Vast CLI did not produce a usable, safe provider response."""
+
+
+class VastPreflightError(VastProviderError):
+    """A read-only snapshot shows that paid work is not eligible."""
+
+
+Runner = Callable[[list[str], int], str]
+
+
+@dataclass(frozen=True, slots=True)
+class VastPreflight:
+    autobill_enabled: bool | None
+    instance_count: int
+    offer_count: int
+    offers: tuple[Mapping[str, object], ...]
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "autobill_enabled": self.autobill_enabled,
+            "instance_count": self.instance_count,
+            "offer_count": self.offer_count,
+            "offers": [dict(item) for item in self.offers],
+        }
+
+
+class VastCliProvider:
+    """Normalizes Vast CLI JSON and never retries a paid create request."""
+
+    def __init__(self, cli_path: Path | str = "vastai", *, timeout_seconds: int = 20, runner: Runner | None = None) -> None:
+        self._cli_path = str(cli_path)
+        self._timeout_seconds = timeout_seconds
+        self._runner = runner or self._subprocess_runner
+
+    @staticmethod
+    def _subprocess_runner(args: list[str], timeout: int) -> str:
+        completed = subprocess.run(args, check=True, capture_output=True, text=True, timeout=timeout)
+        return completed.stdout
+
+    def _run_json(self, args: list[str]) -> object:
+        command = [self._cli_path, "--raw", "--no-color", *args]
+        try:
+            stdout = self._runner(command, self._timeout_seconds)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+            raise VastProviderError(f"Vast CLI {args[:2]!r} failed") from error
+        try:
+            return json.loads(stdout, parse_float=Decimal)
+        except json.JSONDecodeError as error:
+            raise VastProviderError(f"Vast CLI {args[:2]!r} did not return JSON") from error
+
+    @staticmethod
+    def _records(value: object) -> list[Mapping[str, object]]:
+        if isinstance(value, list) and all(isinstance(item, Mapping) for item in value):
+            return list(value)
+        if isinstance(value, Mapping):
+            for key in ("instances", "offers", "results"):
+                items = value.get(key)
+                if isinstance(items, list) and all(isinstance(item, Mapping) for item in items):
+                    return list(items)
+            # Some Vast CLI versions return the result of a create as one
+            # object rather than a one-element list.  It is still an untrusted
+            # record; callers retain their exact label/identity checks.
+            if "id" in value or "instance_id" in value or "offer_id" in value:
+                return [value]
+        raise VastProviderError("Vast CLI response did not contain records")
+
+    @staticmethod
+    def _decimal(value: object, field: str) -> Decimal:
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError) as error:
+            raise VastProviderError(f"missing or invalid {field}") from error
+
+    @staticmethod
+    def _integer(value: object, field: str) -> int:
+        try:
+            if isinstance(value, bool):
+                raise ValueError
+            number = Decimal(str(value))
+            if not number.is_finite() or number != number.to_integral_value():
+                raise ValueError
+            return int(number)
+        except (InvalidOperation, TypeError, ValueError) as error:
+            raise VastProviderError(f"missing or invalid {field}") from error
+
+    @classmethod
+    def _gpu_ram_mib(cls, record: Mapping[str, object]) -> int:
+        value = record.get("gpu_ram_mib", record.get("gpu_ram"))
+        ram = cls._decimal(value, "gpu_ram")
+        return int(ram if ram >= Decimal("1024") else ram * Decimal("1024"))
+
+    @classmethod
+    def _compute_capability(cls, record: Mapping[str, object]) -> str:
+        value = record.get("compute_capability", record.get("compute_cap"))
+        if value is None:
+            raise VastProviderError("missing or invalid compute capability")
+        text = str(value)
+        if "." in text:
+            return text
+        number = cls._integer(value, "compute_cap")
+        return format(Decimal(number) / Decimal("100"), "f").rstrip("0").rstrip(".")
+
+    @classmethod
+    def _offer(cls, record: Mapping[str, object], label: str) -> OfferContract:
+        return OfferContract(
+            cls._integer(record.get("id", record.get("offer_id")), "offer id"),
+            str(record.get("gpu_name")),
+            cls._integer(record.get("num_gpus"), "num_gpus"),
+            cls._gpu_ram_mib(record),
+            cls._compute_capability(record),
+            cls._integer(record.get("machine_id"), "machine_id"),
+            cls._decimal(record.get("dph_total", record.get("dph")), "dph_total"),
+            label,
+        )
+
+    @classmethod
+    def _instance(cls, record: Mapping[str, object]) -> InstanceContract:
+        label = record.get("label")
+        if not isinstance(label, str) or not label:
+            raise VastProviderError("instance record is missing a label")
+        return InstanceContract(
+            cls._integer(record.get("id", record.get("instance_id")), "instance id"),
+            str(record.get("gpu_name")),
+            cls._integer(record.get("num_gpus"), "num_gpus"),
+            cls._gpu_ram_mib(record),
+            cls._compute_capability(record),
+            cls._integer(record.get("machine_id"), "machine_id"),
+            cls._decimal(record.get("dph_total", record.get("dph")), "dph_total"),
+            label,
+        )
+
+    def account_snapshot(self) -> AccountSnapshot:
+        return AccountSnapshot(instance_count=len(self.list_instances()))
+
+    def list_instances(self) -> tuple[InstanceContract, ...]:
+        return tuple(self._instance(record) for record in self._records(self._run_json(["show", "instances"])))
+
+    def get_offer(self, offer_id: int, *, label: str) -> OfferContract:
+        records = self._records(self._run_json(["search", "offers", f"id={offer_id}", "--limit", "25"]))
+        matches = [record for record in records if self._integer(record.get("id", record.get("offer_id")), "offer id") == offer_id]
+        if len(matches) != 1:
+            raise VastProviderError("current offer contract is not uniquely available")
+        return self._offer(matches[0], label)
+
+    def get_instance(self, instance_id: int) -> InstanceContract:
+        matches = [item for item in self.list_instances() if item.instance_id == instance_id]
+        if len(matches) != 1:
+            raise VastProviderError("current instance contract is not uniquely available")
+        return matches[0]
+
+    def reconcile_label(self, label: str) -> InstanceContract:
+        matches = [item for item in self.list_instances() if item.label == label]
+        if len(matches) != 1:
+            detail = "zero" if not matches else "multiple"
+            raise AmbiguousCreate(f"ambiguous create reconciliation found {detail} label matches")
+        return matches[0]
+
+    def create_once(self, contract: OfferContract, request_key: str) -> InstanceContract:
+        del request_key
+        try:
+            response = self._run_json(["create", "instance", str(contract.offer_id), "--label", contract.label])
+        except VastProviderError as error:
+            raise AmbiguousCreate("create outcome is ambiguous and must be reconciled by label") from error
+        records = self._records(response)
+        if len(records) != 1:
+            raise AmbiguousCreate("create outcome is ambiguous and must be reconciled by label")
+        instance = self._instance(records[0])
+        if instance.label != contract.label:
+            raise AmbiguousCreate("create response label does not match the unique run label")
+        return instance
+
+    def destroy_exact(self, instance_id: int, expected_label: str) -> None:
+        instance = self.get_instance(instance_id)
+        if instance.label != expected_label:
+            raise VastProviderError("refusing to destroy an instance with a mismatched label")
+        self._run_json(["destroy", "instance", str(instance_id)])
+
+    def read_only_preflight(self, search_query: str, *, limit: int, require_ready: bool = False) -> VastPreflight:
+        if not 1 <= limit <= 25:
+            raise VastPreflightError("offer inspection limit must be between 1 and 25")
+        account = self._run_json(["show", "user"])
+        if not isinstance(account, Mapping):
+            raise VastPreflightError("account snapshot is not an object")
+        autobill_value = account.get("autobill_enabled", account.get("autobill", account.get("auto_billing")))
+        autobill_enabled = autobill_value if isinstance(autobill_value, bool) else None
+        instances = self.list_instances()
+        offers = self._records(self._run_json(["search", "offers", search_query, "--limit", str(limit)]))
+        summaries = tuple(
+            {
+                "offer_id": self._integer(record.get("id", record.get("offer_id")), "offer id"),
+                "gpu_name": str(record.get("gpu_name")),
+                "num_gpus": self._integer(record.get("num_gpus"), "num_gpus"),
+                "gpu_ram_mib": self._gpu_ram_mib(record),
+                "compute_capability": self._compute_capability(record),
+                "machine_id": self._integer(record.get("machine_id"), "machine_id"),
+                "dph_total": str(self._decimal(record.get("dph_total", record.get("dph")), "dph_total")),
+                "rentable": record.get("rentable"),
+                "verified": record.get("verified"),
+                "vms_enabled": record.get("vms_enabled"),
+            }
+            for record in offers
+        )
+        result = VastPreflight(autobill_enabled, len(instances), len(summaries), summaries)
+        if require_ready and result.autobill_enabled is not False:
+            raise VastPreflightError("autobilling must be confirmed disabled")
+        if require_ready and result.instance_count != 0:
+            raise VastPreflightError("provider inventory must be empty before a new run")
+        return result

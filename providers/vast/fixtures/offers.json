@@ -1,0 +1,14 @@
+[
+  {
+    "id": 101,
+    "gpu_name": "RTX 3090",
+    "num_gpus": 1,
+    "gpu_ram": 24,
+    "compute_cap": 860,
+    "machine_id": 99,
+    "dph_total": 0.30,
+    "rentable": true,
+    "verified": true,
+    "vms_enabled": true
+  }
+]
