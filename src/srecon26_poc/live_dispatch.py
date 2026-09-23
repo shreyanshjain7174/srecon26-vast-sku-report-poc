@@ -41,6 +41,10 @@ APPROVED_GPU_PROFILES = frozenset(
     {
         ("RTX 3090", 24576, "8.6"),
         ("RTX 4090", 24564, "8.9"),
+        # Some verified Vast RTX 4090 offers expose a 48 GB vGPU allocation.
+        # The exact memory value is retained in evidence and is never relabeled
+        # as a standard 24 GB board.
+        ("RTX 4090", 49140, "8.9"),
         # Capacity fallback for the same small-model metric-path PoC.  This is
         # never presented as 3090 evidence; the frozen offer and manifest retain
         # the observed SKU verbatim.
