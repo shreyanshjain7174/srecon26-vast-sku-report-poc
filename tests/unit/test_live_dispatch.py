@@ -46,9 +46,9 @@ class Provider:
         self.instances: list[InstanceContract] = []
         self.create_calls = 0
 
-    def get_vms_enabled_offer(self, offer_id: int, *, label: str) -> OfferContract:
+    def get_vms_enabled_offer(self, offer_id: int, *, machine_id: int, label: str) -> OfferContract:
         self.events.append("read-offer")
-        assert offer_id == self.offer.offer_id
+        assert offer_id == self.offer.offer_id and machine_id == self.offer.machine_id
         return replace(self.offer, label=label)
 
     def create_once(self, contract: OfferContract, request_key: str, launch: VastLaunchContract) -> InstanceContract:

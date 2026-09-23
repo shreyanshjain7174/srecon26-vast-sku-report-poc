@@ -544,7 +544,7 @@ class LiveCanaryDispatcher:
         # fetch is still read-only and binds the frozen preflight record to the
         # exact current vms_enabled offer immediately before the sole create.
         try:
-            current_offer = self.provider.get_vms_enabled_offer(request.offer_id, label=request.label)
+            current_offer = self.provider.get_vms_enabled_offer(request.offer_id, machine_id=frozen_offer.machine_id, label=request.label)
         except VastProviderError as error:
             return self._blocked(request, f"current exact offer cannot be frozen: {error}", gate_hashes=gate_hashes)
         if current_offer != frozen_offer:

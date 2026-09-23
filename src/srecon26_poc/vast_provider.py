@@ -210,13 +210,19 @@ class VastCliProvider:
             raise VastProviderError("current offer contract is not uniquely available")
         return self._offer(matches[0], label)
 
-    def get_vms_enabled_offer(self, offer_id: int, *, label: str) -> OfferContract:
+    def get_vms_enabled_offer(self, offer_id: int, *, machine_id: int, label: str) -> OfferContract:
         """Read and freeze one current KVM-capable offer before a paid create."""
 
-        records = self._records(self._run_json(["search", "offers", f"id={offer_id}", "--limit", "25"]))
+        # Vast's current offer search documents an ``id`` field, but its live
+        # endpoint can return an empty result for an otherwise visible offer-ID
+        # filter.  Machine ID is stable and supported; the exact offer ID is
+        # still selected and required uniquely from that machine's records.
+        records = self._records(self._run_json(["search", "offers", f"machine_id=={machine_id}", "--limit", "25"]))
         matches = [record for record in records if self._integer(record.get("id", record.get("offer_id")), "offer id") == offer_id]
         if len(matches) != 1:
             raise VastProviderError("current KVM offer contract is not uniquely available")
+        if self._integer(matches[0].get("machine_id"), "machine_id") != machine_id:
+            raise VastProviderError("current offer changed machine identity")
         if matches[0].get("vms_enabled") is not True:
             raise VastProviderError("current offer is not vms_enabled for required KVM topology")
         return self._offer(matches[0], label)

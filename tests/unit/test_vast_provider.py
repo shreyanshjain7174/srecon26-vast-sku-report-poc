@@ -73,6 +73,15 @@ def test_offer_contract_is_normalized_from_current_search_result(fixture_cli: Pa
     assert str(contract.dph_total) == "0.30"
 
 
+def test_kvm_offer_refreeze_uses_machine_query_then_exact_offer_id(fixture_cli: Path) -> None:
+    provider = VastCliProvider(fixture_cli, timeout_seconds=1)
+
+    contract = provider.get_vms_enabled_offer(101, machine_id=99, label="phase2-nonce-label")
+
+    assert contract.offer_id == 101
+    assert contract.machine_id == 99
+
+
 @pytest.mark.parametrize(
     "account_payload",
     [
