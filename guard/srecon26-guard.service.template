@@ -15,4 +15,3 @@ ProtectSystem=strict
 ReadWritePaths=/var/lib/srecon26-guard
 UMask=0077
 TimeoutStartSec=30s
-
