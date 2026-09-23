@@ -108,6 +108,48 @@ def test_live_report_session_preflight_accepts_exact_authenticated_instances_pag
     LiveBrowserReportAdapter(browser, "vastai", tmp_path / "evidence", runner=runner).preflight_authenticated_session()
 
 
+def test_live_report_session_preflight_waits_for_authenticated_spa_state(tmp_path: Path) -> None:
+    browser = tmp_path / "browse"
+    browser.write_text("#!/bin/sh\n", encoding="utf-8")
+    browser.chmod(0o700)
+    calls: list[list[str]] = []
+
+    def runner(arguments, timeout: int) -> str:
+        del timeout
+        command = list(arguments)
+        calls.append(command)
+        if command[1] == "url":
+            return "https://cloud.vast.ai/instances/"
+        if command[1] == "text":
+            return "Credit: $9.62 Instances (0)"
+        return ""
+
+    LiveBrowserReportAdapter(browser, "vastai", tmp_path / "evidence", runner=runner).preflight_authenticated_session()
+
+    assert [command[1] for command in calls[:4]] == ["goto", "wait", "url", "text"]
+    assert calls[1] == [str(browser), "wait", "text=Credit:"]
+
+
+def test_live_report_session_preflight_fails_closed_when_authenticated_ui_never_appears(tmp_path: Path) -> None:
+    browser = tmp_path / "browse"
+    browser.write_text("#!/bin/sh\n", encoding="utf-8")
+    browser.chmod(0o700)
+    calls: list[list[str]] = []
+
+    def runner(arguments, timeout: int) -> str:
+        del timeout
+        command = list(arguments)
+        calls.append(command)
+        if command[1] == "wait":
+            raise LiveBrowserReportError("authenticated UI absent")
+        return ""
+
+    with pytest.raises(LiveBrowserReportError, match="authenticated UI absent"):
+        LiveBrowserReportAdapter(browser, "vastai", tmp_path / "evidence", runner=runner).preflight_authenticated_session()
+
+    assert [command[1] for command in calls] == ["goto", "wait"]
+
+
 def test_live_report_factory_preflights_authenticated_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     browser = tmp_path / "browse"
     browser.write_text("#!/bin/sh\n", encoding="utf-8")

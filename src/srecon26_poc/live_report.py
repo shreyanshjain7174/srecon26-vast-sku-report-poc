@@ -50,6 +50,9 @@ class LiveBrowserReportAdapter:
         """Prove the report page is usable before any paid create."""
 
         self._browser("goto", "https://cloud.vast.ai/instances/", timeout=20)
+        # Vast resolves the bearer-backed SPA session after document load.
+        # Wait for authenticated-only UI before reading route and page text.
+        self._browser("wait", "text=Credit:", timeout=20)
         current_url = self._browser("url", timeout=20).strip()
         visible = self._browser("text", timeout=20)
         parsed = urlsplit(current_url)
