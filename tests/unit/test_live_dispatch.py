@@ -117,8 +117,14 @@ class Guard:
 
 
 class Reporter:
-    def __init__(self, events: list[str]) -> None:
+    def __init__(self, events: list[str], *, session_ok: bool = True) -> None:
         self.events = events
+        self.session_ok = session_ok
+
+    def preflight_authenticated_session(self) -> None:
+        self.events.append("report-session-preflight")
+        if not self.session_ok:
+            raise ValueError("not authenticated")
 
     def preflight_exact_instance(self, instance_id: int, label: str) -> None:
         self.events.append("report-preflight")
@@ -193,10 +199,10 @@ def _request(tmp_path: Path, now: datetime, *, bad_semgrep: bool = False) -> tup
     )
 
 
-def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, machine_mismatch: bool = False, remote_fault: bool = False, anchor_error: bool = False, external_absence: bool = False):
+def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, machine_mismatch: bool = False, remote_fault: bool = False, anchor_error: bool = False, external_absence: bool = False, report_session_ok: bool = True):
     events: list[str] = []
     provider = Provider(offer, events, ambiguous=ambiguous, mismatch=mismatch, machine_mismatch=machine_mismatch, external_absence=external_absence)
-    dispatcher = LiveCanaryDispatcher(provider=provider, guard=Guard(request.nonce, events, anchor_error=anchor_error), report_gate=ReportGate(Reporter(events)), workload=Workload(complete=complete, remote_fault=remote_fault), ledger=ExposureLedger(tmp_path / "ledger.json"), output_root=tmp_path / "runs", clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)), absence_interval_seconds=0)
+    dispatcher = LiveCanaryDispatcher(provider=provider, guard=Guard(request.nonce, events, anchor_error=anchor_error), report_gate=ReportGate(Reporter(events, session_ok=report_session_ok)), workload=Workload(complete=complete, remote_fault=remote_fault), ledger=ExposureLedger(tmp_path / "ledger.json"), output_root=tmp_path / "runs", clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)), absence_interval_seconds=0)
     return dispatcher, provider, events
 
 
@@ -295,6 +301,7 @@ def test_dispatcher_reconciles_ambiguous_create_without_a_second_create(tmp_path
     assert result.status == "COMPLETED"
     assert provider.create_calls == 1
     assert events.count("create") == 1
+    assert events.index("arm") < events.index("report-session-preflight") < events.index("create")
     assert events.index("reconcile") > events.index("create")
     assert events.count("list") == 3
     assert result.absence_reads == 3
@@ -310,6 +317,21 @@ def test_dispatcher_reconciles_ambiguous_create_without_a_second_create(tmp_path
     journal = (result.manifest_path.parent / "journal" / "journal.ndjson").read_text()
     assert f'"machine_id":{offer.machine_id}' in journal
     assert f'"dph_total":"{offer.dph_total}"' in journal
+
+
+def test_unauthenticated_report_session_blocks_after_guard_before_paid_create(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    request, offer = _request(tmp_path, now)
+    dispatcher, provider, events = _dispatcher(tmp_path, request, offer, report_session_ok=False)
+
+    result = dispatcher.run(request)
+
+    assert result.status == "FAILED_SAFE"
+    assert provider.create_calls == 0
+    assert "arm" in events
+    assert "report-session-preflight" in events
+    assert "create" not in events
+    assert "authenticated provider session" in (result.limitation or "")
 
 
 def test_anchor_failure_never_publishes_real_gpu_claim(tmp_path: Path) -> None:

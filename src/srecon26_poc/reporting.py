@@ -26,6 +26,7 @@ class ReportReceipt:
 
 
 class DesktopReportAdapter(Protocol):
+    def preflight_authenticated_session(self) -> None: ...
     def preflight_exact_instance(self, instance_id: int, label: str) -> None: ...
     def capture_before(self, fault: FaultRecord) -> Path: ...
     def submit(self, fault: FaultRecord) -> bool: ...
@@ -35,6 +36,12 @@ class DesktopReportAdapter(Protocol):
 class ReportGate:
     def __init__(self, adapter: DesktopReportAdapter) -> None:
         self.adapter = adapter
+
+    def preflight_authenticated_session(self) -> None:
+        try:
+            self.adapter.preflight_authenticated_session()
+        except (AssertionError, ValueError) as exc:
+            raise ReportRejected("report adapter lacks an authenticated provider session") from exc
 
     def handle(self, fault: FaultRecord, report_start_by: datetime) -> ReportReceipt:
         if fault.instance_id <= 0 or not fault.label or not fault.nonce or report_start_by.tzinfo is None:

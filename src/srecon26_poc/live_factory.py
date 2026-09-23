@@ -709,8 +709,10 @@ def _load_report_gate(spec: str) -> ReportGate:
     except (ImportError, AttributeError, TypeError) as error:
         raise LiveFactoryError("cannot load exact-target report adapter") from error
     if isinstance(value, ReportGate):
+        if not callable(getattr(value.adapter, "preflight_authenticated_session", None)):
+            raise LiveFactoryError("report gate does not expose authenticated-session preflight")
         return value
-    required = ("preflight_exact_instance", "capture_before", "submit", "capture_after")
+    required = ("preflight_authenticated_session", "preflight_exact_instance", "capture_before", "submit", "capture_after")
     if not all(callable(getattr(value, name, None)) for name in required):
         raise LiveFactoryError("report adapter factory did not return an exact-target adapter")
     return ReportGate(value)  # type: ignore[arg-type]

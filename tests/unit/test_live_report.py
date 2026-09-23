@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from srecon26_poc.live_report import LiveBrowserReportAdapter, LiveBrowserReportError
+from srecon26_poc.live_report import LiveBrowserReportAdapter, LiveBrowserReportError, create_adapter
 from srecon26_poc.reporting import FaultRecord
 
 
@@ -51,6 +51,77 @@ def test_live_report_refuses_unauthenticated_page_before_click(tmp_path: Path) -
     adapter = LiveBrowserReportAdapter(browser, "vastai", tmp_path / "evidence", runner=runner)
     with pytest.raises(LiveBrowserReportError, match="authenticated"):
         adapter.preflight_exact_instance(417, label)
+
+
+def test_live_report_session_preflight_rejects_login_redirect_before_paid_create(tmp_path: Path) -> None:
+    browser = tmp_path / "browse"
+    browser.write_text("#!/bin/sh\n", encoding="utf-8")
+    browser.chmod(0o700)
+
+    def runner(arguments, timeout: int) -> str:
+        del timeout
+        command = list(arguments)
+        if command[1] == "url":
+            return "https://cloud.vast.ai/create/"
+        if command[1] == "text":
+            return "Login"
+        return ""
+
+    adapter = LiveBrowserReportAdapter(browser, "vastai", tmp_path / "evidence", runner=runner)
+    with pytest.raises(LiveBrowserReportError, match="not authenticated"):
+        adapter.preflight_authenticated_session()
+
+
+@pytest.mark.parametrize(
+    ("url", "text"),
+    [
+        ("https://cloud.vast.ai/instances-invalid", "Instances"),
+        ("https://cloud.vast.ai/instances/", "Please sign in"),
+        ("https://cloud.vast.ai/instances/", "LOG IN"),
+    ],
+)
+def test_live_report_session_preflight_rejects_wrong_route_and_auth_markers(tmp_path: Path, url: str, text: str) -> None:
+    browser = tmp_path / "browse"
+    browser.write_text("#!/bin/sh\n", encoding="utf-8")
+    browser.chmod(0o700)
+
+    def runner(arguments, timeout: int) -> str:
+        del timeout
+        command = list(arguments)
+        return url if command[1] == "url" else text if command[1] == "text" else ""
+
+    adapter = LiveBrowserReportAdapter(browser, "vastai", tmp_path / "evidence", runner=runner)
+    with pytest.raises(LiveBrowserReportError, match="not authenticated"):
+        adapter.preflight_authenticated_session()
+
+
+def test_live_report_session_preflight_accepts_exact_authenticated_instances_page(tmp_path: Path) -> None:
+    browser = tmp_path / "browse"
+    browser.write_text("#!/bin/sh\n", encoding="utf-8")
+    browser.chmod(0o700)
+
+    def runner(arguments, timeout: int) -> str:
+        del timeout
+        command = list(arguments)
+        return "https://cloud.vast.ai/instances/" if command[1] == "url" else "Instances No running instances" if command[1] == "text" else ""
+
+    LiveBrowserReportAdapter(browser, "vastai", tmp_path / "evidence", runner=runner).preflight_authenticated_session()
+
+
+def test_live_report_factory_preflights_authenticated_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    browser = tmp_path / "browse"
+    browser.write_text("#!/bin/sh\n", encoding="utf-8")
+    browser.chmod(0o700)
+    called: list[bool] = []
+    monkeypatch.setenv("SRECON26_BROWSER_BIN", str(browser))
+    monkeypatch.setenv("SRECON26_VAST_CLI", "vastai")
+    monkeypatch.setenv("SRECON26_REPORT_EVIDENCE_DIR", str(tmp_path / "evidence"))
+    monkeypatch.setattr(LiveBrowserReportAdapter, "preflight_authenticated_session", lambda self: called.append(True))
+
+    adapter = create_adapter()
+
+    assert isinstance(adapter, LiveBrowserReportAdapter)
+    assert called == [True]
 
 
 def test_live_report_click_script_binds_id_and_nonce_label(tmp_path: Path) -> None:

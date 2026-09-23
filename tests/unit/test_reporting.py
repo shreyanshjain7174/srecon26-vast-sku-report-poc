@@ -8,6 +8,7 @@ from srecon26_poc.reporting import FaultRecord, ReportGate, ReportRejected
 
 class FakeAdapter:
     def __init__(self, submitted=True): self.submitted = submitted; self.events = []
+    def preflight_authenticated_session(self): self.events.append("session")
     def preflight_exact_instance(self, instance_id, label): self.events.append("preflight"); assert (instance_id, label) == (1, "label")
     def capture_before(self, fault): self.events.append("before"); return Path("before.json")
     def submit(self, fault): self.events.append("submit"); return self.submitted

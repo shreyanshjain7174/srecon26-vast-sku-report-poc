@@ -676,6 +676,9 @@ class LiveCanaryDispatcher:
             guard_armed = True
             self._append(journal, RunState.GUARD_ARMED, "guard.armed", {"hard_deadline": _stamp(request.hard_deadline), "report_start_by": _stamp(request.report_start_by), "host_identity": attestation.host_identity})
 
+            # Recheck the live desktop session after guard arm and immediately
+            # before any paid create.  Factory-time checks alone can go stale.
+            self.report_gate.preflight_authenticated_session()
             if self.clock.now() >= request.report_start_by:
                 raise LiveDispatchError("guard setup consumed the paid-stage execution window")
 

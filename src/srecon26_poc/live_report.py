@@ -6,6 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Callable, Sequence
+from urllib.parse import urlsplit
 
 from .reporting import FaultRecord, ReportReceipt
 from .vast_provider import VastCliProvider
@@ -44,6 +45,19 @@ class LiveBrowserReportAdapter:
 
     def _browser(self, *arguments: str, timeout: int = 20) -> str:
         return self.runner([self.browser_bin, *arguments], timeout)
+
+    def preflight_authenticated_session(self) -> None:
+        """Prove the report page is usable before any paid create."""
+
+        self._browser("goto", "https://cloud.vast.ai/instances/", timeout=20)
+        current_url = self._browser("url", timeout=20).strip()
+        visible = self._browser("text", timeout=20)
+        parsed = urlsplit(current_url)
+        exact_instances_page = parsed.scheme == "https" and parsed.netloc == "cloud.vast.ai" and parsed.path in {"/instances", "/instances/"} and not parsed.query and not parsed.fragment
+        normalized = " ".join(visible.casefold().split())
+        unauthenticated = any(marker in normalized for marker in ("login", "log in", "sign in"))
+        if not exact_instances_page or unauthenticated or "instances" not in normalized:
+            raise LiveBrowserReportError("desktop browser is not authenticated on the Vast instances page")
 
     def preflight_exact_instance(self, instance_id: int, label: str) -> None:
         current = self.provider.get_instance(instance_id)
@@ -91,8 +105,10 @@ def create_adapter() -> LiveBrowserReportAdapter:
             raise LiveBrowserReportError(f"{name} is required")
         return value
 
-    return LiveBrowserReportAdapter(
+    adapter = LiveBrowserReportAdapter(
         Path(required("SRECON26_BROWSER_BIN")).expanduser(),
         required("SRECON26_VAST_CLI"),
         Path(required("SRECON26_REPORT_EVIDENCE_DIR")).expanduser().resolve(),
     )
+    adapter.preflight_authenticated_session()
+    return adapter

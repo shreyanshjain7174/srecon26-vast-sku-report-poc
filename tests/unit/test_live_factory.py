@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -14,14 +16,34 @@ from srecon26_poc.live_factory import (
     GitHubGuardTransport,
     LiveFactoryError,
     VastSshResolver,
+    _load_report_gate,
 )
 from srecon26_poc.live_dispatch import REPORT_MARGIN
+from srecon26_poc.reporting import ReportGate
 from srecon26_poc.types import RunIdentity
 
 
 NOW = datetime(2026, 9, 23, 4, 0, tzinfo=UTC)
 NONCE = "nonce_12345678"
 LABEL = f"srecon26-smoke--nonce-{NONCE}"
+
+
+def test_live_factory_rejects_report_adapter_without_authenticated_session_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    class OldAdapter:
+        def preflight_exact_instance(self, instance_id, label): pass
+        def capture_before(self, fault): pass
+        def submit(self, fault): return False
+        def capture_after(self, receipt): pass
+
+    module = types.SimpleNamespace(create=lambda: OldAdapter())
+    monkeypatch.setitem(sys.modules, "old_report_adapter", module)
+
+    with pytest.raises(LiveFactoryError, match="exact-target adapter"):
+        _load_report_gate("old_report_adapter:create")
+
+    module.create = lambda: ReportGate(OldAdapter())
+    with pytest.raises(LiveFactoryError, match="authenticated-session preflight"):
+        _load_report_gate("old_report_adapter:create")
 
 
 class GitHubRunner:
