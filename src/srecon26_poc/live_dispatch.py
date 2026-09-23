@@ -35,9 +35,15 @@ PROJECT_CAP = Decimal("5.00")
 REPORT_MARGIN = timedelta(seconds=165)  # report 60s + teardown 60s + absence 45s
 MAX_GATE_AGE = timedelta(minutes=5)
 MAX_STAGE_RUNTIME = timedelta(minutes=45)
-REQUIRED_GPU_NAME = "RTX 3090"
-REQUIRED_GPU_RAM_MIB = 24576
-REQUIRED_COMPUTE_CAPABILITY = "8.6"
+APPROVED_GPU_PROFILES = frozenset(
+    {
+        ("RTX 3090", 24576, "8.6"),
+        # Capacity fallback for the same small-model metric-path PoC.  This is
+        # never presented as 3090 evidence; the frozen offer and manifest retain
+        # the observed SKU verbatim.
+        ("RTX 4000Ada", 20475, "8.9"),
+    }
+)
 FROZEN_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 FROZEN_MODEL_REVISION = "989aa7980e4cf806f80c7fef2b1adb7bc71aa306"
 
@@ -314,13 +320,8 @@ def _frozen_offer(payload: Mapping[str, object], *, offer_id: int, label: str) -
         dph_total=_to_decimal(record.get("dph_total"), "dph_total"),
         label=label,
     )
-    if (
-        offer.gpu_name != REQUIRED_GPU_NAME
-        or offer.num_gpus != 1
-        or offer.gpu_ram_mib != REQUIRED_GPU_RAM_MIB
-        or offer.compute_capability != REQUIRED_COMPUTE_CAPABILITY
-    ):
-        raise LiveDispatchError("frozen offer is not the exact approved single RTX 3090 contract")
+    if offer.num_gpus != 1 or (offer.gpu_name, offer.gpu_ram_mib, offer.compute_capability) not in APPROVED_GPU_PROFILES:
+        raise LiveDispatchError("frozen offer is not an exact approved single-GPU PoC contract")
     return offer
 
 
