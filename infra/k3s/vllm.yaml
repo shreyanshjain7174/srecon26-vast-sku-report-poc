@@ -66,14 +66,14 @@ spec:
               cpu: "2"
               memory: 12Gi
               nvidia.com/gpu: "1"
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
             limits:
               cpu: "4"
               memory: 20Gi
               nvidia.com/gpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           readinessProbe:
             httpGet:
               path: /health

@@ -38,7 +38,7 @@ readonly DEFAULT_HARD_DEADLINE_MARGIN_SECONDS=420
 
 usage() {
   cat <<'USAGE'
-Usage: remote_host_canary.sh <probe|install|install-tunnel|install-agent|deploy|collect|cleanup|inference-smoke>
+Usage: remote_host_canary.sh <probe|install|install-tunnel|install-agent|verify-two-node|deploy|collect|cleanup|inference-smoke>
 
 This program is inert until one of the listed subcommands is supplied.
 
@@ -52,6 +52,9 @@ Required for install-tunnel: CANARY_K3S_TUNNEL_HOST, CANARY_K3S_TUNNEL_PORT,
   CANARY_K3S_TUNNEL_USER, CANARY_K3S_TUNNEL_IDENTITY_FILE, and
   CANARY_K3S_TUNNEL_KNOWN_HOSTS.  It exposes server API only on worker
   loopback through a pinned-host-key SSH tunnel.
+Required for verify-two-node: CANARY_EVIDENCE_DIR and CANARY_EXPECTED_NODE_NAMES
+  as server,worker. It requires exactly two expected Ready GPU-labelled nodes
+  before any workload deploy.
 Required for deploy/cleanup: CANARY_EVIDENCE_DIR, CANARY_MANIFEST_DIR,
   CANARY_MANIFEST_SHA256.  Deploy additionally needs CANARY_VLLM_IMAGE,
   CANARY_MODEL, CANARY_MODEL_REVISION, and CANARY_HARD_DEADLINE (an RFC3339
@@ -498,6 +501,30 @@ UNIT
   wait_seconds="$(bounded_wait_seconds)"
   timeout --foreground "$wait_seconds" bash -c 'until systemctl is-active --quiet k3s-agent.service; do sleep 2; done' \
     || die "k3s agent did not become active within bounded wait"
+}
+
+verify_two_node_cluster() {
+  require_root
+  require_command kubectl
+  require_command jq
+  local out
+  out="$(evidence_dir)"
+  systemctl is-active --quiet k3s.service || die "k3s server service is not active"
+  local expected="${CANARY_EXPECTED_NODE_NAMES:-}"
+  [[ "$expected" =~ ^[A-Za-z0-9._-]+,[A-Za-z0-9._-]+$ ]] || die "CANARY_EXPECTED_NODE_NAMES must be two comma-separated node names"
+  local first="${expected%%,*}" second="${expected#*,}"
+  [[ "$first" != "$second" ]] || die "CANARY_EXPECTED_NODE_NAMES must name distinct nodes"
+  kubectl_cmd get nodes -o json >"$out/two-node-join.json" || die "cannot read Kubernetes nodes"
+  jq -e --arg first "$first" --arg second "$second" '
+    [ .items[]
+      | select(.metadata.name == $first or .metadata.name == $second)
+      | select(.metadata.labels["srecon26.io/vllm-gpu"] == "true")
+      | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+      | select(.status.allocatable["nvidia.com/gpu"] == "1")
+      | select(.status.addresses | any(.type == "InternalIP" and (.address | length > 0)))
+    ] | length == 2
+  ' "$out/two-node-join.json" >/dev/null || die "expected exactly two Ready labelled GPU nodes"
+  write_json_status "$out/two-node-join-status.json" "PASSED" "two exact Ready GPU nodes joined with InternalIP and one allocatable GPU each"
 }
 
 manifest_hash() {
@@ -1183,6 +1210,7 @@ main() {
     install) install_k3s ;;
     install-tunnel) install_k3s_tunnel ;;
     install-agent) install_k3s_agent ;;
+    verify-two-node) verify_two_node_cluster ;;
     deploy) deploy_canary ;;
     collect) collect_evidence ;;
     cleanup) cleanup_canary ;;

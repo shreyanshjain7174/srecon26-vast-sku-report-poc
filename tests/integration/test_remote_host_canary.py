@@ -32,8 +32,8 @@ def test_remote_host_script_is_syntax_valid_and_inert_without_an_explicit_subcom
 def test_only_explicit_lifecycle_subcommands_are_exposed() -> None:
     script = _script()
 
-    assert "<probe|install|install-tunnel|install-agent|deploy|collect|cleanup|inference-smoke>" in script
-    for command in ("probe", "install", "install-tunnel", "install-agent", "deploy", "collect", "cleanup", "inference-smoke"):
+    assert "<probe|install|install-tunnel|install-agent|verify-two-node|deploy|collect|cleanup|inference-smoke>" in script
+    for command in ("probe", "install", "install-tunnel", "install-agent", "verify-two-node", "deploy", "collect", "cleanup", "inference-smoke"):
         assert f"{command})" in script
     assert "*) usage >&2; exit 64" in script
 
@@ -128,6 +128,16 @@ def test_all_waits_are_bounded_and_services_stay_cluster_or_local_only() -> None
 
 def test_each_gpu_node_is_explicitly_labelled_for_two_node_vllm_scheduling() -> None:
     assert '"srecon26.io/vllm-gpu=true"' in _script()
+
+
+def test_two_node_verifier_requires_exactly_two_ready_gpu_nodes_before_deploy() -> None:
+    script = _script()
+
+    assert "verify_two_node_cluster()" in script
+    assert "CANARY_EXPECTED_NODE_NAMES must be two comma-separated node names" in script
+    assert "expected exactly two Ready labelled GPU nodes" in script
+    assert '"nvidia.com/gpu"' in script
+    assert "verify-two-node) verify_two_node_cluster" in script
 
 
 def test_evidence_contract_captures_every_required_observation_layer_without_secret_dump() -> None:
