@@ -104,6 +104,8 @@ def test_workflow_has_restricted_permissions_bounded_jobs_and_secret_only_creden
     assert "Destroy at immutable deadline and confirm provider absence" in workflow
     assert workflow.count("--post-deadline-window-seconds 300") == 2
     assert 'comments?per_page=100&sort=created&direction=desc' in workflow
+    assert "SRECON26_GUARD_V1 ANCHORED nonce=${INPUT_NONCE} root=${anchor_root}" in workflow
+    assert "terminal_since" in workflow
     assert "gh api --paginate" not in workflow
     assert "TEARDOWN_UNCONFIRMED" in workflow
 

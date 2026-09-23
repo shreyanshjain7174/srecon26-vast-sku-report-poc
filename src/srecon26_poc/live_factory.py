@@ -54,6 +54,10 @@ _BACKSTOP_ARMED = re.compile(
     r"host=(?P<host>[A-Za-z0-9_.-]{1,128}) script=(?P<script>[0-9a-f]{64}) "
     r"root=(?P<root>[0-9a-f]{64})$"
 )
+_ANCHORED = re.compile(
+    r"^SRECON26_GUARD_V1 ANCHORED nonce=(?P<nonce>[A-Za-z0-9_-]{8,128}) "
+    r"root=(?P<root>[0-9a-f]{64})$"
+)
 
 
 class LiveFactoryError(LiveDispatchError):
@@ -260,8 +264,23 @@ class GitHubGuardTransport(GuardTransport):
             root = str(payload.get("root_hash", ""))
             if not _SHA256.fullmatch(root):
                 raise LiveFactoryError("guard anchor must be a SHA-256 root")
+            submitted_at = _utc(self.now())
             self._comment(f"SRECON26_GUARD_V1 ANCHOR nonce={self._nonce} root={root}")
-            return {"status": "ANCHORED", "root_hash": root, "nonce": self._nonce, "label": self._armed.label}
+            for _attempt in range(max(1, self.config.arm_timeout_seconds // 2)):
+                for comment in self._comments():
+                    body = comment.get("body")
+                    created = comment.get("created_at")
+                    user = comment.get("user")
+                    actor = user.get("login") if isinstance(user, Mapping) else None
+                    match = _ANCHORED.fullmatch(body) if isinstance(body, str) else None
+                    if actor != self.config.workflow_actor or match is None or not isinstance(created, str):
+                        continue
+                    if _parse_time(created) < submitted_at:
+                        continue
+                    if match.group("nonce") == self._nonce and match.group("root") == root:
+                        return {"status": "ANCHORED", "root_hash": root, "nonce": self._nonce, "label": self._armed.label}
+                self.sleep(2)
+            raise LiveFactoryError("independent GitHub guard did not acknowledge the bundle anchor")
         raise LiveFactoryError("unsupported GitHub guard command")
 
 

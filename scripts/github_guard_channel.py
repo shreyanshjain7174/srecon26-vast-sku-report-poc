@@ -308,6 +308,8 @@ def sync(config: GuardConfig, comments: Iterable[object], *, worker: Path, root:
         receipt = _worker(worker, "heartbeat" if event.kind == "HEARTBEAT" else "anchor", config, root, secret_file, root_hash=event.root_hash if event.kind == "ANCHOR" else None)
         if event.kind == "HEARTBEAT":
             state["last_heartbeat"] = _stamp(event.created_at)
+        else:
+            state["last_anchor_root"] = event.root_hash
         last_id = event.comment_id
         _append_journal(journal, {"event": event.kind.lower(), "time": _stamp(now), "nonce": config.nonce, "comment_id": event.comment_id, "root_hash": event.root_hash, "receipt": receipt})
     state["last_comment_id"] = last_id
@@ -316,7 +318,7 @@ def sync(config: GuardConfig, comments: Iterable[object], *, worker: Path, root:
     receipt = _worker(worker, "tick", config, root, secret_file)
     decision = evaluate_guard(config, last_heartbeat=_parse_time(str(state["last_heartbeat"])), now=now)
     _append_journal(journal, {"event": "tick", "time": _stamp(now), "nonce": config.nonce, "decision": asdict(decision), "receipt": receipt})
-    return {"decision": asdict(decision), "receipt": receipt}
+    return {"decision": asdict(decision), "receipt": receipt, "last_anchor_root": state.get("last_anchor_root")}
 
 
 def main() -> int:

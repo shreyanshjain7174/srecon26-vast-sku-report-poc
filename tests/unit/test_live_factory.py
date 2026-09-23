@@ -27,6 +27,7 @@ LABEL = f"srecon26-smoke--nonce-{NONCE}"
 class GitHubRunner:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        self.ack_anchors = True
         self.comments: list[dict[str, object]] = [
             {
                 "body": f"SRECON26_GUARD_V1 ARMED nonce={NONCE} label={LABEL} deadline=2026-09-23T04:20:00Z host=github-runner-1 script={'a' * 64} root={'b' * 64}",
@@ -48,6 +49,16 @@ class GitHubRunner:
         if endpoint.endswith("/comments?per_page=100&sort=created&direction=desc"):
             return json.dumps(self.comments)
         if endpoint.endswith("/comments"):
+            body = next((item.split("=", 1)[1] for item in command if item.startswith("body=")), "")
+            anchor = body.replace("SRECON26_GUARD_V1 ANCHOR", "SRECON26_GUARD_V1 ANCHORED", 1)
+            if anchor != body and self.ack_anchors:
+                self.comments.append(
+                    {
+                        "body": anchor,
+                        "created_at": "2026-09-23T04:00:03Z",
+                        "user": {"login": "github-actions[bot]"},
+                    }
+                )
             return json.dumps({"id": 99})
         return ""
 
@@ -72,8 +83,32 @@ def test_github_guard_dispatch_verifies_bound_action_attestation_then_comments_h
     dispatch = runner.calls[0]
     assert "/actions/workflows/independent-guard.yml/dispatches" in dispatch[4]
     assert f"inputs[nonce]={NONCE}" in dispatch
-    assert any(item == f"body=SRECON26_GUARD_V1 HEARTBEAT nonce={NONCE} root={'b' * 64}" for item in runner.calls[-2])
-    assert any(item == f"body=SRECON26_GUARD_V1 ANCHOR nonce={NONCE} root={'c' * 64}" for item in runner.calls[-1])
+    assert any(
+        item == f"body=SRECON26_GUARD_V1 HEARTBEAT nonce={NONCE} root={'b' * 64}"
+        for call in runner.calls for item in call
+    )
+    assert any(
+        item == f"body=SRECON26_GUARD_V1 ANCHOR nonce={NONCE} root={'c' * 64}"
+        for call in runner.calls for item in call
+    )
+    assert any("sort=created&direction=desc" in argument for call in runner.calls for argument in call)
+
+
+def test_github_guard_rejects_anchor_without_remote_workflow_ack() -> None:
+    runner = GitHubRunner()
+    transport = GitHubGuardTransport(
+        GitHubGuardConfig("owner/private-repo", "main", 17, "sunny", arm_timeout_seconds=30),
+        runner=runner,
+        sleep=lambda _seconds: None,
+        now=lambda: NOW,
+    )
+    client = GuardClient(transport, nonce=NONCE)
+    identity = RunIdentity("live-run", LABEL, NOW)
+    client.arm(identity, NOW + timedelta(minutes=20))
+    runner.ack_anchors = False
+
+    with pytest.raises(LiveFactoryError, match="did not acknowledge"):
+        client.anchor("e" * 64)
 
 
 def test_github_guard_bounds_heartbeat_comment_volume() -> None:
