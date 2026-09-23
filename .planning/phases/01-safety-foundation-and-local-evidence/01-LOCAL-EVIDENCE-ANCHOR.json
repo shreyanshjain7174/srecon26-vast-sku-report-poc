@@ -22,6 +22,17 @@
     "status": "ACKNOWLEDGED"
   },
   "provenance": "local-synthetic",
+  "remote_guard_rehearsal": {
+    "conclusion": "success",
+    "mode": "credential_free_fake_provider_rehearsal",
+    "receipt_path": ".planning/phases/01-safety-foundation-and-local-evidence/receipts/remote-guard-rehearsal-35821274670.json",
+    "remote_commit": "c28aaacbf4f83ac622671ac7e1c16426f5baf66a",
+    "remote_repository": "shreyanshjain7174/srecon26-independent-guard",
+    "remote_run_id": "35821274670",
+    "remote_run_url": "https://github.com/shreyanshjain7174/srecon26-independent-guard/actions/runs/35821274670",
+    "scope_note": "Proves independent heartbeat-loss exact teardown and idempotency against a network-free fake provider; live Vast authorization remains a paid-run preflight.",
+    "status": "TEARDOWN_CONFIRMED"
+  },
   "schema_version": 1,
   "selected_arms": [
     {
