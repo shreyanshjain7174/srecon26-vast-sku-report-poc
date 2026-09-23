@@ -33,6 +33,7 @@ from .live_dispatch import (
     LiveCanaryDispatcher,
     LiveDispatchError,
     LiveEvidence,
+    ProviderFaultEvidence,
     WorkloadContract,
 )
 from .reporting import ReportGate
@@ -345,11 +346,60 @@ class SshEndpoint:
         return f"{user}@{host}"
 
 
+@dataclass(frozen=True, slots=True)
+class StartupStatusObservation:
+    """One successful, exact-instance provider status observation."""
+
+    attempt: int
+    actual_status: str
+    endpoint_published: bool
+    selected_ssh_route: str | None
+    observed_at: str
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "attempt": self.attempt,
+            "actual_status": self.actual_status,
+            "endpoint_published": self.endpoint_published,
+            "selected_ssh_route": self.selected_ssh_route,
+            "observed_at": self.observed_at,
+        }
+
+
+class ProviderStartupFault(LiveFactoryError):
+    """A bounded set of provider reads proves a host never left startup.
+
+    This intentionally carries only normalized observations.  It is raised
+    only after every configured resolver lookup succeeds, preserves exact
+    ownership, publishes a safe endpoint, and remains in a recognized startup
+    status.  All other SSH-resolution failures stay ordinary controller
+    failures and are not reportable.
+    """
+
+    def __init__(self, observations: tuple[StartupStatusObservation, ...], *, bounded_reads: int | None = None) -> None:
+        expected_reads = len(observations) if bounded_reads is None else bounded_reads
+        if (
+            expected_reads <= 0
+            or len(observations) != expected_reads
+            or any(not item.endpoint_published for item in observations)
+            or any(item.actual_status not in VastSshResolver._STARTUP_STATES for item in observations)
+        ):
+            raise LiveFactoryError("startup fault evidence is incomplete or not reportable")
+        super().__init__("exact instance remained in provider startup despite a published SSH endpoint")
+        self.observations = observations
+        self.bounded_reads = expected_reads
+
+
 class VastSshResolver:
     """Resolve SSH only from the exact created instance's current record."""
 
     _CLI_TIMEOUT_SECONDS = 20
     _CLI_DEADLINE_OVERHEAD_SECONDS = 2
+    # A typed startup fault needs to return while the dispatcher can still
+    # complete a desktop report.  ``report_start_by`` is hard_deadline minus
+    # REPORT_MARGIN; reserve a further 90 seconds before that cutoff.
+    _STARTUP_REPORT_RESERVE = timedelta(seconds=90)
+    _STARTUP_STATES = frozenset({"created", "loading", "starting"})
 
     def __init__(self, cli_path: Path | str, *, runner: CommandRunner | None = None, attempts: int = 60, interval_seconds: float = 5.0, sleep: Callable[[float], None] = time.sleep) -> None:
         if not 1 <= attempts <= 90 or not 0 <= interval_seconds <= 15:
@@ -358,18 +408,18 @@ class VastSshResolver:
         self.attempts, self.interval_seconds, self.sleep = attempts, interval_seconds, sleep
 
     @classmethod
-    def _require_cli_window(cls, hard_deadline: datetime | None, operation: str) -> int:
+    def _require_cli_window(cls, hard_deadline: datetime | None, operation: str, *, reserve: timedelta = timedelta()) -> int:
         if hard_deadline is None:
             return cls._CLI_TIMEOUT_SECONDS
-        remaining = (hard_deadline - REPORT_MARGIN - datetime.now(UTC)).total_seconds()
+        remaining = (hard_deadline - REPORT_MARGIN - reserve - datetime.now(UTC)).total_seconds()
         required = cls._CLI_TIMEOUT_SECONDS + cls._CLI_DEADLINE_OVERHEAD_SECONDS
         if remaining < required:
             raise LiveFactoryError(f"{operation} cannot fit before immutable teardown margin")
         return cls._CLI_TIMEOUT_SECONDS
 
     @staticmethod
-    def _require_remaining_margin(hard_deadline: datetime | None, operation: str) -> None:
-        if hard_deadline is not None and datetime.now(UTC) >= hard_deadline - REPORT_MARGIN:
+    def _require_remaining_margin(hard_deadline: datetime | None, operation: str, *, reserve: timedelta = timedelta()) -> None:
+        if hard_deadline is not None and datetime.now(UTC) >= hard_deadline - REPORT_MARGIN - reserve:
             raise LiveFactoryError(f"{operation} reached immutable teardown margin")
 
     @staticmethod
@@ -421,16 +471,32 @@ class VastSshResolver:
 
     def resolve(self, instance: InstanceContract, *, hard_deadline: datetime | None = None, heartbeat: Callable[[], None] | None = None, status_log: Path | None = None) -> SshEndpoint:
         terminal = {"error", "offline", "stopped", "exited"}
+        observations: list[StartupStatusObservation] = []
         for attempt in range(self.attempts):
-            timeout = self._require_cli_window(hard_deadline, "provider status lookup")
+            # Do not spend the desktop-report reservation trying one more
+            # provider read.  Reaching this guard is unresolved, never a host
+            # fault report trigger.
+            timeout = self._require_cli_window(
+                hard_deadline,
+                "provider status lookup",
+                reserve=self._STARTUP_REPORT_RESERVE,
+            )
             if heartbeat is not None:
                 heartbeat()
             try:
                 raw = _json(self.runner([self.cli_path, "--raw", "--no-color", "show", "instance", str(instance.instance_id)], timeout=timeout), context="Vast instance lookup")
             except LiveFactoryError:
-                self._require_remaining_margin(hard_deadline, "provider status lookup")
+                self._require_remaining_margin(
+                    hard_deadline,
+                    "provider status lookup",
+                    reserve=self._STARTUP_REPORT_RESERVE,
+                )
                 raw = None
-            self._require_remaining_margin(hard_deadline, "provider status lookup")
+            self._require_remaining_margin(
+                hard_deadline,
+                "provider status lookup",
+                reserve=self._STARTUP_REPORT_RESERVE,
+            )
             if isinstance(raw, Mapping):
                 current_id = _integer(raw.get("id", raw.get("instance_id")), "instance id")
                 label = raw.get("label")
@@ -440,6 +506,14 @@ class VastSshResolver:
                 selected = direct or proxy
                 selected_route = "direct" if direct is not None else "proxy" if proxy is not None else None
                 status = str(raw.get("actual_status", "")).lower()
+                observation = StartupStatusObservation(
+                    attempt=attempt + 1,
+                    actual_status=status,
+                    endpoint_published=selected is not None,
+                    selected_ssh_route=selected_route,
+                    observed_at=_stamp(datetime.now(UTC)),
+                )
+                observations.append(observation)
                 if status_log is not None:
                     status_log.parent.mkdir(parents=True, exist_ok=True)
                     with status_log.open("a", encoding="utf-8") as handle:
@@ -449,7 +523,7 @@ class VastSshResolver:
                             "label": label,
                             "actual_status": status,
                             "endpoint_published": selected is not None,
-                            "observed_at": _stamp(datetime.now(UTC)),
+                            "observed_at": observation.observed_at,
                         }
                         evidence.update(
                             self._endpoint_evidence(
@@ -468,9 +542,16 @@ class VastSshResolver:
             if attempt + 1 < self.attempts:
                 if heartbeat is not None:
                     heartbeat()
-                if hard_deadline is not None and (hard_deadline - REPORT_MARGIN - datetime.now(UTC)).total_seconds() <= self.interval_seconds:
+                if hard_deadline is not None and (hard_deadline - REPORT_MARGIN - self._STARTUP_REPORT_RESERVE - datetime.now(UTC)).total_seconds() <= self.interval_seconds:
                     raise LiveFactoryError("provider status retry cannot fit before immutable teardown margin")
                 self.sleep(self.interval_seconds)
+        if (
+            len(observations) == self.attempts
+            and all(observation.endpoint_published for observation in observations)
+            and all(observation.actual_status in self._STARTUP_STATES for observation in observations)
+            and all(observation.actual_status != "running" for observation in observations)
+        ):
+            raise ProviderStartupFault(tuple(observations), bounded_reads=self.attempts)
         raise LiveFactoryError("exact instance did not reach running with a safe SSH endpoint within the bounded wait")
 
     def attach_public_key(self, instance: InstanceContract, public_key_file: Path, *, hard_deadline: datetime, heartbeat: Callable[[], None], status_log: Path) -> None:
@@ -679,6 +760,48 @@ class SshRemoteWorkload:
         arguments = ["scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={self.config.known_hosts_file}", "-i", str(self.config.identity_file), "-P", str(endpoint.port), "-r", f"{endpoint.destination(self.config.user)}:{remote}", str(local)]
         self._stream(arguments, hard_deadline=hard_deadline, heartbeat=heartbeat, log=log)
 
+    @staticmethod
+    def _write_startup_fault_evidence(
+        transport: Path,
+        *,
+        run_id: str,
+        instance: InstanceContract,
+        fault: ProviderStartupFault,
+    ) -> Path:
+        """Persist the resolver's normalized, exact-target proof once.
+
+        ``x`` is deliberate: this reportable artifact cannot be replaced after
+        the run decides that the provider left a host stuck in startup.
+        """
+
+        artifact = transport / "provider-startup-fault.json"
+        transport.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": "srecon26-provider-startup-fault/v1",
+            "source": "VastSshResolver.startup_observation/v1",
+            "category": "host",
+            "run_id": run_id,
+            "instance_id": instance.instance_id,
+            "label": instance.label,
+            "confirmed": {
+                "all_bounded_provider_reads_succeeded": True,
+                "exact_instance_and_label_preserved": True,
+                "endpoint_published_on_every_read": True,
+                "no_actual_status_running": True,
+                "only_nonterminal_startup_statuses": True,
+                "desktop_report_reserve_seconds": int(VastSshResolver._STARTUP_REPORT_RESERVE.total_seconds()),
+            },
+            "observations": [observation.as_json() for observation in fault.observations],
+        }
+        try:
+            with artifact.open("x", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+        except FileExistsError as error:
+            raise LiveFactoryError("startup fault evidence already exists for this run") from error
+        artifact.chmod(0o400)
+        return artifact
+
     def run(self, *, stage: str, workload: WorkloadContract, instance: InstanceContract, run_directory: Path, hard_deadline: datetime, heartbeat: Callable[[], None]) -> LiveEvidence:
         root = f"/var/tmp/srecon26-canary-{hashlib.sha256(instance.label.encode()).hexdigest()[:20]}"
         remote_evidence, local_evidence = f"{root}/evidence", run_directory / "remote-evidence"
@@ -739,6 +862,26 @@ class SshRemoteWorkload:
             self._fetch(endpoint, remote_evidence, local_evidence, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-evidence.log")
             evidence_files = tuple(path for path in local_evidence.rglob("*") if path.is_file()) + tuple(path for path in transport.rglob("*") if path.is_file())
             return self._evidence(stage, local_evidence, transport, workload, evidence_files, run_id=run_directory.name, instance=instance)
+        except ProviderStartupFault as error:
+            artifact = self._write_startup_fault_evidence(
+                transport,
+                run_id=run_directory.name,
+                instance=instance,
+                fault=error,
+            )
+            evidence_files = tuple(path for path in transport.rglob("*") if path.is_file())
+            return LiveEvidence(
+                None,
+                None,
+                None,
+                provider_fault=ProviderFaultEvidence(
+                    "host",
+                    "exact instance remained in nonterminal provider startup despite a published SSH endpoint",
+                    artifact,
+                ),
+                probe_outcome=ProbeOutcome.CONTROLLER_FAILED,
+                evidence_files=evidence_files,
+            )
         except Exception as error:
             # SSH readiness, controller networking, local staging, model pulls,
             # and Kubernetes bootstrap errors are unresolved diagnoses.  They

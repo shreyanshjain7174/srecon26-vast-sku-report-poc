@@ -16,7 +16,9 @@ from srecon26_poc.live_factory import (
     GitHubGuardConfig,
     GitHubGuardTransport,
     LiveFactoryError,
+    ProviderStartupFault,
     SshRemoteWorkload,
+    StartupStatusObservation,
     VastSshResolver,
     _load_report_gate,
 )
@@ -430,6 +432,160 @@ def test_ssh_resolver_waits_for_running_even_when_endpoint_is_published(tmp_path
 
     assert endpoint.host == "203.0.113.8"
     assert [json.loads(line)["actual_status"] for line in log.read_text().splitlines()] == ["loading", "running"]
+
+
+def test_ssh_resolver_emits_typed_host_fault_only_after_all_exact_startup_reads(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    statuses = iter(("created", "loading", "starting"))
+
+    def runner(_arguments, *, timeout: int) -> str:
+        del timeout
+        return json.dumps(
+            {
+                "id": 417,
+                "label": LABEL,
+                "actual_status": next(statuses),
+                "ssh_host": "proxy.example.test",
+                "ssh_port": 2222,
+            }
+        )
+
+    with pytest.raises(ProviderStartupFault) as raised:
+        VastSshResolver("vastai", runner=runner, attempts=3, interval_seconds=0).resolve(
+            instance,
+            status_log=tmp_path / "status.ndjson",
+        )
+
+    observations = raised.value.observations
+    assert [item.actual_status for item in observations] == ["created", "loading", "starting"]
+    assert all(item.endpoint_published for item in observations)
+    assert all(item.selected_ssh_route == "proxy" for item in observations)
+
+
+@pytest.mark.parametrize(
+    "records",
+    (
+        (
+            {"id": 417, "label": LABEL, "actual_status": "loading", "ssh_host": "proxy.example.test", "ssh_port": 2222},
+            LiveFactoryError("provider lookup unavailable"),
+        ),
+        (
+            {"id": 417, "label": LABEL, "actual_status": "loading"},
+            {"id": 417, "label": LABEL, "actual_status": "loading"},
+        ),
+        (
+            {"id": 417, "label": LABEL, "actual_status": "running"},
+            {"id": 417, "label": LABEL, "actual_status": "loading", "ssh_host": "proxy.example.test", "ssh_port": 2222},
+        ),
+        (
+            {"id": 417, "label": LABEL, "actual_status": "queued", "ssh_host": "proxy.example.test", "ssh_port": 2222},
+            {"id": 417, "label": LABEL, "actual_status": "loading", "ssh_host": "proxy.example.test", "ssh_port": 2222},
+        ),
+    ),
+)
+def test_ssh_resolver_never_classifies_incomplete_or_nonstartup_observations_as_host_fault(records: tuple[object, ...]) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    responses = iter(records)
+
+    def runner(_arguments, *, timeout: int) -> str:
+        del timeout
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return json.dumps(response)
+
+    with pytest.raises(LiveFactoryError) as raised:
+        VastSshResolver("vastai", runner=runner, attempts=2, interval_seconds=0).resolve(instance)
+    assert not isinstance(raised.value, ProviderStartupFault)
+
+
+def test_ssh_resolver_keeps_startup_failure_unresolved_when_report_reserve_cannot_fit() -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    calls: list[list[str]] = []
+
+    def runner(arguments, *, timeout: int) -> str:
+        del timeout
+        calls.append(list(arguments))
+        return json.dumps({"id": 417, "label": LABEL, "actual_status": "loading", "ssh_host": "proxy.example.test", "ssh_port": 2222})
+
+    with pytest.raises(LiveFactoryError) as raised:
+        VastSshResolver("vastai", runner=runner).resolve(
+            instance,
+            hard_deadline=datetime.now(UTC) + REPORT_MARGIN + timedelta(seconds=100),
+        )
+    assert not isinstance(raised.value, ProviderStartupFault)
+    assert calls == []
+
+
+def test_remote_workload_returns_reportable_host_fault_with_immutable_exact_target_artifact(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    fault = ProviderStartupFault(
+        (
+            StartupStatusObservation(1, "created", True, "proxy", "2026-09-23T04:00:00Z"),
+            StartupStatusObservation(2, "loading", True, "proxy", "2026-09-23T04:00:01Z"),
+        )
+    )
+
+    class Resolver:
+        def attach_public_key(self, *_args, **_kwargs) -> None:
+            return None
+
+        def resolve(self, *_args, **_kwargs) -> SshEndpoint:
+            raise fault
+
+    remote = object.__new__(SshRemoteWorkload)
+    remote.resolver = Resolver()
+    remote.config = types.SimpleNamespace(public_key_file=tmp_path / "id_rsa.pub")
+    run_directory = tmp_path / "run-1"
+    observed = remote.run(
+        stage="gpu-smoke",
+        workload=WorkloadContract(FROZEN_MODEL_ID, FROZEN_MODEL_REVISION, VLLM_IMAGE_DIGEST),
+        instance=instance,
+        run_directory=run_directory,
+        hard_deadline=datetime.now(UTC) + timedelta(minutes=20),
+        heartbeat=lambda: None,
+    )
+
+    assert observed.provider_fault is not None
+    assert observed.provider_fault.category == "host"
+    artifact = observed.provider_fault.artifact
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert (payload["run_id"], payload["instance_id"], payload["label"]) == ("run-1", 417, LABEL)
+    assert payload["confirmed"]["all_bounded_provider_reads_succeeded"] is True
+    assert payload["confirmed"]["desktop_report_reserve_seconds"] == 90
+    with pytest.raises(LiveFactoryError, match="already exists"):
+        remote._write_startup_fault_evidence(
+            artifact.parent,
+            run_id="run-1",
+            instance=instance,
+            fault=fault,
+        )
+
+
+def test_remote_workload_does_not_report_generic_ssh_or_auth_errors(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+
+    class Resolver:
+        def attach_public_key(self, *_args, **_kwargs) -> None:
+            return None
+
+        def resolve(self, *_args, **_kwargs) -> SshEndpoint:
+            raise LiveFactoryError("SSH authentication failed")
+
+    remote = object.__new__(SshRemoteWorkload)
+    remote.resolver = Resolver()
+    remote.config = types.SimpleNamespace(public_key_file=tmp_path / "id_rsa.pub")
+    observed = remote.run(
+        stage="gpu-smoke",
+        workload=WorkloadContract(FROZEN_MODEL_ID, FROZEN_MODEL_REVISION, VLLM_IMAGE_DIGEST),
+        instance=instance,
+        run_directory=tmp_path / "run-2",
+        hard_deadline=datetime.now(UTC) + timedelta(minutes=20),
+        heartbeat=lambda: None,
+    )
+
+    assert observed.provider_fault is None
+    assert (tmp_path / "run-2" / "remote-transport" / "failure.txt").read_text(encoding="utf-8") == "SSH authentication failed\n"
 
 
 def test_ssh_resolver_attaches_public_key_only_after_exact_ownership_check(tmp_path: Path) -> None:
