@@ -21,6 +21,7 @@ def test_vllm_requests_exactly_one_gpu_and_is_cluster_local() -> None:
     assert "type: ClusterIP" in manifest
     assert "kind: NetworkPolicy" in manifest
     assert "--revision" in manifest
+    assert 'srecon26.io/vllm-gpu: "true"' in manifest
 
 
 def test_metric_path_exposes_queue_and_kv_to_an_autoscaling_v2_hpa() -> None:

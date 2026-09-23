@@ -38,12 +38,20 @@ readonly DEFAULT_HARD_DEADLINE_MARGIN_SECONDS=420
 
 usage() {
   cat <<'USAGE'
-Usage: remote_host_canary.sh <probe|install|deploy|collect|cleanup|inference-smoke>
+Usage: remote_host_canary.sh <probe|install|install-tunnel|install-agent|deploy|collect|cleanup|inference-smoke>
 
 This program is inert until one of the listed subcommands is supplied.
 
 Required for probe/collect: CANARY_EVIDENCE_DIR (absolute, empty or new dir)
 Required for install: K3S_BINARY_PATH (pre-staged local amd64 binary)
+Required for install-agent: K3S_BINARY_PATH, NVIDIA_RUNTIME_TEMPLATE,
+  CANARY_K3S_SERVER_URL (https URL on port 6443), and CANARY_K3S_TOKEN_FILE
+  (pre-staged local mode-0600 token file).  The token stays in that file and
+  is never passed in arguments, environment evidence, or logs.
+Required for install-tunnel: CANARY_K3S_TUNNEL_HOST, CANARY_K3S_TUNNEL_PORT,
+  CANARY_K3S_TUNNEL_USER, CANARY_K3S_TUNNEL_IDENTITY_FILE, and
+  CANARY_K3S_TUNNEL_KNOWN_HOSTS.  It exposes server API only on worker
+  loopback through a pinned-host-key SSH tunnel.
 Required for deploy/cleanup: CANARY_EVIDENCE_DIR, CANARY_MANIFEST_DIR,
   CANARY_MANIFEST_SHA256.  Deploy additionally needs CANARY_VLLM_IMAGE,
   CANARY_MODEL, CANARY_MODEL_REVISION, and CANARY_HARD_DEADLINE (an RFC3339
@@ -336,6 +344,8 @@ bind-address: "127.0.0.1"
 disable:
   - servicelb
   - traefik
+node-label:
+  - "srecon26.io/vllm-gpu=true"
 CONFIG
   cat >/etc/systemd/system/k3s.service <<'UNIT'
 [Unit]
@@ -366,6 +376,128 @@ UNIT
   wait_seconds="$(bounded_wait_seconds)"
   timeout --foreground "$wait_seconds" bash -c 'until /usr/local/bin/k3s kubectl get nodes >/dev/null 2>&1; do sleep 2; done' \
     || die "k3s did not become ready within bounded wait"
+}
+
+install_k3s_tunnel() {
+  require_root
+  require_command install
+  require_command systemctl
+  require_command stat
+  require_command ssh
+  require_command ssh-keygen
+  local host="${CANARY_K3S_TUNNEL_HOST:-}"
+  [[ "$host" =~ ^[A-Za-z0-9.-]+$ && "$host" != "localhost" ]] || die "CANARY_K3S_TUNNEL_HOST must be a safe hostname or IP address"
+  local port="${CANARY_K3S_TUNNEL_PORT:-}"
+  [[ "$port" =~ ^[0-9]+$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )) || die "CANARY_K3S_TUNNEL_PORT must be a TCP port"
+  local user="${CANARY_K3S_TUNNEL_USER:-}"
+  [[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "CANARY_K3S_TUNNEL_USER is invalid"
+  local identity_file="${CANARY_K3S_TUNNEL_IDENTITY_FILE:-}"
+  [[ "$identity_file" == /* && -f "$identity_file" && ! -L "$identity_file" ]] || die "CANARY_K3S_TUNNEL_IDENTITY_FILE must name a regular local file"
+  [[ "$(stat -c '%a' -- "$identity_file")" == "600" ]] || die "CANARY_K3S_TUNNEL_IDENTITY_FILE must have mode 0600"
+  local known_hosts="${CANARY_K3S_TUNNEL_KNOWN_HOSTS:-}"
+  [[ "$known_hosts" == /* && -f "$known_hosts" && ! -L "$known_hosts" ]] || die "CANARY_K3S_TUNNEL_KNOWN_HOSTS must name a regular local file"
+  [[ -s "$known_hosts" ]] || die "CANARY_K3S_TUNNEL_KNOWN_HOSTS must not be empty"
+  ssh-keygen -F "[$host]:$port" -f "$known_hosts" >/dev/null || die "CANARY_K3S_TUNNEL_KNOWN_HOSTS lacks exact host fingerprint"
+
+  install -d -m 0700 /etc/srecon26-k3s
+  install -m 0600 -- "$identity_file" /etc/srecon26-k3s/server-bridge.key
+  install -m 0600 -- "$known_hosts" /etc/srecon26-k3s/server-known-hosts
+  cat >/etc/systemd/system/srecon26-k3s-tunnel.service <<UNIT
+[Unit]
+Description=Private SRECon26 k3s API tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/srecon26-k3s/server-known-hosts -o GlobalKnownHostsFile=/dev/null -i /etc/srecon26-k3s/server-bridge.key -p ${port} -L 127.0.0.1:6443:127.0.0.1:6443 ${user}@${host}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now srecon26-k3s-tunnel.service
+  local wait_seconds
+  wait_seconds="$(bounded_wait_seconds)"
+  timeout --foreground "$wait_seconds" bash -c 'until systemctl is-active --quiet srecon26-k3s-tunnel.service; do sleep 2; done' \
+    || die "k3s API tunnel did not become active within bounded wait"
+}
+
+install_k3s_agent() {
+  require_root
+  require_command install
+  require_command ln
+  require_command systemctl
+  require_command nvidia-container-runtime
+  require_command stat
+  require_command chown
+  verify_k3s_binary
+
+  local runtime_template="${NVIDIA_RUNTIME_TEMPLATE:-}"
+  [[ -n "$runtime_template" && -f "$runtime_template" && ! -L "$runtime_template" ]] || die "NVIDIA_RUNTIME_TEMPLATE must be a regular local file"
+  grep -q 'runtimes.nvidia' "$runtime_template" || die "NVIDIA_RUNTIME_TEMPLATE does not configure the NVIDIA runtime"
+
+  local server_url="${CANARY_K3S_SERVER_URL:-}"
+  [[ "$server_url" =~ ^https://[A-Za-z0-9.-]+:6443$ ]] || die "CANARY_K3S_SERVER_URL must be an HTTPS host URL on port 6443"
+  local run_root="${CANARY_K3S_RUN_ROOT:-}"
+  [[ "$run_root" == /* && -d "$run_root" && ! -L "$run_root" ]] || die "CANARY_K3S_RUN_ROOT must be an absolute non-symlink directory"
+  [[ "$(stat -c '%a:%u:%g' -- "$run_root")" == "700:0:0" ]] || die "CANARY_K3S_RUN_ROOT must be root-owned mode 0700"
+  local token_file="${CANARY_K3S_TOKEN_FILE:-}"
+  [[ "$token_file" == /* && -f "$token_file" && ! -L "$token_file" ]] || die "CANARY_K3S_TOKEN_FILE must name a regular local file"
+  [[ "$(stat -c '%a' -- "$token_file")" == "600" ]] || die "CANARY_K3S_TOKEN_FILE must have mode 0600"
+  [[ "$(stat -c '%u:%g' -- "$token_file")" == "0:0" ]] || die "CANARY_K3S_TOKEN_FILE must be root-owned"
+  [[ "$token_file" == "$run_root"/* ]] || die "CANARY_K3S_TOKEN_FILE must be inside CANARY_K3S_RUN_ROOT"
+  [[ -s "$token_file" && "$(stat -c '%s' -- "$token_file")" -le 4096 ]] || die "CANARY_K3S_TOKEN_FILE must not be empty or exceed 4096 bytes"
+  if systemctl is-active --quiet k3s.service || systemctl is-active --quiet k3s-agent.service || [[ -e /var/lib/rancher/k3s || -e /etc/rancher/k3s/config.yaml ]]; then
+    die "existing k3s state is present; refusing to adopt a node"
+  fi
+
+  install -D -m 0755 -- "$K3S_BINARY_PATH" /usr/local/bin/k3s
+  local actual_version
+  actual_version="$(/usr/local/bin/k3s --version | awk 'NR == 1 {print $3}')"
+  [[ "$actual_version" == "$K3S_VERSION" ]] || die "pre-staged k3s binary version does not match $K3S_VERSION"
+  ln -sfn /usr/local/bin/k3s /usr/local/bin/kubectl
+  install -D -m 0644 -- "$runtime_template" /etc/rancher/k3s/containerd/config.toml.tmpl
+  install -d -m 0755 /etc/rancher/k3s
+  cat >/etc/rancher/k3s/config.yaml <<CONFIG
+server: "${server_url}"
+token-file: "${token_file}"
+node-label:
+  - "srecon26.io/vllm-gpu=true"
+CONFIG
+  chown root:root /etc/rancher/k3s/config.yaml
+  chmod 0600 /etc/rancher/k3s/config.yaml
+  cat >/etc/systemd/system/k3s-agent.service <<'UNIT'
+[Unit]
+Description=Bounded SRECon26 k3s GPU worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/k3s agent
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=120
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now k3s-agent.service
+  local wait_seconds
+  wait_seconds="$(bounded_wait_seconds)"
+  timeout --foreground "$wait_seconds" bash -c 'until systemctl is-active --quiet k3s-agent.service; do sleep 2; done' \
+    || die "k3s agent did not become active within bounded wait"
 }
 
 manifest_hash() {
@@ -802,7 +934,7 @@ run_inference_stream_request() {
     || { jq -n --arg request "$label" --arg status "MISSING_STREAM_USAGE" '{request: $request, status: $status}' >"$timing"; return 1; }
   stream_model="$(sed -n 's/^data: //p' "$body" | sed '/^\[DONE\]$/d' | jq -res 'map(select(.model? != null) | .model) | last // empty')" \
     || { jq -n --arg request "$label" --arg status "MISSING_STREAM_MODEL" '{request: $request, status: $status}' >"$timing"; return 1; }
-  jq -e --slurpfile raw "$raw_timing" --argjson usage "$usage" --arg requested_model "$CANARY_MODEL" --arg response_model "$stream_model" '
+  jq -n -e --slurpfile raw "$raw_timing" --argjson usage "$usage" --arg requested_model "$CANARY_MODEL" --arg response_model "$stream_model" '
     ($raw[0] + {status: "PASSED", model: $requested_model, response_model: $response_model, usage: $usage})
     | .prompt_tokens = ($usage.prompt_tokens // null)
     | .completion_tokens = ($usage.completion_tokens // null)
@@ -1049,6 +1181,8 @@ main() {
   case "$1" in
     probe) probe_host ;;
     install) install_k3s ;;
+    install-tunnel) install_k3s_tunnel ;;
+    install-agent) install_k3s_agent ;;
     deploy) deploy_canary ;;
     collect) collect_evidence ;;
     cleanup) cleanup_canary ;;

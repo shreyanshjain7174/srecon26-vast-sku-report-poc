@@ -32,8 +32,8 @@ def test_remote_host_script_is_syntax_valid_and_inert_without_an_explicit_subcom
 def test_only_explicit_lifecycle_subcommands_are_exposed() -> None:
     script = _script()
 
-    assert "<probe|install|deploy|collect|cleanup|inference-smoke>" in script
-    for command in ("probe", "install", "deploy", "collect", "cleanup", "inference-smoke"):
+    assert "<probe|install|install-tunnel|install-agent|deploy|collect|cleanup|inference-smoke>" in script
+    for command in ("probe", "install", "install-tunnel", "install-agent", "deploy", "collect", "cleanup", "inference-smoke"):
         assert f"{command})" in script
     assert "*) usage >&2; exit 64" in script
 
@@ -68,6 +68,39 @@ def test_k3s_install_is_a_pinned_local_binary_install_not_a_network_pipe() -> No
     assert "K3S_BINARY_PATH must name a regular, pre-staged local file" in script
 
 
+def test_k3s_agent_install_requires_a_local_token_file_and_never_prints_it() -> None:
+    script = _script()
+
+    assert "install_k3s_agent()" in script
+    assert "CANARY_K3S_SERVER_URL must be an HTTPS host URL on port 6443" in script
+    assert "CANARY_K3S_TOKEN_FILE must name a regular local file" in script
+    assert "CANARY_K3S_TOKEN_FILE must have mode 0600" in script
+    assert "CANARY_K3S_TOKEN_FILE must be root-owned" in script
+    assert "CANARY_K3S_TOKEN_FILE must be inside CANARY_K3S_RUN_ROOT" in script
+    assert "CANARY_K3S_TOKEN_FILE must not be empty or exceed 4096 bytes" in script
+    assert "existing k3s state is present; refusing to adopt a node" in script
+    assert 'token-file: "${token_file}"' in script
+    assert "install-agent) install_k3s_agent" in script
+    agent_start = script.index("install_k3s_agent()")
+    agent_end = script.index("\nmanifest_hash()", agent_start)
+    agent = script[agent_start:agent_end]
+    assert 'cat "$token_file"' not in agent
+    assert 'printf.*token' not in agent
+
+
+def test_k3s_worker_tunnel_keeps_cluster_api_private_and_pins_ssh_host_key() -> None:
+    script = _script()
+
+    assert "install_k3s_tunnel()" in script
+    assert "CANARY_K3S_TUNNEL_HOST must be a safe hostname or IP address" in script
+    assert "CANARY_K3S_TUNNEL_IDENTITY_FILE must have mode 0600" in script
+    assert "StrictHostKeyChecking=yes" in script
+    assert "UserKnownHostsFile=" in script
+    assert 'ssh-keygen -F "[$host]:$port"' in script
+    assert "-L 127.0.0.1:6443:127.0.0.1:6443" in script
+    assert "install-tunnel) install_k3s_tunnel" in script
+
+
 def test_deploy_rejects_tag_only_images_and_requires_a_checksumbound_bundle() -> None:
     script = _script()
 
@@ -91,6 +124,10 @@ def test_all_waits_are_bounded_and_services_stay_cluster_or_local_only() -> None
     assert "a non-SSH wildcard listener is present; refusing deploy" in script
     assert "ufw allow" not in script
     assert "iptables -A" not in script
+
+
+def test_each_gpu_node_is_explicitly_labelled_for_two_node_vllm_scheduling() -> None:
+    assert '"srecon26.io/vllm-gpu=true"' in _script()
 
 
 def test_evidence_contract_captures_every_required_observation_layer_without_secret_dump() -> None:
