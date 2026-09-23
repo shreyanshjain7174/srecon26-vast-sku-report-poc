@@ -135,8 +135,9 @@ def test_direct_inference_smoke_allows_three_bounded_reservations(tmp_path):
         "inference-attempt-2",
         "inference-attempt-3",
     )
-    with pytest.raises(BudgetExceeded, match="at most three reservation attempts"):
-        ledger.reserve("inference-attempt-4", Decimal("0.01"), "gpu-inference-smoke")
+    ledger.reserve("inference-attempt-4", Decimal("0.50"), "gpu-inference-smoke")
+    with pytest.raises(BudgetExceeded, match="at most four reservation attempts"):
+        ledger.reserve("inference-attempt-5", Decimal("0.01"), "gpu-inference-smoke")
 
 
 def test_direct_inference_smoke_rejects_a_reservation_over_fifty_cents(tmp_path):

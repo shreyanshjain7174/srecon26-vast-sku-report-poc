@@ -15,9 +15,11 @@ from .journal import InvalidJournal, RunJournal
 MAX_EXPOSURE = Decimal("5.00")
 CATEGORY_CAPS = {
     "gpu-smoke": Decimal("1.00"),
-    # Up to three separately bounded direct-inference attempts.  This is not
+    # Up to four separately bounded direct-inference attempts.  The fourth is
+    # reserved for a contract correction proven by retained live evidence.
+    # This is not
     # a retry of (or prerequisite for) the KVM smoke entitlement.
-    "gpu-inference-smoke": Decimal("2.25"),
+    "gpu-inference-smoke": Decimal("3.00"),
     # One durable retry entitlement while exactly one original smoke invoice
     # remains pending.  It cannot be split across multiple retry reservations.
     "gpu-smoke-retry": Decimal("0.90"),
@@ -252,8 +254,8 @@ class ExposureLedger:
                     raise BudgetExceeded("distinct-machine smoke requires one pending original, one settled retry, and one unused entitlement")
             if category == "gpu-inference-smoke":
                 inference_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
-                if len(inference_smokes) >= 3:
-                    raise BudgetExceeded("direct inference smoke allows at most three reservation attempts")
+                if len(inference_smokes) >= 4:
+                    raise BudgetExceeded("direct inference smoke allows at most four reservation attempts")
                 if amount > Decimal("0.75"):
                     raise BudgetExceeded("direct inference smoke reservation must be no greater than 0.75")
                 if machine_id is not None and any(entry.get("machine_id") == machine_id for entry in inference_smokes):

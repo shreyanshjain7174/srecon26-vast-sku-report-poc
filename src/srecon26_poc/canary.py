@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 
-VLLM_IMAGE_DIGEST = "sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b"
+VLLM_IMAGE_DIGEST = "sha256:df2607b26bdda2875de4832f4d08da0055b4b6e3570347f3a849bcc652771dd6"
 MAX_DIGEST_AGE = timedelta(minutes=5)
 MAX_METRIC_AGE = timedelta(seconds=60)
 

@@ -26,6 +26,14 @@ performance claim.
   strict for an unmodified provider image. The corrected gate records the
   before/after listener sets and rejects only a newly introduced wildcard
   listener; the vLLM port remains independently required to bind to loopback.
+- The original pinned vLLM digest required CUDA 13.0 and failed its NVIDIA
+  prestart hook on the rented driver before model startup. The corrected
+  contract pins the official amd64 v0.10.2 digest, whose image requirement is
+  CUDA 12.8, and records that compatibility choice as part of the experiment.
+  The retained third-attempt evidence identifies RTX 4090 machine `67809`,
+  driver `575.51.03`, host CUDA `12.9`, and the exact rejected `cuda>=13.0`
+  container requirement. That is an experiment-design correction, not a Vast
+  provider report.
 
 ## Current experiment design
 

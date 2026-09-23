@@ -84,7 +84,8 @@ yet been live-validated.
 The workload contract is equally frozen and explicit: model
 `Qwen/Qwen2.5-1.5B-Instruct`, revision
 `989aa7980e4cf806f80c7fef2b1adb7bc71aa306`, and the revalidated amd64 vLLM
-digest `sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b`.
+amd64 v0.10.2 digest
+`sha256:df2607b26bdda2875de4832f4d08da0055b4b6e3570347f3a849bcc652771dd6`.
 The remote executor must report all three values back from the running VM;
 missing or different values produce a limitation bundle, never real-GPU
 provenance.

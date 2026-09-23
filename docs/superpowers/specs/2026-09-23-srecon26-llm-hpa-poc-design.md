@@ -46,7 +46,7 @@ The new project will selectively port tested safety and fixture logic from the r
 
 ```text
 docker.io/vllm/vllm-openai:v0.26.0
-sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b
+sha256:df2607b26bdda2875de4832f4d08da0055b4b6e3570347f3a849bcc652771dd6
 ```
 
 This image must still be revalidated before every paid run.

@@ -16,7 +16,7 @@ def test_every_container_image_is_pinned_to_a_sha256_digest() -> None:
 
 def test_vllm_requests_exactly_one_gpu_and_is_cluster_local() -> None:
     manifest = (K3S / "vllm.yaml").read_text()
-    assert "docker.io/vllm/vllm-openai@sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b" in manifest
+    assert "docker.io/vllm/vllm-openai@sha256:df2607b26bdda2875de4832f4d08da0055b4b6e3570347f3a849bcc652771dd6" in manifest
     assert manifest.count("nvidia.com/gpu: \"1\"") == 2
     assert "type: ClusterIP" in manifest
     assert "kind: NetworkPolicy" in manifest
