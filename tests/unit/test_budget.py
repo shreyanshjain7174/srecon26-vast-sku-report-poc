@@ -283,8 +283,19 @@ def test_sixth_inference_reservation_requires_exact_pinned_measurement_retry(tmp
         template_hash="b7942f6bbc4374893ff66eb78145bbac",
         image_contract="docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16",
     )
-    with pytest.raises(BudgetExceeded, match="at most twelve reservations"):
+    with pytest.raises(BudgetExceeded, match="settled benign price-decrease evidence"):
         ledger.reserve("inference-attempt-13", Decimal("0.01"), "gpu-inference-smoke", machine_id=145350)
+    monkeypatch.setattr(ExposureLedger, "_has_settled_benign_price_decrease", lambda self, reservations: True)
+    ledger.reserve(
+        "inference-attempt-13",
+        Decimal("0.01"),
+        "gpu-inference-smoke",
+        machine_id=145350,
+        template_hash="b7942f6bbc4374893ff66eb78145bbac",
+        image_contract="docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16",
+    )
+    with pytest.raises(BudgetExceeded, match="at most thirteen reservations"):
+        ledger.reserve("inference-attempt-14", Decimal("0.01"), "gpu-inference-smoke", machine_id=145351)
 
 
 def test_reservation_rejection_entitlement_validates_bound_artifacts_and_fails_closed(tmp_path, monkeypatch):

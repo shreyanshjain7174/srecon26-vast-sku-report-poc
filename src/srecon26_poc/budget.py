@@ -19,7 +19,7 @@ CATEGORY_CAPS = {
     # reserved for a contract correction proven by retained live evidence.
     # This is not
     # a retry of (or prerequisite for) the KVM smoke entitlement.
-    "gpu-inference-smoke": Decimal("4.40"),
+    "gpu-inference-smoke": Decimal("4.41"),
     # One durable retry entitlement while exactly one original smoke invoice
     # remains pending.  It cannot be split across multiple retry reservations.
     "gpu-smoke-retry": Decimal("0.90"),
@@ -61,6 +61,10 @@ INFERENCE_RESERVATION_REJECTION_RUN_ID = "inference-infer20260923182103"
 INFERENCE_RESERVATION_REJECTION_JOURNAL_SHA256 = "f235d618103c257bff82a58b9341c60c3e08e539e88522ce2e5a45c091b6b729"
 INFERENCE_RESERVATION_REJECTION_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "inference-infer20260923182103-reservation-rejection-retry-entitlement.json"
 INFERENCE_RESERVATION_REJECTION_EVIDENCE_SHA256 = "352df74268dfa9e4ca32c3c7a02a8bf92d6cd22c85d256da6646fb68ea4203b9"
+INFERENCE_BENIGN_PRICE_DECREASE_RUN_ID = "inference-infer20260923183505"
+INFERENCE_BENIGN_PRICE_DECREASE_JOURNAL_SHA256 = "2e5fd586ed6b79b9cc1611e369cab0f4bd526fea6c146d3ce9b423e8c9aeab9d"
+INFERENCE_BENIGN_PRICE_DECREASE_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "inference-infer20260923183505-benign-price-decrease-retry-entitlement.json"
+INFERENCE_BENIGN_PRICE_DECREASE_EVIDENCE_SHA256 = "92f5243749fc2361339bda33867463464fe8d87a792e63fc3d8c7d5fd5560b37"
 
 
 class BudgetExceeded(ValueError):
@@ -604,6 +608,63 @@ class ExposureLedger:
             )
         )
 
+    def _has_settled_benign_price_decrease(self, reservations: Mapping[str, object]) -> bool:
+        entry = reservations.get(INFERENCE_BENIGN_PRICE_DECREASE_RUN_ID)
+        proof = entry.get("absence_proof") if isinstance(entry, Mapping) else None
+        if (
+            not isinstance(entry, Mapping)
+            or entry.get("category") != "gpu-inference-smoke"
+            or self._decimal(entry.get("actual")) != Decimal("0.002")
+            or entry.get("machine_id") != 15881
+            or entry.get("template_hash") != PRIMARY_TEMPLATE_HASH
+            or entry.get("image_contract") != PRIMARY_TEMPLATE_IMAGE
+            or not isinstance(proof, Mapping)
+            or proof.get("reads") != 3
+        ):
+            return False
+        run_path = self.path.parent / INFERENCE_BENIGN_PRICE_DECREASE_RUN_ID
+        try:
+            journal_raw = (run_path / "journal" / "journal.ndjson").read_bytes()
+            if hashlib.sha256(journal_raw).hexdigest() != INFERENCE_BENIGN_PRICE_DECREASE_JOURNAL_SHA256:
+                return False
+            journal = RunJournal.open(run_path / "journal")
+            evidence_raw = INFERENCE_BENIGN_PRICE_DECREASE_EVIDENCE_PATH.read_bytes()
+            if hashlib.sha256(evidence_raw).hexdigest() != INFERENCE_BENIGN_PRICE_DECREASE_EVIDENCE_SHA256:
+                return False
+            evidence = json.loads(evidence_raw)
+            manifest_raw = (run_path / "run-manifest.json").read_bytes()
+            invoice_raw = (self.path.parent / "invoice-inference-infer20260923183505.json").read_bytes()
+            absence_raw = (self.path.parent / "absence-inference-infer20260923183505.json").read_bytes()
+            anchor_raw = (run_path / "guard-anchor.json").read_bytes()
+        except (OSError, InvalidJournal, json.JSONDecodeError, TypeError):
+            return False
+        events = journal.events()
+        return (
+            journal.state().value == "TERMINAL"
+            and all(event.run_id == INFERENCE_BENIGN_PRICE_DECREASE_RUN_ID for event in events)
+            and len([event for event in events if event.event_type == "provider.create_observed"]) == 1
+            and len([event for event in events if event.event_type == "teardown.exact"]) == 1
+            and len([event for event in events if event.event_type == "absence.proved" and event.payload.get("reads") == 3]) == 1
+            and evidence.get("schema") == "srecon26-inference-benign-price-decrease-retry-entitlement/v1"
+            and evidence.get("run_id") == INFERENCE_BENIGN_PRICE_DECREASE_RUN_ID
+            and evidence.get("journal_sha256") == INFERENCE_BENIGN_PRICE_DECREASE_JOURNAL_SHA256
+            and evidence.get("run_manifest_sha256") == hashlib.sha256(manifest_raw).hexdigest()
+            and evidence.get("invoice_sha256") == hashlib.sha256(invoice_raw).hexdigest()
+            and evidence.get("absence_sha256") == hashlib.sha256(absence_raw).hexdigest()
+            and evidence.get("guard_anchor_sha256") == hashlib.sha256(anchor_raw).hexdigest()
+            and evidence.get("instance_id") == 52278830
+            and evidence.get("machine_id") == 15881
+            and evidence.get("offer_id") == 48116846
+            and evidence.get("provider_report_submitted") is False
+            and self._decimal(evidence.get("observed_instance_dph_total")) < self._decimal(evidence.get("frozen_dph_total"))
+            and evidence.get("observed_instance_status") == "running"
+            and evidence.get("source_command") == ["show", "instances", "--raw"]
+            and evidence.get("provider_create_calls") == 1
+            and evidence.get("provider_destroy_calls") == 1
+            and evidence.get("absence_reads") == 3
+            and evidence.get("actual_usd") == "0.002"
+        )
+
     def reserve(self, run_id: str, amount: Decimal, category: str, *, machine_id: int | None = None, template_hash: str | None = None, image_contract: str | None = None) -> Decimal:
         amount = self._decimal(amount)
         if amount <= 0 or category not in CATEGORY_CAPS:
@@ -644,8 +705,8 @@ class ExposureLedger:
                     raise BudgetExceeded("distinct-machine smoke requires one pending original, one settled retry, and one unused entitlement")
             if category == "gpu-inference-smoke":
                 inference_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
-                if len(inference_smokes) >= 12:
-                    raise BudgetExceeded("direct inference smoke allows at most twelve reservations")
+                if len(inference_smokes) >= 13:
+                    raise BudgetExceeded("direct inference smoke allows at most thirteen reservations")
                 if len(inference_smokes) == 4 and not self._has_pinned_inference_replacement_entitlement(reservations):
                     raise BudgetExceeded("fifth inference reservation requires pinned no-create replacement evidence")
                 if len(inference_smokes) == 5 and not self._has_pinned_measurement_retry_entitlement(reservations):
@@ -677,6 +738,12 @@ class ExposureLedger:
                     or image_contract != PRIMARY_TEMPLATE_IMAGE
                 ):
                     raise BudgetExceeded("twelfth inference reservation requires pinned no-create reservation-rejection evidence and exact primary-template recovery")
+                if len(inference_smokes) == 12 and (
+                    not self._has_settled_benign_price_decrease(reservations)
+                    or template_hash != PRIMARY_TEMPLATE_HASH
+                    or image_contract != PRIMARY_TEMPLATE_IMAGE
+                ):
+                    raise BudgetExceeded("thirteenth inference reservation requires settled benign price-decrease evidence and exact primary-template recovery")
                 if amount > Decimal("1.00"):
                     raise BudgetExceeded("direct inference smoke reservation must be no greater than 1.00")
                 if machine_id is not None and any(entry.get("machine_id") == machine_id for entry in inference_smokes):

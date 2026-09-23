@@ -27,3 +27,8 @@ def test_offer_contract_mismatch_is_provider_fault(field, offer, instance):
 
 def test_model_download_failure_is_unresolved(offer, instance):
     assert classify_fault(offer, instance, ProbeOutcome.MODEL_DOWNLOAD_FAILED) is FaultClass.DIAGNOSIS_UNRESOLVED
+
+
+def test_lower_instance_price_is_not_a_provider_fault(offer, instance):
+    cheaper = replace(instance, dph_total=Decimal("0.20"))
+    assert classify_fault(offer, cheaper, ProbeOutcome.PASS) is FaultClass.DIAGNOSIS_UNRESOLVED
