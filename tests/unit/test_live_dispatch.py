@@ -184,7 +184,7 @@ def _request(tmp_path: Path, now: datetime, *, bad_semgrep: bool = False) -> tup
 def _dispatcher(tmp_path: Path, request: LiveCanaryRequest, offer: OfferContract, *, complete: bool = True, ambiguous: bool = False, mismatch: bool = False, remote_fault: bool = False):
     events: list[str] = []
     provider = Provider(offer, events, ambiguous=ambiguous, mismatch=mismatch)
-    dispatcher = LiveCanaryDispatcher(provider=provider, guard=Guard(request.nonce, events), report_gate=ReportGate(Reporter(events)), workload=Workload(complete=complete, remote_fault=remote_fault), ledger=ExposureLedger(tmp_path / "ledger.json"), output_root=tmp_path / "runs", clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)))
+    dispatcher = LiveCanaryDispatcher(provider=provider, guard=Guard(request.nonce, events), report_gate=ReportGate(Reporter(events)), workload=Workload(complete=complete, remote_fault=remote_fault), ledger=ExposureLedger(tmp_path / "ledger.json"), output_root=tmp_path / "runs", clock=Clock(request.hard_deadline - timedelta(minutes=20) + timedelta(seconds=1)), absence_interval_seconds=0)
     return dispatcher, provider, events
 
 

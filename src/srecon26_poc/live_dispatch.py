@@ -34,6 +34,10 @@ MAX_STAGE_RESERVE = Decimal("1.00")
 PROJECT_CAP = Decimal("5.00")
 REPORT_MARGIN = timedelta(seconds=165)  # report 60s + teardown 60s + absence 45s
 MAX_GATE_AGE = timedelta(minutes=5)
+MAX_STAGE_RUNTIME = timedelta(minutes=45)
+REQUIRED_GPU_NAME = "RTX 3090"
+REQUIRED_GPU_RAM_MIB = 24576
+REQUIRED_COMPUTE_CAPABILITY = "8.6"
 FROZEN_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 FROZEN_MODEL_REVISION = "989aa7980e4cf806f80c7fef2b1adb7bc71aa306"
 
@@ -211,6 +215,8 @@ class LiveCanaryRequest:
             failures.append("reserve must be a positive Decimal no greater than 1.00")
         if self.hard_deadline.tzinfo is None or self.hard_deadline.astimezone(UTC) <= now:
             failures.append("hard deadline must be a future timezone-aware timestamp")
+        elif self.hard_deadline.astimezone(UTC) - now > MAX_STAGE_RUNTIME:
+            failures.append("hard deadline exceeds the 45-minute paid-stage runtime cap")
         if self.report_start_by <= now:
             failures.append("hard deadline leaves no immutable report/teardown margin")
         try:
@@ -298,7 +304,7 @@ def _frozen_offer(payload: Mapping[str, object], *, offer_id: int, label: str) -
     record = matches[0]
     if record.get("vms_enabled") is not True:
         raise LiveDispatchError("frozen offer is not KVM/vms_enabled")
-    return OfferContract(
+    offer = OfferContract(
         offer_id=offer_id,
         gpu_name=str(record.get("gpu_name", "")),
         num_gpus=_to_int(record.get("num_gpus"), "num_gpus"),
@@ -308,6 +314,14 @@ def _frozen_offer(payload: Mapping[str, object], *, offer_id: int, label: str) -
         dph_total=_to_decimal(record.get("dph_total"), "dph_total"),
         label=label,
     )
+    if (
+        offer.gpu_name != REQUIRED_GPU_NAME
+        or offer.num_gpus != 1
+        or offer.gpu_ram_mib != REQUIRED_GPU_RAM_MIB
+        or offer.compute_capability != REQUIRED_COMPUTE_CAPABILITY
+    ):
+        raise LiveDispatchError("frozen offer is not the exact approved single RTX 3090 contract")
+    return offer
 
 
 def _phase1_passed(path: Path) -> bool:
@@ -441,6 +455,8 @@ class LiveCanaryDispatcher:
         ledger: ExposureLedger,
         output_root: Path,
         clock: _Clock | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
+        absence_interval_seconds: float = 5.0,
     ) -> None:
         self.provider = provider
         self.guard = guard
@@ -449,6 +465,10 @@ class LiveCanaryDispatcher:
         self.ledger = ledger
         self.output_root = Path(output_root)
         self.clock = clock or SystemClock()
+        if absence_interval_seconds < 0 or absence_interval_seconds > 15:
+            raise ValueError("absence interval must be between 0 and 15 seconds")
+        self.sleeper = sleeper
+        self.absence_interval_seconds = absence_interval_seconds
 
     def _manifest(self, request: LiveCanaryRequest, *, status: str, limitation: str | None, provider_create_calls: int, provider_destroy_calls: int, absence_reads: int, provenance: str, real_gpu_claim: bool, gate_hashes: Mapping[str, str] | None = None, offer: OfferContract | None = None, report: Mapping[str, object] | None = None, guard_root: str | None = None, evidence_blockers: tuple[str, ...] = ()) -> Path:
         run_directory = self.output_root / request.run_id
@@ -501,12 +521,16 @@ class LiveCanaryDispatcher:
         # time is strictly increasing in practice; test clocks supply it.
         journal.append(state, event, dict(payload), self.clock.now(), self.clock.monotonic_ns())
 
-    def _prove_absent(self, instance_id: int, label: str) -> int:
-        for _ in range(3):
+    def _prove_absent(self, instance_id: int, label: str) -> tuple[str, ...]:
+        reads: list[str] = []
+        for index in range(3):
             remaining = self.provider.list_instances()
             if any(item.instance_id == instance_id or item.label == label for item in remaining):
                 raise LiveDispatchError("instance remains present during three-read absence proof")
-        return 3
+            reads.append(_stamp(self.clock.now()))
+            if index < 2 and self.absence_interval_seconds:
+                self.sleeper(self.absence_interval_seconds)
+        return tuple(reads)
 
     def run(self, request: LiveCanaryRequest) -> LiveDispatchResult:
         now = self.clock.now()
@@ -534,6 +558,7 @@ class LiveCanaryDispatcher:
 
         instance: InstanceContract | None = None
         creates = destroys = absence_reads = 0
+        absence_timestamps: tuple[str, ...] = ()
         report_data: dict[str, object] = {"attempted": False, "confirmed": False}
         limitation: str | None = None
         status = "FAILED_SAFE"
@@ -555,6 +580,13 @@ class LiveCanaryDispatcher:
             if attestation.nonce != request.nonce or attestation.hard_deadline.astimezone(UTC) != request.hard_deadline.astimezone(UTC):
                 raise LiveDispatchError("live guard arm receipt does not bind exact nonce and immutable deadline")
             self._append(journal, RunState.GUARD_ARMED, "guard.armed", {"hard_deadline": _stamp(request.hard_deadline), "report_start_by": _stamp(request.report_start_by), "host_identity": attestation.host_identity})
+
+            if self.clock.now() >= request.report_start_by:
+                raise LiveDispatchError("guard setup consumed the paid-stage execution window")
+
+            worst_case = (current_offer.dph_total * Decimal(str(MAX_STAGE_RUNTIME.total_seconds())) / Decimal("3600")).quantize(Decimal("0.000001"))
+            if worst_case > request.reserve:
+                raise LiveDispatchError("frozen offer can exceed the stage reservation before the hard deadline")
 
             # Exactly one provider create can occur.  Any transport uncertainty
             # is reconciled only by this run's unique nonce-bound label.
@@ -609,8 +641,9 @@ class LiveCanaryDispatcher:
                         self._append(journal, RunState.DESTROYING, "teardown.exact", {"instance_id": instance.instance_id, "label": instance.label})
                     self.provider.destroy_exact(instance.instance_id, instance.label)
                     destroys += 1
-                    absence_reads = self._prove_absent(instance.instance_id, instance.label)
-                    self._append(journal, RunState.ABSENCE_VERIFYING, "absence.proved", {"reads": absence_reads})
+                    absence_timestamps = self._prove_absent(instance.instance_id, instance.label)
+                    absence_reads = len(absence_timestamps)
+                    self._append(journal, RunState.ABSENCE_VERIFYING, "absence.proved", {"reads": absence_reads, "timestamps": list(absence_timestamps)})
                 except Exception as error:
                     limitation = f"{limitation + '; ' if limitation else ''}teardown/absence failure: {error}"
                     status = "FAILED_SAFE"
@@ -624,7 +657,9 @@ class LiveCanaryDispatcher:
                     limitation = f"{limitation + '; ' if limitation else ''}journal terminal transition failed"
             if reserved and absence_reads == 3:
                 try:
-                    self.ledger.commit_actual(request.run_id, request.reserve, {"reads": 3, "instance_id": instance.instance_id if instance else None})
+                    elapsed_seconds = max(Decimal("0"), Decimal(str((self.clock.now() - identity.created_at).total_seconds())))
+                    estimated_actual = (current_offer.dph_total * elapsed_seconds / Decimal("3600")).quantize(Decimal("0.000001"))
+                    self.ledger.commit_actual(request.run_id, estimated_actual, {"reads": 3, "timestamps": list(absence_timestamps), "instance_id": instance.instance_id if instance else None, "basis": "dph_total_x_elapsed_wall_time"})
                 except (BudgetExceeded, ValueError) as error:
                     limitation = f"{limitation + '; ' if limitation else ''}ledger finalization failure: {error}"
                     status = "FAILED_SAFE"
