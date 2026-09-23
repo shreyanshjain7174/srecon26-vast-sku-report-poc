@@ -94,6 +94,8 @@ def test_workflow_has_restricted_permissions_bounded_job_and_secret_only_credent
     assert '"vastai==1.8.0"' in workflow
     assert 'VAST_BIN="$(realpath "$VAST_VENV/bin/vastai")"' in workflow
     assert 'SRECON26_GUARD_VAST_BIN="$VAST_BIN"' in workflow
+    assert "runner.temp" not in workflow
+    assert "VAST_VENV: /tmp/srecon26-vast-cli" in workflow
 
 
 def test_workflow_preflight_only_mode_is_read_only_and_skips_the_live_watch() -> None:
