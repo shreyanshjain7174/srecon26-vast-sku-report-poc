@@ -74,8 +74,9 @@ instance record supplies `public_ipaddr` plus `ports["22/tcp"][0].HostPort`;
 otherwise it records and uses the exact record's proxy pair. It never combines
 fields across routes or guesses a port. The exact create argument order is
 recorded in unit tests; provider CLI calls use an argument vector, never a
-shell string. A read-only CLI/schema preflight is required again before any
-future paid create because this combination has not been live-validated.
+shell string. The one authorized paid attempt is exhausted. If a later run is
+explicitly re-authorized, a fresh read-only CLI/schema preflight is mandatory
+because this combination has not been live-validated.
 
 The workload contract is equally frozen and explicit: model
 `Qwen/Qwen2.5-1.5B-Instruct`, revision
@@ -87,9 +88,10 @@ provenance.
 
 ## Lifecycle and deadline
 
-Before the sole permitted future create, the orchestrator journals the Decimal
-reservation, exact offer contract, immutable `hard_deadline`, and
-`report_start_by`.  The report start cutoff is:
+For any separately authorized later create, the orchestrator must first journal
+the Decimal reservation, exact offer contract, immutable `hard_deadline`, and
+`report_start_by`. The current project state grants no such authorization. The
+report start cutoff is:
 
 ```
 hard_deadline - 60s report - 60s exact teardown - 45s three-read absence proof
@@ -117,8 +119,9 @@ All other terminal paths are `live-limitation` bundles.
 KVM decision, lifecycle timestamps, cost reservation, diagnosis/report result,
 exact teardown, and absence proof.
 
-`metric-path` is permitted only after finalized smoke in a future paid
-dispatcher.  It additionally requires current node allocatable GPU, ready
+`metric-path` remains an unexecuted protocol, not an authorized next action. If
+a later paid dispatcher is explicitly authorized, it is permitted only after a
+finalized successful smoke. It additionally requires current node allocatable GPU, ready
 NVIDIA device plugin, ready vLLM pod holding exactly one GPU, healthy
 Prometheus target, fresh CPU/queue/KV metrics, one successful warm-up, one
 measured request, resource/custom metrics APIs, HPA state, events, and timing

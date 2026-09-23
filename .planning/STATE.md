@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Final paid canary FAILED_SAFE; evidence-gated deck complete; Google Slides import and real GPU path remain open
-last_updated: "2026-09-23T12:20:00Z"
+stopped_at: Final paid canary FAILED_SAFE; Google Slides authenticated and deck compatibility checked; upload/render QA awaits action-time confirmation
+last_updated: "2026-09-23T12:40:32Z"
 last_activity: 2026-09-23
 progress:
   total_phases: 3
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-09-23)
 ## Current Position
 
 Phase: 3 of 3 (Evidence, Charts, and Deck), with Phase 2 capability proof incomplete
-Plan: evidence verdict, charts, and deck implemented; Google Slides import pending
+Plan: evidence verdict, charts, and deck implemented; authenticated Google Slides import/upload pending
 Status: Partial — local proof and failed-safe lifecycle are valid; live GPU and paired A/B claims are denied
 Last activity: 2026-09-23 — regenerated a claim-gated 16-slide deck after the final paid canary
 
@@ -74,7 +74,7 @@ None yet.
 - Real GPU/CUDA/KVM/vLLM/Prometheus/custom-metrics/HPA request evidence does not exist; the claim remains `EXPLORATORY` and denied.
 - No paired A/B blocks exist; the comparison claim remains `EXPLORATORY` and denied.
 - The existing one-attempt paid-run authorization is exhausted. Do not spend again without a new explicit run scope.
-- Actual Google Slides upload/open/render QA is unavailable in the current authenticated browser tooling and remains the only deck release gate not exercised.
+- Google Slides is authenticated as `007ssancheti@gmail.com`, and the final PPTX passes local OOXML/16:9/16-slide compatibility checks. Uploading it is an external file-transfer action that still needs action-time confirmation; browser render QA remains the only deck release gate not exercised.
 
 ## Deferred Items
 
@@ -85,5 +85,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-09-23T04:30:00Z
-Stopped at: Final paid canary FAILED_SAFE; claim-gated deck built; no further paid attempt authorized
+Stopped at: Final paid canary FAILED_SAFE; claim-gated deck built; Slides upload awaiting action-time confirmation; no further paid attempt authorized
 Resume file: None
