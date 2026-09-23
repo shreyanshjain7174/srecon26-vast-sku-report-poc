@@ -462,6 +462,30 @@ def test_ssh_resolver_emits_typed_host_fault_only_after_all_exact_startup_reads(
     assert all(item.selected_ssh_route == "proxy" for item in observations)
 
 
+def test_ssh_resolver_emits_typed_host_fault_when_exact_startup_enters_terminal_status(tmp_path: Path) -> None:
+    instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
+    statuses = iter(("created", "created", "exited"))
+
+    def runner(_arguments, *, timeout: int) -> str:
+        del timeout
+        return json.dumps({
+            "id": 417,
+            "label": LABEL,
+            "actual_status": next(statuses),
+            "ssh_host": "proxy.example.test",
+            "ssh_port": 2222,
+        })
+
+    with pytest.raises(ProviderStartupFault) as raised:
+        VastSshResolver("vastai", runner=runner, attempts=5, interval_seconds=0).resolve(
+            instance,
+            status_log=tmp_path / "status.ndjson",
+        )
+
+    assert raised.value.terminal_status == "exited"
+    assert [item.actual_status for item in raised.value.observations] == ["created", "created", "exited"]
+
+
 def test_ssh_key_attachment_preserves_reportable_created_startup_observations(tmp_path: Path) -> None:
     instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
     public_key = tmp_path / "id_rsa.pub"
@@ -584,6 +608,7 @@ def test_remote_workload_returns_reportable_host_fault_with_immutable_exact_targ
     payload = json.loads(artifact.read_text(encoding="utf-8"))
     assert (payload["run_id"], payload["instance_id"], payload["label"]) == ("run-1", 417, LABEL)
     assert payload["confirmed"]["all_bounded_provider_reads_succeeded"] is True
+    assert payload["confirmed"]["terminal_status_observed"] is False
     assert payload["confirmed"]["desktop_report_reserve_seconds"] == 90
     with pytest.raises(LiveFactoryError, match="already exists"):
         remote._write_startup_fault_evidence(

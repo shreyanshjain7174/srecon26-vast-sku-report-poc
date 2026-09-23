@@ -367,7 +367,7 @@ class StartupStatusObservation:
 
 
 class ProviderStartupFault(LiveFactoryError):
-    """A bounded set of provider reads proves a host never left startup.
+    """Exact provider reads prove a stuck or terminal startup lifecycle.
 
     This intentionally carries only normalized observations.  It is raised
     only after every configured resolver lookup succeeds, preserves exact
@@ -378,14 +378,26 @@ class ProviderStartupFault(LiveFactoryError):
 
     def __init__(self, observations: tuple[StartupStatusObservation, ...], *, bounded_reads: int | None = None) -> None:
         expected_reads = len(observations) if bounded_reads is None else bounded_reads
+        all_startup = all(item.actual_status in VastSshResolver._STARTUP_STATES for item in observations)
+        terminal_startup = (
+            bool(observations)
+            and observations[-1].actual_status in VastSshResolver._TERMINAL_STATES
+            and all(item.actual_status in VastSshResolver._STARTUP_STATES for item in observations[:-1])
+        )
         if (
             expected_reads <= 0
             or len(observations) != expected_reads
             or any(not item.endpoint_published for item in observations)
-            or any(item.actual_status not in VastSshResolver._STARTUP_STATES for item in observations)
+            or not (all_startup or terminal_startup)
         ):
             raise LiveFactoryError("startup fault evidence is incomplete or not reportable")
-        super().__init__("exact instance remained in provider startup despite a published SSH endpoint")
+        self.terminal_status = observations[-1].actual_status if terminal_startup else None
+        message = (
+            f"exact instance entered terminal provider status during startup: {self.terminal_status}"
+            if self.terminal_status is not None
+            else "exact instance remained in provider startup despite a published SSH endpoint"
+        )
+        super().__init__(message)
         self.observations = observations
         self.bounded_reads = expected_reads
 
@@ -400,6 +412,7 @@ class VastSshResolver:
     # REPORT_MARGIN; reserve a further 90 seconds before that cutoff.
     _STARTUP_REPORT_RESERVE = timedelta(seconds=90)
     _STARTUP_STATES = frozenset({"created", "loading", "starting"})
+    _TERMINAL_STATES = frozenset({"error", "offline", "stopped", "exited"})
 
     def __init__(self, cli_path: Path | str, *, runner: CommandRunner | None = None, attempts: int = 60, interval_seconds: float = 5.0, sleep: Callable[[float], None] = time.sleep) -> None:
         if not 1 <= attempts <= 90 or not 0 <= interval_seconds <= 15:
@@ -488,7 +501,7 @@ class VastSshResolver:
         of manufacturing a reportable diagnosis.
         """
 
-        terminal = {"error", "offline", "stopped", "exited"}
+        terminal = self._TERMINAL_STATES
         observations: list[StartupStatusObservation] = []
         for attempt in range(self.attempts):
             # Do not spend the desktop-report reservation trying one more
@@ -554,6 +567,10 @@ class VastSshResolver:
                         )
                         handle.write(json.dumps(evidence, sort_keys=True) + "\n")
                 if status in terminal:
+                    if all(item.endpoint_published for item in observations) and all(
+                        item.actual_status in self._STARTUP_STATES for item in observations[:-1]
+                    ):
+                        raise ProviderStartupFault(tuple(observations), bounded_reads=len(observations))
                     raise LiveFactoryError(f"exact instance entered terminal provider status: {status}")
                 if status in ready_statuses and (not require_endpoint or selected is not None):
                     return raw, SshEndpoint(*selected) if selected is not None else None
@@ -818,7 +835,8 @@ class SshRemoteWorkload:
                 "exact_instance_and_label_preserved": True,
                 "endpoint_published_on_every_read": True,
                 "no_actual_status_running": True,
-                "only_nonterminal_startup_statuses": True,
+                "only_nonterminal_startup_statuses": fault.terminal_status is None,
+                "terminal_status_observed": fault.terminal_status is not None,
                 "desktop_report_reserve_seconds": int(VastSshResolver._STARTUP_REPORT_RESERVE.total_seconds()),
             },
             "bounded_reads": fault.bounded_reads,
@@ -907,7 +925,7 @@ class SshRemoteWorkload:
                 None,
                 provider_fault=ProviderFaultEvidence(
                     "host",
-                    "exact instance remained in nonterminal provider startup despite a published SSH endpoint",
+                    str(error),
                     artifact,
                 ),
                 probe_outcome=ProbeOutcome.CONTROLLER_FAILED,

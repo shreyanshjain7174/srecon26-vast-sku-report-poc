@@ -233,6 +233,7 @@ class HostStartupFaultWorkload:
                         "endpoint_published_on_every_read": True,
                         "no_actual_status_running": True,
                         "only_nonterminal_startup_statuses": True,
+                        "terminal_status_observed": False,
                         "desktop_report_reserve_seconds": 90,
                     },
                     "bounded_reads": 2,

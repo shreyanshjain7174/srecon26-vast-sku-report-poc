@@ -203,11 +203,15 @@ class ProviderFaultEvidence:
             "exact_instance_and_label_preserved": True,
             "endpoint_published_on_every_read": True,
             "no_actual_status_running": True,
-            "only_nonterminal_startup_statuses": True,
         }
         if not isinstance(confirmed, Mapping) or any(confirmed.get(key) is not value for key, value in expected_confirmations.items()):
             blockers.append("host startup fault confirmation flags are invalid")
-        elif not isinstance(confirmed.get("desktop_report_reserve_seconds"), int) or isinstance(confirmed.get("desktop_report_reserve_seconds"), bool) or confirmed["desktop_report_reserve_seconds"] < 90:
+        elif (
+            confirmed.get("only_nonterminal_startup_statuses") is confirmed.get("terminal_status_observed")
+            or not isinstance(confirmed.get("desktop_report_reserve_seconds"), int)
+            or isinstance(confirmed.get("desktop_report_reserve_seconds"), bool)
+            or confirmed["desktop_report_reserve_seconds"] < 90
+        ):
             blockers.append("host startup fault report reserve is invalid")
         bounded_reads = payload.get("bounded_reads")
         observations = payload.get("observations")
@@ -217,13 +221,15 @@ class ProviderFaultEvidence:
             blockers.append("host startup fault observation count is invalid")
         elif all(isinstance(item, Mapping) for item in observations):
             previous_observed_at: datetime | None = None
+            terminal_mode = isinstance(confirmed, Mapping) and confirmed.get("terminal_status_observed") is True
             for expected_attempt, observation in enumerate(observations, start=1):
                 attempt = observation.get("attempt")
                 if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt != expected_attempt:
                     blockers.append("host startup fault observation sequence is invalid")
                     break
-                if observation.get("actual_status") not in REPORTABLE_STARTUP_STATUSES:
-                    blockers.append("host startup fault contains a non-startup status")
+                allowed_terminal = terminal_mode and expected_attempt == len(observations) and observation.get("actual_status") in {"error", "offline", "stopped", "exited"}
+                if observation.get("actual_status") not in REPORTABLE_STARTUP_STATUSES and not allowed_terminal:
+                    blockers.append("host startup fault contains an invalid lifecycle status")
                     break
                 if observation.get("endpoint_published") is not True or observation.get("selected_ssh_route") not in {"direct", "proxy"}:
                     blockers.append("host startup fault lacks an endpoint on every read")
