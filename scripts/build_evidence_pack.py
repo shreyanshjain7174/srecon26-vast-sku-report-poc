@@ -86,7 +86,45 @@ def hpa_signal_chart(verdict: dict[str, object]) -> None:
     (OUT / "local-hpa-signal-plumbing.svg").write_text(svg_chart("Local Kubernetes HPA signal plumbing", "Each isolated signal produced a 1 to 2 desired-and-ready replica transition. KV source was synthetic.", panels))
 
 
-def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[str, object]) -> None:
+def two_node_startup_chart() -> dict[str, object]:
+    """Summarize actual two-node provider attempts without inflating them to K8s results."""
+    runs = sorted((ROOT / "artifacts" / "runs").glob("two-node-*/run-manifest.json"))
+    attempts: list[dict[str, object]] = []
+    counts = {"created": 0, "running": 0, "completed": 0}
+    for manifest_path in runs:
+        manifest = json.loads(manifest_path.read_text())
+        run_dir = manifest_path.parent
+        statuses = []
+        for status_file in run_dir.glob("*-provider-status.ndjson"):
+            for line in status_file.read_text(encoding="utf-8").splitlines():
+                try:
+                    status = json.loads(line).get("actual_status")
+                except json.JSONDecodeError:
+                    status = None
+                if isinstance(status, str):
+                    statuses.append(status)
+        created = bool(manifest.get("server", {}).get("instance") or manifest.get("worker", {}).get("instance"))
+        running = "running" in statuses
+        completed = manifest.get("status") == "completed"
+        counts["created"] += int(created)
+        counts["running"] += int(running)
+        counts["completed"] += int(completed)
+        attempts.append({
+            "run": run_dir.name,
+            "template": manifest.get("vm_template", "ubuntu-cli"),
+            "created": created,
+            "provider_running_observed": running,
+            "kubernetes_completed": completed,
+        })
+    (OUT / "two-node-canary-startup.svg").write_text(svg_chart(
+        "Two-node Vast canary: provider startup evidence",
+        "Counts show only exact run manifests. ‘Running’ is a provider state, not Kubernetes readiness.",
+        [("Run outcomes", ["Instances created", "Provider running", "K8s completed"], [float(counts["created"]), float(counts["running"]), float(counts["completed"])], COLORS["blue"], "attempts")],
+    ))
+    return {"attempts": attempts, "counts": counts}
+
+
+def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[str, object], two_node: dict[str, object]) -> None:
     def stats(arm: str) -> dict[str, float | int]:
         values = requests[arm]
         field = lambda name: [float(item[name]) for item in values]
@@ -103,10 +141,12 @@ def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[st
         "schema": "srecon26-evidence-pack/v1",
         "gpu_measurements": {arm: stats(arm) for arm in ("c4", "c32")},
         "local_hpa_verdict": verdict["claims"]["local_hpa_signal_plumbing"],
+        "two_node_canary": two_node,
         "boundaries": [
             "GPU measurements are standalone vLLM serving data from one rented VM, not a Kubernetes HPA experiment.",
             "Local HPA proof validates independent signal plumbing; the KV source is synthetic.",
             "No CPU-only versus queue/KV-aware HPA A/B result exists yet.",
+            "Provider ‘running’ does not establish SSH, GPU, Kubernetes, vLLM, metrics, or HPA readiness.",
         ],
     }
     (OUT / "evidence-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -122,7 +162,8 @@ def main() -> None:
         raise SystemExit("raw request evidence is incomplete")
     gpu_latency_chart(requests)
     hpa_signal_chart(verdict)
-    write_summary(requests, verdict)
+    two_node = two_node_startup_chart()
+    write_summary(requests, verdict, two_node)
 
 
 if __name__ == "__main__":
