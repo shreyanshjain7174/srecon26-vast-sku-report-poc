@@ -29,6 +29,26 @@ from srecon26_poc.two_node import NodeLease, TwoNodeLease
 from srecon26_poc.vast_provider import OFFICIAL_KVM_IMAGE, OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, VastCliProvider, VastLaunchContract
 
 
+def contract_record(contract: OfferContract | object) -> dict[str, object]:
+    """Return the non-secret, JSON-safe identity used to bind evidence."""
+    fields = (
+        "offer_id", "instance_id", "gpu_name", "num_gpus", "gpu_ram_mib",
+        "compute_capability", "machine_id", "dph_total", "label",
+    )
+    return {
+        field: (str(value) if field == "dph_total" else value)
+        for field in fields
+        if (value := getattr(contract, field, None)) is not None
+    }
+
+
+def write_json(path: Path, payload: dict[str, object]) -> None:
+    """Atomically preserve evidence even if the controller is interrupted."""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--server-offer", type=int, required=True)
@@ -82,6 +102,15 @@ def main() -> int:
         server_guard=server_guard, worker_guard=worker_guard, launch=launch, hard_deadline=deadline,
         now=lambda: datetime.now(UTC),
     )
+    manifest: dict[str, object] = {
+        "schema": "srecon26.two-node-run.v1",
+        "started_at": datetime.now(UTC).isoformat(),
+        "hard_deadline": deadline.isoformat(),
+        "status": "preflighted",
+        "server": {"nonce": server_nonce, "offer": contract_record(server_offer)},
+        "worker": {"nonce": worker_nonce, "offer": contract_record(worker_offer)},
+    }
+    write_json(args.output / "run-manifest.json", manifest)
 
     def heartbeat() -> None:
         tick = time.monotonic_ns()
@@ -100,6 +129,10 @@ def main() -> int:
         remote(endpoint, ["env", f"CANARY_EVIDENCE_DIR={root}/evidence", "bash", f"{root}/remote_host_canary.sh", "probe"], f"{role}-probe.log")
 
     def workload(server, worker) -> None:
+        manifest["status"] = "instances-created"
+        manifest["server"] = {**manifest["server"], "instance": contract_record(server)}
+        manifest["worker"] = {**manifest["worker"], "instance": contract_record(worker)}
+        write_json(args.output / "run-manifest.json", manifest)
         resolver = work.resolver
         for instance, role in ((server, "server"), (worker, "worker")):
             resolver.attach_public_key(instance, work.config.public_key_file, hard_deadline=deadline, heartbeat=heartbeat, status_log=args.output / f"{role}-provider-status.ndjson")
@@ -138,12 +171,18 @@ def main() -> int:
         remote(server_ep, ["env", f"CANARY_EVIDENCE_DIR={server_root}/evidence", f"CANARY_MANIFEST_DIR={server_root}/manifests", f"CANARY_MANIFEST_SHA256={manifest_hash}", "bash", f"{server_root}/remote_host_canary.sh", "cleanup"], "cleanup.log")
 
     try:
-        controller.run(workload, heartbeat=heartbeat)
+        result = controller.run(workload, heartbeat=heartbeat)
+        manifest["status"] = "completed"
+        manifest["workload_completed"] = result.workload_completed
+        manifest["absence_reads"] = result.absence_reads
+        write_json(args.output / "run-manifest.json", manifest)
     except BaseException as error:
-        (args.output / "terminal-failure.json").write_text(
-            json.dumps({"error_type": type(error).__name__, "error": str(error), "traceback": traceback.format_exc()}, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        manifest["status"] = "failed"
+        manifest["failure"] = {"error_type": type(error).__name__, "error": str(error)}
+        write_json(args.output / "run-manifest.json", manifest)
+        write_json(args.output / "terminal-failure.json", {
+            "error_type": type(error).__name__, "error": str(error), "traceback": traceback.format_exc(),
+        })
         raise
     return 0
 
