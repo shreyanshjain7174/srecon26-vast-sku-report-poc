@@ -54,23 +54,29 @@ host-key TOFU.
 ## Install the provider credential manually
 
 Credential installation is a one-time bootstrap operation, not a runtime RPC.
-After the host key has been verified as above, use a separate temporary admin
-key and the fixed audited command below; pass the credential only on stdin:
+After the host key has been verified as above, add a separate temporary root
+bootstrap public key with this forced-command restriction:
+
+```text
+restrict,command="/usr/local/sbin/guardctl install-credential" ssh-ed25519 <bootstrap-public-key>
+```
+
+Then invoke only that literal command and pass the credential on stdin:
 
 ```sh
 ssh -F /dev/null -T -o BatchMode=yes -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile=/secure/azure-guard-known-hosts \
   -o GlobalKnownHostsFile=/dev/null -o ForwardAgent=no \
-  -o ClearAllForwardings=yes -i /secure/bootstrap-admin-key \
-  admin@guard.example.test \
-  'sudo /usr/local/sbin/guardctl install-credential' \
+  -o ClearAllForwardings=yes -i /secure/bootstrap-key \
+  root@guard.example.test 'guardctl install-credential' \
   < /secure/vast-api-key
 ```
 
 The audited installer must write `/etc/srecon26-guard/vast-api-key` as a
-root-owned `0600` file without echoing stdin. Remove the bootstrap key and its
-authorization immediately afterward. Never put the credential in source,
-Bicep, cloud-init, shell arguments, environment dumps, logs, or evidence.
+root-owned `0600` file without echoing stdin, and must reject any different
+`SSH_ORIGINAL_COMMAND`. Remove the bootstrap key and its authorization
+immediately afterward. Never put the credential in source, Bicep, cloud-init,
+shell arguments, environment dumps, logs, or evidence.
 
 ## Arm, verify, and collect
 
