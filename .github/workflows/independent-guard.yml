@@ -122,6 +122,7 @@ jobs:
         run: |
           set -euo pipefail
           install -d -m 700 "$CHANNEL_ROOT"
+          date -u +%Y-%m-%dT%H:%M:%SZ > "$CHANNEL_ROOT/armed-since.txt"
           sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 scripts/github_guard_channel.py arm \
             --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" --issue-number "$INPUT_ISSUE_NUMBER" \
             --hard-deadline "$INPUT_HARD_DEADLINE" --trusted-author "$INPUT_TRUSTED_AUTHOR" \
@@ -161,7 +162,7 @@ jobs:
           while true; do
             # Bound the reused issue to comments created since this run armed.
             # Heartbeat throttling keeps the current-run page below 100 items.
-            armed_since="$(jq -r '.config.armed_at' "$CHANNEL_ROOT/channel-state.json")"
+            armed_since="$(cat "$CHANNEL_ROOT/armed-since.txt")"
             timeout 15s gh api "repos/${GITHUB_REPOSITORY}/issues/${INPUT_ISSUE_NUMBER}/comments?per_page=100&since=${armed_since}" > "$CHANNEL_ROOT/comments.json"
             sync_result="$(timeout 50s sudo env PYTHONPATH="$PYTHONPATH" SRECON26_GUARD_VAST_BIN="$VAST_BIN" python3 scripts/github_guard_channel.py sync \
               --nonce "$INPUT_NONCE" --label "$INPUT_LABEL" --issue-number "$INPUT_ISSUE_NUMBER" \
