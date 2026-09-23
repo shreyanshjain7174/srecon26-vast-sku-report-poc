@@ -2,14 +2,16 @@
 
 ## Status and scope
 
-`scripts/run_canary.py` is an **offline fixture simulator**.  It has no
-provider adapter, browser driver, network client, or credential source.  A
-normal invocation writes a `BLOCKED` limitation manifest and exits without a
-provider create.  It is not a command to rent a GPU.
+`scripts/run_canary.py` defaults to an **offline fixture simulator**.  A normal
+invocation writes a `BLOCKED` limitation manifest and exits without a provider
+create.  It is not a command to rent a GPU.
 
-The separately reviewed Plan 02-06 paid dispatcher must consume a fresh set of
-gate evidence and use the lifecycle contract proven by these fixtures.  Until
-then, only the following local, in-memory command is available:
+Plan 02-06 adds a separately injected live dispatcher.  It has no built-in
+credential, SSH command, browser driver, offer, image, template, or remote
+workload implementation.  The operator-owned dispatcher factory must supply
+those privileged dependencies; this repository never discovers or defaults
+them.  Until that factory exists, only the following local, in-memory command
+is available:
 
 ```sh
 python3 scripts/run_canary.py --fixture --stage gpu-smoke --scenario success \
@@ -38,8 +40,45 @@ or ambiguous evidence is a `BLOCKED` terminal result before provider create.
 | Metric path ordering | A finalized smoke result is present before the metric-path stage may begin. |
 
 There are deliberately no fallback credentials, remembered offer IDs, default
-SKUs, or retry paths.  A create response that cannot be reconciled to exactly
-one nonce-bound label is never retried.
+SKUs, images, templates, or retry paths.  A create response that cannot be
+reconciled to exactly one nonce-bound label is never retried.
+
+## Live dispatcher contract
+
+The `--live` branch rejects missing inputs before it loads the integration
+factory.  It requires `--require-zero-instances`, `--nonce`, `--label`,
+`--offer-id`, `--hard-deadline`, `--phase1-verification`,
+`--semgrep-artifact`, `--provider-preflight`, `--guard-attestation`,
+`--report-fixture`, and `--dispatcher-factory`.  Metric path additionally
+requires `--smoke-manifest`.  All artifact paths must exist and be no more than
+five minutes old.  The dispatcher hashes every accepted gate file into the run
+manifest.
+
+The preflight JSON must say `eligible: true`,
+`balance_threshold_enabled: false`, and `instance_count: 0`.  It must contain
+one current exact offer whose `vms_enabled` flag is true.  The dispatcher
+re-reads that offer immediately before create and blocks if any contract field
+changed.  The guard record must be `ARMED` or `ACTIVE` and bind the exact
+nonce, label, immutable deadline, non-local host identity, and script hash.
+The report fixture must prove a `SUBMITTED` exact-target receipt with zero
+provider requests.
+
+The approved VM launch contract is explicit and frozen: Ubuntu 22.04 template
+hash `b7942f6bbc4374893ff66eb78145bbac`, with recorded image identity
+`docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16`.  The CLI selects the
+template with `--template_hash`, never a default image, and always uses exactly
+`130` GiB disk with `--ssh` and `--cancel-unavail`.  It intentionally does not
+add `--direct`; the approved template provides SSH launch semantics.  The exact
+create argument order is recorded in unit tests; provider CLI calls use an
+argument vector, never a shell string.
+
+The workload contract is equally frozen and explicit: model
+`Qwen/Qwen2.5-1.5B-Instruct`, revision
+`989aa7980e4cf806f80c7fef2b1adb7bc71aa306`, and the revalidated amd64 vLLM
+digest `sha256:770fe65b2c73ee74a5c42165cf3433de4048cc2cd9c57a937ca4e35aba5aa87b`.
+The remote executor must report all three values back from the running VM;
+missing or different values produce a limitation bundle, never real-GPU
+provenance.
 
 ## Lifecycle and deadline
 
@@ -57,6 +96,15 @@ an unresolved diagnosis is never reported.  Every created instance is torn
 down by exact numeric ID plus its nonce-bound label, then the runner records
 three separately timestamped absence reads.  A KVM capability failure performs
 the same cleanup but must not bootstrap k3s.
+
+The injected remote workload receives a heartbeat callback and has no authority
+to create or destroy instances.  It must return direct GPU identity, CUDA,
+KVM, and evidence files.  Metric path also needs fresh node/device-plugin/vLLM
+readiness, Prometheus, resource and custom metrics APIs, HPA state, events,
+timing, warm-up, and measured request evidence.  `provenance: real-gpu` and
+`real_gpu_claim: true` are emitted only after all of this evidence, exact
+teardown, three absence reads, and guard root-hash acknowledgement succeed.
+All other terminal paths are `live-limitation` bundles.
 
 ## Stage evidence requirements
 

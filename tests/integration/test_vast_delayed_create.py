@@ -8,7 +8,7 @@ import pytest
 
 from srecon26_poc.contracts import InstanceContract, OfferContract
 from srecon26_poc.provider import AmbiguousCreate
-from srecon26_poc.vast_provider import VastCliProvider
+from srecon26_poc.vast_provider import OFFICIAL_KVM_IMAGE, OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, VastCliProvider, VastLaunchContract
 
 
 def test_ambiguous_create_reconciles_unique_nonce_label_without_retry(tmp_path: Path) -> None:
@@ -27,7 +27,7 @@ def test_ambiguous_create_reconciles_unique_nonce_label_without_retry(tmp_path: 
     provider = VastCliProvider(Path("vastai"), timeout_seconds=1, runner=runner)
 
     with pytest.raises(AmbiguousCreate):
-        provider.create_once(contract, "run-id")
+        provider.create_once(contract, "run-id", VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE))
     assert provider.reconcile_label(contract.label) == created
     assert sum("create" in command for command in calls) == 1
 

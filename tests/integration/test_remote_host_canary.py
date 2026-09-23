@@ -45,13 +45,14 @@ def test_host_probe_fails_closed_on_required_kvm_gpu_and_runtime_capabilities() 
         "Ubuntu 22.04 is required",
         "systemd is unavailable",
         "/sys/fs/cgroup/cgroup.controllers",
-        "KVM device privilege is required",
         "systemd-detect-virt --vm",
         "nvidia-smi -L",
         "CUDA Version:",
         "docker info",
     ):
         assert required in script
+    assert "nested_kvm_not_required=true" in script
+    assert "-c /dev/kvm" not in script
     assert "probe-status.json" in script
 
 

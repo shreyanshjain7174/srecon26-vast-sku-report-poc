@@ -22,6 +22,9 @@ class VastPreflightError(VastProviderError):
 
 Runner = Callable[[list[str], int], str]
 
+OFFICIAL_UBUNTU_2204_TEMPLATE_HASH = "b7942f6bbc4374893ff66eb78145bbac"
+OFFICIAL_KVM_IMAGE = "docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16"
+
 
 @dataclass(frozen=True, slots=True)
 class VastPreflight:
@@ -36,6 +39,50 @@ class VastPreflight:
             "instance_count": self.instance_count,
             "offer_count": self.offer_count,
             "offers": [dict(item) for item in self.offers],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class VastLaunchContract:
+    """Explicit KVM launch settings required for the one paid create.
+
+    Vast otherwise selects a default image.  Defaults are unsafe here because
+    the canary needs a known full VM topology, not a provider-chosen Docker
+    image.  The current contract is the official Ubuntu 22.04 KVM template and
+    its recorded KVM image identity.  The image is evidence metadata; the
+    template hash is the only create selector, so the CLI never falls back to
+    an implicit image.
+    """
+
+    ubuntu_template_hash: str | None = None
+    image_contract: str | None = None
+    disk_gib: int = 130
+    ssh: bool = True
+    cancel_unavail: bool = True
+
+    def validate(self) -> None:
+        if self.ubuntu_template_hash != OFFICIAL_UBUNTU_2204_TEMPLATE_HASH:
+            raise VastProviderError("launch contract must pin the approved Ubuntu 22.04 KVM template hash")
+        if self.image_contract != OFFICIAL_KVM_IMAGE:
+            raise VastProviderError("launch contract must pin the approved vastai/kvm Ubuntu image identity")
+        if self.disk_gib != 130:
+            raise VastProviderError("launch disk must be exactly 130 GiB")
+        if not (self.ssh and self.cancel_unavail):
+            raise VastProviderError("launch contract requires SSH and cancel-unavail")
+
+    def create_args(self, *, label: str) -> list[str]:
+        self.validate()
+        assert self.ubuntu_template_hash is not None
+        return ["--template_hash", self.ubuntu_template_hash, "--disk", str(self.disk_gib), "--ssh", "--cancel-unavail", "--label", label]
+
+    def to_json(self) -> dict[str, object]:
+        self.validate()
+        return {
+            "ubuntu_template_hash": self.ubuntu_template_hash,
+            "image_contract": self.image_contract,
+            "disk_gib": self.disk_gib,
+            "ssh": self.ssh,
+            "cancel_unavail": self.cancel_unavail,
         }
 
 
@@ -157,6 +204,17 @@ class VastCliProvider:
             raise VastProviderError("current offer contract is not uniquely available")
         return self._offer(matches[0], label)
 
+    def get_vms_enabled_offer(self, offer_id: int, *, label: str) -> OfferContract:
+        """Read and freeze one current KVM-capable offer before a paid create."""
+
+        records = self._records(self._run_json(["search", "offers", f"id={offer_id}", "--limit", "25"]))
+        matches = [record for record in records if self._integer(record.get("id", record.get("offer_id")), "offer id") == offer_id]
+        if len(matches) != 1:
+            raise VastProviderError("current KVM offer contract is not uniquely available")
+        if matches[0].get("vms_enabled") is not True:
+            raise VastProviderError("current offer is not vms_enabled for required KVM topology")
+        return self._offer(matches[0], label)
+
     def get_instance(self, instance_id: int) -> InstanceContract:
         matches = [item for item in self.list_instances() if item.instance_id == instance_id]
         if len(matches) != 1:
@@ -170,10 +228,11 @@ class VastCliProvider:
             raise AmbiguousCreate(f"ambiguous create reconciliation found {detail} label matches")
         return matches[0]
 
-    def create_once(self, contract: OfferContract, request_key: str) -> InstanceContract:
+    def create_once(self, contract: OfferContract, request_key: str, launch: VastLaunchContract) -> InstanceContract:
         del request_key
+        launch.validate()
         try:
-            response = self._run_json(["create", "instance", str(contract.offer_id), "--label", contract.label])
+            response = self._run_json(["create", "instance", str(contract.offer_id), *launch.create_args(label=contract.label)])
         except VastProviderError as error:
             raise AmbiguousCreate("create outcome is ambiguous and must be reconciled by label") from error
         records = self._records(response)

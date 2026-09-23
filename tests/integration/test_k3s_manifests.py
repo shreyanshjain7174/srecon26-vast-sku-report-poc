@@ -34,7 +34,11 @@ def test_metric_path_exposes_queue_and_kv_to_an_autoscaling_v2_hpa() -> None:
     assert "vllm_queue_depth" in hpa
     assert "vllm_kv_cache_usage_perc" in hpa
     assert 'averageValue: "0.8"' in hpa
-    assert "vllm.srecon26-canary.svc.cluster.local:8000" in prometheus
+    assert "kubernetes_sd_configs:" in prometheus
+    assert "__meta_kubernetes_pod_name" in prometheus
+    assert "target_label: pod" in prometheus
+    assert "target_label: namespace" in prometheus
+    assert "serviceAccountName: prometheus" in prometheus
     assert "system:auth-delegator" in adapter
     assert "system:auth-delegator" in (K3S / "metrics-server.yaml").read_text()
 

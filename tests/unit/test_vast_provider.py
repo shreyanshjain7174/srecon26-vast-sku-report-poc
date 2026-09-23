@@ -10,7 +10,14 @@ import pytest
 
 from srecon26_poc.contracts import OfferContract
 from srecon26_poc.provider import AccountSnapshot
-from srecon26_poc.vast_provider import VastCliProvider, VastPreflightError
+from srecon26_poc.vast_provider import (
+    OFFICIAL_KVM_IMAGE,
+    OFFICIAL_UBUNTU_2204_TEMPLATE_HASH,
+    VastCliProvider,
+    VastLaunchContract,
+    VastPreflightError,
+    VastProviderError,
+)
 
 
 FIXTURES = Path(__file__).parents[2] / "providers" / "vast" / "fixtures"
@@ -116,4 +123,40 @@ def test_create_response_may_be_a_single_json_record() -> None:
     provider = VastCliProvider("fixture", runner=lambda _args, _timeout: record)
     contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
 
-    assert provider.create_once(contract, "run-id").instance_id == 77
+    assert provider.create_once(contract, "run-id", VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE)).instance_id == 77
+
+
+def test_create_requires_explicit_frozen_kvm_launch_contract_and_exact_arguments() -> None:
+    calls: list[list[str]] = []
+    record = '{"id": 77, "gpu_name": "RTX 3090", "num_gpus": 1, "gpu_ram": 24, "compute_cap": 860, "machine_id": 99, "dph_total": 0.30, "label": "run-nonce-label"}'
+    provider = VastCliProvider("fixture", runner=lambda args, _timeout: calls.append(args) or record)
+    contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
+
+    created = provider.create_once(contract, "run-id", VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE))
+
+    assert created.instance_id == 77
+    assert calls == [[
+        "fixture", "--raw", "--no-color", "create", "instance", "101",
+        "--template_hash", OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, "--disk", "130", "--ssh", "--cancel-unavail", "--label", "run-nonce-label",
+    ]]
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [
+        VastLaunchContract(),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE, disk_gib=129),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, "docker.io/vastai/kvm:latest"),
+        VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE, ssh=False),
+        VastLaunchContract(ubuntu_template_hash="not-a-template", image_contract=OFFICIAL_KVM_IMAGE),
+    ],
+)
+def test_create_refuses_missing_or_relaxed_vm_contract_before_cli_mutation(launch: VastLaunchContract) -> None:
+    calls: list[list[str]] = []
+    provider = VastCliProvider("fixture", runner=lambda args, _timeout: calls.append(args) or "[]")
+    contract = OfferContract(101, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), "run-nonce-label")
+
+    with pytest.raises(VastProviderError):
+        provider.create_once(contract, "run-id", launch)
+
+    assert calls == []

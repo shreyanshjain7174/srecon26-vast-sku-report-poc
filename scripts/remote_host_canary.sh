@@ -141,10 +141,9 @@ probe_host() {
   }
   [[ -r /sys/fs/cgroup/cgroup.controllers ]] || { write_json_status "$out/probe-status.json" "FAILED" "cgroup v2 is required"; die "cgroup v2 is required"; }
   capture "$out/cgroup-v2.txt" cat /sys/fs/cgroup/cgroup.controllers || { write_json_status "$out/probe-status.json" "FAILED" "cannot read cgroup v2 controllers"; die "cannot read cgroup v2 controllers"; }
-  [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]] || { write_json_status "$out/probe-status.json" "FAILED" "KVM device privilege is required"; die "KVM device privilege is required"; }
   capture "$out/kvm-virt.txt" systemd-detect-virt --vm || { write_json_status "$out/probe-status.json" "FAILED" "KVM virtualization probe failed"; die "KVM virtualization probe failed"; }
   grep -qx 'kvm' "$out/kvm-virt.txt" || { write_json_status "$out/probe-status.json" "FAILED" "host is not KVM"; die "host is not KVM"; }
-  printf 'device=/dev/kvm readable=true writable=true uid=%s\n' "$(id -u)" >"$out/kvm-privilege.txt"
+  printf 'virtualization=kvm root_uid=%s nested_kvm_not_required=true\n' "$(id -u)" >"$out/kvm-privilege.txt"
   capture "$out/nvidia-smi.txt" nvidia-smi -L || { write_json_status "$out/probe-status.json" "FAILED" "nvidia-smi GPU probe failed"; die "nvidia-smi GPU probe failed"; }
   capture "$out/cuda.txt" nvidia-smi || { write_json_status "$out/probe-status.json" "FAILED" "CUDA driver probe failed"; die "CUDA driver probe failed"; }
   grep -q 'CUDA Version:' "$out/cuda.txt" || { write_json_status "$out/probe-status.json" "FAILED" "CUDA version was not reported"; die "CUDA version was not reported"; }
