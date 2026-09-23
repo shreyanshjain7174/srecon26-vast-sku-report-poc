@@ -229,8 +229,18 @@ def test_sixth_inference_reservation_requires_exact_pinned_measurement_retry(tmp
         ledger.reserve("inference-attempt-7", Decimal("0.01"), "gpu-inference-smoke", machine_id=145344)
     monkeypatch.setattr(ExposureLedger, "_has_pinned_startup_retry_entitlement", lambda self, reservations: True)
     ledger.reserve("inference-attempt-7", Decimal("0.01"), "gpu-inference-smoke", machine_id=145344)
-    with pytest.raises(BudgetExceeded, match="at most seven reservations"):
+    with pytest.raises(BudgetExceeded, match="requires pinned alternate-template authorization"):
         ledger.reserve("inference-attempt-8", Decimal("0.01"), "gpu-inference-smoke", machine_id=145345)
+    ledger.reserve(
+        "inference-attempt-8",
+        Decimal("0.01"),
+        "gpu-inference-smoke",
+        machine_id=145345,
+        template_hash="10d921fdff3c0d2a794897d81ae870c5",
+        image_contract="docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21",
+    )
+    with pytest.raises(BudgetExceeded, match="at most eight reservations"):
+        ledger.reserve("inference-attempt-9", Decimal("0.01"), "gpu-inference-smoke", machine_id=145346)
 
 
 def test_fifth_inference_reservation_rejects_pinned_journal_with_create_intent(tmp_path, monkeypatch):

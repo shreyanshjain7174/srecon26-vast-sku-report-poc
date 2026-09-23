@@ -895,6 +895,8 @@ class LiveCanaryDispatcher:
                 request.reserve,
                 reservation_category,
                 machine_id=current_offer.machine_id if request.stage == "inference-smoke" else None,
+                template_hash=request.launch.ubuntu_template_hash if request.stage == "inference-smoke" else None,
+                image_contract=request.launch.image_contract if request.stage == "inference-smoke" else None,
             )
             self._append(journal, RunState.BUDGET_RESERVED, "budget.reserved", {"reserve": str(request.reserve), "project_cap": str(PROJECT_CAP)})
             self._append(journal, RunState.OFFER_PINNED, "offer.pinned", {"offer_id": current_offer.offer_id, "machine_id": current_offer.machine_id, "dph_total": str(current_offer.dph_total), "label": current_offer.label, "vms_enabled": True})

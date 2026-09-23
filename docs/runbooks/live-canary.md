@@ -63,10 +63,16 @@ nonce, label, immutable deadline, non-local host identity, and script hash.
 The report fixture must prove a `SUBMITTED` exact-target receipt with zero
 provider requests.
 
-The approved VM launch contract is explicit and frozen: Ubuntu 22.04 template
-hash `b7942f6bbc4374893ff66eb78145bbac`, with recorded image identity
-`docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16`.  The CLI selects the
-template with `--template_hash`, never a default image, and always uses exactly
+Approved VM launch contracts are explicit pairs. Primary Ubuntu 22.04 uses
+template hash `b7942f6bbc4374893ff66eb78145bbac` and recorded image identity
+`docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16`. The authorized alternate
+uses Vast recommended template `10d921fdff3c0d2a794897d81ae870c5`
+(`Ubuntu Desktop (VM)`) and fixed tag
+`docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21`. Its redacted provider
+snapshot is hash-pinned in `evidence/vast-template-ubuntu-desktop-vm-20260923.json`.
+Remote probes must still prove Ubuntu 22.04, KVM, systemd, cgroup v2, Docker,
+and NVIDIA runtime before inference. The CLI selects the template with
+`--template_hash`, never a default image, and always uses exactly
 `130` GiB disk with `--ssh`, `--direct`, and `--cancel-unavail`. Vast documents
 `--direct` as requesting both direct and proxy SSH routes; it does not prove
 which route is usable. The resolver uses a direct endpoint only when the exact
@@ -91,7 +97,11 @@ timing JSON. Exact teardown, three provider absence reads, guard anchor, and
 erasing any reservation history. Each attempt uses budget
 category `gpu-inference-smoke`, reserves at most `$1.00`, and still requires a
 fresh read-only CLI/schema preflight because the corrected direct route has not
-yet been live-validated.
+yet been live-validated. After seven preserved attempts, the user explicitly
+authorized one distinct-machine attempt with the pinned alternate template.
+The ledger rejects reservation eight unless its template hash and image pair
+match the pinned provider snapshot. Total exposure remains under the unchanged
+`$5.00` global and `$4.25` inference caps.
 
 The workload contract is equally frozen and explicit: model
 `Qwen/Qwen2.5-1.5B-Instruct`, revision
@@ -106,9 +116,9 @@ provenance.
 
 For an authorized create, the orchestrator must first journal the Decimal
 reservation, exact offer contract, immutable `hard_deadline`, and
-`report_start_by`. The current inference PoC is authorized for as many as three
-distinct guarded attempts; it begins with one machine and expands only when an
-actionable failure or a materially useful comparison justifies another. The
+`report_start_by`. The current inference PoC uses one machine at a time and
+expands only when an actionable failure or a materially useful comparison
+justifies another. The
 report start cutoff is:
 
 ```

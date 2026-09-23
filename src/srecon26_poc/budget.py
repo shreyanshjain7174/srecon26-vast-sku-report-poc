@@ -45,6 +45,10 @@ INFERENCE_STARTUP_RETRY_RUN_ID = "inference-infer20260923154131"
 INFERENCE_STARTUP_RETRY_JOURNAL_SHA256 = "f1f384770f2962efbbd9814d5f3f7ebbd7d1ad1a6469b03e5da3e7ec7abe0c23"
 INFERENCE_STARTUP_RETRY_EVIDENCE_SHA256 = "b04821f538dba046d791e08002de2748efe5f9bfd7a7f629d0af3bc0e4ac2565"
 INFERENCE_STARTUP_RETRY_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "inference-infer20260923154131-startup-retry-entitlement.json"
+ALTERNATE_TEMPLATE_HASH = "10d921fdff3c0d2a794897d81ae870c5"
+ALTERNATE_TEMPLATE_IMAGE = "docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21"
+ALTERNATE_TEMPLATE_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "evidence" / "vast-template-ubuntu-desktop-vm-20260923.json"
+ALTERNATE_TEMPLATE_EVIDENCE_SHA256 = "771fd7af957052ea991a29c95f8f61d59124a23d7fa8f4a444c17dd4985b48ca"
 
 
 class BudgetExceeded(ValueError):
@@ -138,6 +142,14 @@ class ExposureLedger:
             or machine_id <= 0
         ):
             raise ValueError("invalid inference machine reservation binding")
+        template_hash = entry.get("template_hash")
+        image_contract = entry.get("image_contract")
+        if (template_hash is not None or image_contract is not None) and (
+            category != "gpu-inference-smoke"
+            or not isinstance(template_hash, str)
+            or not isinstance(image_contract, str)
+        ):
+            raise ValueError("invalid inference template reservation binding")
         if actual is None and proof is None:
             return
         if actual is None or not isinstance(proof, Mapping) or proof.get("reads") != 3:
@@ -401,7 +413,27 @@ class ExposureLedger:
             and evidence.get("actual_usd") == "0.008"
         )
 
-    def reserve(self, run_id: str, amount: Decimal, category: str, *, machine_id: int | None = None) -> Decimal:
+    @staticmethod
+    def _has_alternate_template_authorization(template_hash: str | None, image_contract: str | None) -> bool:
+        if template_hash != ALTERNATE_TEMPLATE_HASH or image_contract != ALTERNATE_TEMPLATE_IMAGE:
+            return False
+        try:
+            raw = ALTERNATE_TEMPLATE_EVIDENCE_PATH.read_bytes()
+            evidence = json.loads(raw)
+            template = evidence.get("template") if isinstance(evidence, Mapping) else None
+        except (OSError, json.JSONDecodeError):
+            return False
+        return (
+            hashlib.sha256(raw).hexdigest() == ALTERNATE_TEMPLATE_EVIDENCE_SHA256
+            and evidence.get("schema") == "srecon26-vast-template-snapshot/v1"
+            and isinstance(template, Mapping)
+            and template.get("hash_id") == template_hash
+            and f"{template.get('image')}:{template.get('tag')}" == image_contract
+            and template.get("vm") is True
+            and template.get("ssh_direct") is True
+        )
+
+    def reserve(self, run_id: str, amount: Decimal, category: str, *, machine_id: int | None = None, template_hash: str | None = None, image_contract: str | None = None) -> Decimal:
         amount = self._decimal(amount)
         if amount <= 0 or category not in CATEGORY_CAPS:
             raise BudgetExceeded("invalid budget reservation")
@@ -423,6 +455,8 @@ class ExposureLedger:
                     and self._decimal(existing["amount"]) == amount
                     and existing["category"] == category
                     and existing.get("machine_id") == machine_id
+                    and existing.get("template_hash") == template_hash
+                    and existing.get("image_contract") == image_contract
                 ):
                     return MAX_EXPOSURE - self._exposure(data)
                 raise BudgetExceeded("run already has a different reservation")
@@ -439,14 +473,16 @@ class ExposureLedger:
                     raise BudgetExceeded("distinct-machine smoke requires one pending original, one settled retry, and one unused entitlement")
             if category == "gpu-inference-smoke":
                 inference_smokes = [entry for entry in reservations.values() if isinstance(entry, Mapping) and entry.get("category") == category]
-                if len(inference_smokes) >= 7:
-                    raise BudgetExceeded("direct inference smoke allows at most seven reservations including three pinned replacements")
+                if len(inference_smokes) >= 8:
+                    raise BudgetExceeded("direct inference smoke allows at most eight reservations")
                 if len(inference_smokes) == 4 and not self._has_pinned_inference_replacement_entitlement(reservations):
                     raise BudgetExceeded("fifth inference reservation requires pinned no-create replacement evidence")
                 if len(inference_smokes) == 5 and not self._has_pinned_measurement_retry_entitlement(reservations):
                     raise BudgetExceeded("sixth inference reservation requires pinned measurement-retry evidence")
                 if len(inference_smokes) == 6 and not self._has_pinned_startup_retry_entitlement(reservations):
                     raise BudgetExceeded("seventh inference reservation requires pinned provider-startup retry evidence")
+                if len(inference_smokes) == 7 and not self._has_alternate_template_authorization(template_hash, image_contract):
+                    raise BudgetExceeded("eighth inference reservation requires pinned alternate-template authorization")
                 if amount > Decimal("1.00"):
                     raise BudgetExceeded("direct inference smoke reservation must be no greater than 1.00")
                 if machine_id is not None and any(entry.get("machine_id") == machine_id for entry in inference_smokes):
@@ -457,6 +493,10 @@ class ExposureLedger:
             entry: dict[str, object] = {"amount": str(amount), "category": category, "actual": None, "absence_proof": None}
             if machine_id is not None:
                 entry["machine_id"] = machine_id
+            if template_hash is not None:
+                entry["template_hash"] = template_hash
+            if image_contract is not None:
+                entry["image_contract"] = image_contract
             reservations[run_id] = entry
             self._write(data)
             return MAX_EXPOSURE - self._exposure(data)

@@ -13,6 +13,8 @@ from srecon26_poc.provider import AccountSnapshot
 from srecon26_poc.provider import AmbiguousCreate
 from srecon26_poc.vast_provider import (
     OFFICIAL_KVM_IMAGE,
+    OFFICIAL_UBUNTU_DESKTOP_IMAGE,
+    OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH,
     OFFICIAL_UBUNTU_2204_TEMPLATE_HASH,
     VastCliProvider,
     VastLaunchContract,
@@ -163,6 +165,26 @@ def test_launch_manifest_records_that_direct_ssh_was_requested() -> None:
     launch = VastLaunchContract(OFFICIAL_UBUNTU_2204_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE)
 
     assert launch.to_json()["direct_ssh_requested"] is True
+
+
+def test_launch_contract_accepts_second_exact_official_vm_template_pair() -> None:
+    launch = VastLaunchContract(OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH, OFFICIAL_UBUNTU_DESKTOP_IMAGE)
+
+    assert launch.create_args(label="alternate-template-run")[:2] == ["--template_hash", OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH]
+
+
+def test_launch_contract_rejects_cross_template_image_metadata() -> None:
+    with pytest.raises(VastProviderError, match="approved exact Vast VM template and image pair"):
+        VastLaunchContract(OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH, OFFICIAL_KVM_IMAGE).validate()
+
+
+def test_alternate_template_rejects_tampered_provider_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot = tmp_path / "template.json"
+    snapshot.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr("srecon26_poc.vast_provider.OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_EVIDENCE", snapshot)
+
+    with pytest.raises(VastProviderError, match="pinned provider snapshot"):
+        VastLaunchContract(OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH, OFFICIAL_UBUNTU_DESKTOP_IMAGE).validate()
 
 
 def test_destroy_uses_noninteractive_yes_after_exact_label_check() -> None:

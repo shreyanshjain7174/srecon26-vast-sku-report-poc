@@ -28,6 +28,14 @@ Runner = Callable[[list[str], int], str]
 
 OFFICIAL_UBUNTU_2204_TEMPLATE_HASH = "b7942f6bbc4374893ff66eb78145bbac"
 OFFICIAL_KVM_IMAGE = "docker.io/vastai/kvm:ubuntu_cli_22.04-2025-05-16"
+OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH = "10d921fdff3c0d2a794897d81ae870c5"
+OFFICIAL_UBUNTU_DESKTOP_IMAGE = "docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21"
+APPROVED_VM_TEMPLATES = {
+    OFFICIAL_UBUNTU_2204_TEMPLATE_HASH: OFFICIAL_KVM_IMAGE,
+    OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH: OFFICIAL_UBUNTU_DESKTOP_IMAGE,
+}
+OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_EVIDENCE = Path(__file__).resolve().parents[2] / "evidence" / "vast-template-ubuntu-desktop-vm-20260923.json"
+OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_EVIDENCE_SHA256 = "771fd7af957052ea991a29c95f8f61d59124a23d7fa8f4a444c17dd4985b48ca"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +76,8 @@ class VastLaunchContract:
     image.  The current contract is the official Ubuntu 22.04 KVM template and
     its recorded KVM image identity.  The image is evidence metadata; the
     template hash is the only create selector, so the CLI never falls back to
-    an implicit image.
+    an implicit image. Approved hash/image pairs prevent mixing metadata from
+    one template with another template's create selector.
     """
 
     ubuntu_template_hash: str | None = None
@@ -79,10 +88,35 @@ class VastLaunchContract:
     request_direct_ssh: bool = True
 
     def validate(self) -> None:
-        if self.ubuntu_template_hash != OFFICIAL_UBUNTU_2204_TEMPLATE_HASH:
-            raise VastProviderError("launch contract must pin the approved Ubuntu 22.04 KVM template hash")
-        if self.image_contract != OFFICIAL_KVM_IMAGE:
-            raise VastProviderError("launch contract must pin the approved vastai/kvm Ubuntu image identity")
+        if (
+            not isinstance(self.ubuntu_template_hash, str)
+            or self.ubuntu_template_hash not in APPROVED_VM_TEMPLATES
+            or APPROVED_VM_TEMPLATES[self.ubuntu_template_hash] != self.image_contract
+        ):
+            raise VastProviderError("launch contract must pin an approved exact Vast VM template and image pair")
+        if self.ubuntu_template_hash == OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH:
+            try:
+                raw = OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_EVIDENCE.read_bytes()
+                snapshot = json.loads(raw)
+                template = snapshot.get("template") if isinstance(snapshot, Mapping) else None
+            except (OSError, json.JSONDecodeError):
+                snapshot = {}
+                template = None
+                raw = b""
+            if (
+                hashlib.sha256(raw).hexdigest() != OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_EVIDENCE_SHA256
+                or snapshot.get("schema") != "srecon26-vast-template-snapshot/v1"
+                or snapshot.get("source") != "VastCliProvider.search_templates/v1"
+                or not isinstance(template, Mapping)
+                or template.get("id") != 720360
+                or template.get("hash_id") != self.ubuntu_template_hash
+                or f"{template.get('image')}:{template.get('tag')}" != self.image_contract
+                or template.get("recommended") is not True
+                or template.get("ssh_direct") is not True
+                or template.get("use_ssh") is not True
+                or template.get("vm") is not True
+            ):
+                raise VastProviderError("alternate VM template lacks exact pinned provider snapshot evidence")
         if self.disk_gib != 130:
             raise VastProviderError("launch disk must be exactly 130 GiB")
         if not (self.ssh and self.request_direct_ssh and self.cancel_unavail):

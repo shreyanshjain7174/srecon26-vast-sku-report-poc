@@ -1,0 +1,32 @@
+{
+  "schema": "srecon26-vast-template-snapshot/v1",
+  "source": "VastCliProvider.search_templates/v1",
+  "observed_at": "2026-09-23T17:22:00Z",
+  "command": [
+    "search",
+    "templates",
+    "hash_id=10d921fdff3c0d2a794897d81ae870c5",
+    "--raw"
+  ],
+  "template": {
+    "id": 720360,
+    "hash_id": "10d921fdff3c0d2a794897d81ae870c5",
+    "name": "Ubuntu Desktop (VM)",
+    "image": "docker.io/vastai/kvm",
+    "tag": "ubuntu_desktop_22.04-2025-11-21",
+    "creator_id": 525202,
+    "recommended": true,
+    "recommended_disk_space_gib": 75,
+    "ssh_direct": true,
+    "use_ssh": true,
+    "vm": true
+  },
+  "runtime_verification_required": [
+    "Ubuntu 22.04",
+    "KVM",
+    "systemd",
+    "cgroup v2",
+    "Docker",
+    "NVIDIA runtime"
+  ]
+}
