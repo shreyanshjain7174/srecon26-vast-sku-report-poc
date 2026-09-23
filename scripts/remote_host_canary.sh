@@ -210,6 +210,7 @@ probe_host() {
   require_command timeout
   require_command systemctl
   require_command nvidia-smi
+  require_command nvidia-container-runtime
   require_command docker
   require_command jq
   local out
@@ -231,7 +232,8 @@ probe_host() {
   capture "$out/cuda.txt" nvidia-smi || { write_json_status "$out/probe-status.json" "FAILED" "CUDA driver probe failed"; die "CUDA driver probe failed"; }
   grep -q 'CUDA Version:' "$out/cuda.txt" || { write_json_status "$out/probe-status.json" "FAILED" "CUDA version was not reported"; die "CUDA version was not reported"; }
   capture "$out/docker-info.txt" docker info || { write_json_status "$out/probe-status.json" "FAILED" "Docker probe failed"; die "Docker probe failed"; }
-  write_json_status "$out/probe-status.json" "PASSED" "Ubuntu 22.04, systemd, cgroup v2, KVM, NVIDIA/CUDA, and Docker checks passed"
+  capture "$out/nvidia-runtime.txt" nvidia-container-runtime --version || { write_json_status "$out/probe-status.json" "FAILED" "NVIDIA container runtime probe failed"; die "NVIDIA container runtime probe failed"; }
+  write_json_status "$out/probe-status.json" "PASSED" "Ubuntu 22.04, systemd, cgroup v2, KVM, NVIDIA/CUDA runtime, and Docker checks passed"
 }
 
 verify_k3s_binary() {

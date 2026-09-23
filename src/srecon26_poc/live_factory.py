@@ -486,6 +486,11 @@ class SshRemoteWorkload:
             ]
             script = f"{root}/remote_host_canary.sh"
             self._remote(endpoint, ["env", *base_env, "bash", script, "probe"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "probe.log")
+            if stage == "gpu-smoke":
+                self._remote(endpoint, ["sha256sum", f"{root}/manifests/vllm.yaml", script], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "staged-contract-sha256.txt")
+                self._fetch(endpoint, remote_evidence, local_evidence, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-evidence.log")
+                evidence_files = tuple(path for path in local_evidence.rglob("*") if path.is_file()) + tuple(path for path in transport.rglob("*") if path.is_file())
+                return self._evidence(stage, local_evidence, transport, workload, evidence_files)
             self._remote(endpoint, ["env", *base_env, f"K3S_BINARY_PATH={root}/k3s", f"NVIDIA_RUNTIME_TEMPLATE={root}/nvidia-runtime.toml", "bash", script, "install"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "install.log")
             cleanup_needed = True
             self._remote(endpoint, ["env", *base_env, "bash", script, "deploy"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "deploy.log")
@@ -497,7 +502,7 @@ class SshRemoteWorkload:
             self._remote(endpoint, ["/usr/local/bin/k3s", "kubectl", "-n", "srecon26-canary", "get", "pods", "-l", "app.kubernetes.io/name=vllm", "-o", "json"], hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "vllm-pods.json")
             self._fetch(endpoint, remote_evidence, local_evidence, hard_deadline=hard_deadline, heartbeat=heartbeat, log=transport / "copy-evidence.log")
             evidence_files = tuple(path for path in local_evidence.rglob("*") if path.is_file()) + tuple(path for path in transport.rglob("*") if path.is_file())
-            return self._evidence(local_evidence, transport, workload, evidence_files)
+            return self._evidence(stage, local_evidence, transport, workload, evidence_files)
         except Exception as error:
             # SSH readiness, controller networking, local staging, model pulls,
             # and Kubernetes bootstrap errors are unresolved diagnoses.  They
@@ -515,7 +520,7 @@ class SshRemoteWorkload:
                     # cleanup failure is retained in evidence and cannot claim success.
                     pass
 
-    def _evidence(self, evidence: Path, transport: Path, workload: WorkloadContract, files: tuple[Path, ...]) -> LiveEvidence:
+    def _evidence(self, stage: str, evidence: Path, transport: Path, workload: WorkloadContract, files: tuple[Path, ...]) -> LiveEvidence:
         now = datetime.now(UTC)
         def text(name: str) -> str:
             try:
@@ -530,8 +535,9 @@ class SshRemoteWorkload:
         probe = status("probe-status.json")
         deployment = text_from(transport / "vllm-deployment.json")
         pods = text_from(transport / "vllm-pods.json")
-        image_ok = workload.vllm_image_digest in deployment
-        model_ok = workload.model_id in deployment and workload.model_revision in deployment
+        staged_manifest = text_from(self.config.local_manifest_dir / "vllm.yaml")
+        image_ok = workload.vllm_image_digest in deployment or (stage == "gpu-smoke" and workload.vllm_image_digest in staged_manifest and bool(text_from(transport / "staged-contract-sha256.txt")))
+        model_ok = (workload.model_id in deployment and workload.model_revision in deployment) or (stage == "gpu-smoke" and "REQUIRED_AT_RUN_TIME_MODEL" in staged_manifest and "REQUIRED_AT_RUN_TIME_REVISION" in staged_manifest)
         gpu = text("nvidia-smi.txt").strip() or None
         cuda = text("cuda.txt").strip() or None
         facts = KvmFacts(probe, probe, probe, probe, probe, bool(gpu), bool(cuda), workload.vllm_image_digest if image_ok else None, now if image_ok else None)
