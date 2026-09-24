@@ -2,6 +2,7 @@
 """Create reproducible, claim-bounded visuals for the lightning-talk design handoff."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import ipaddress
 import json
@@ -10,7 +11,7 @@ import re
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 from uuid import UUID
 from xml.sax.saxutils import escape
 
@@ -476,7 +477,111 @@ def two_node_startup_chart(*, current: datetime | None = None) -> dict[str, obje
     return {"attempts": attempts, "counts": counts}
 
 
-def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[str, object], two_node: dict[str, object]) -> None:
+def _timing_payloads(evidence: Path, phase: str) -> list[Mapping[str, object]]:
+    """Read only successful, raw curl timing records for one load phase."""
+
+    values: list[Mapping[str, object]] = []
+    for path in sorted(evidence.glob(f"pressure-{phase}-request-*-timing.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(payload, Mapping)
+            and payload.get("http_code") == 200
+            and isinstance(payload.get("ttft_seconds"), (int, float))
+            and isinstance(payload.get("latency_seconds"), (int, float))
+        ):
+            values.append(payload)
+    return values
+
+
+def _prometheus_metric_maximum(path: Path, fragments: tuple[str, ...]) -> float | None:
+    """Return a phase-local maximum only for the named raw Prometheus series."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    data = payload.get("data") if isinstance(payload, Mapping) else None
+    results = data.get("result") if isinstance(data, Mapping) else None
+    values: list[float] = []
+    if not isinstance(results, list):
+        return None
+    for result in results:
+        if not isinstance(result, Mapping):
+            continue
+        metric = result.get("metric")
+        name = metric.get("__name__") if isinstance(metric, Mapping) else None
+        sample = result.get("value")
+        if not isinstance(name, str) or not any(fragment in name for fragment in fragments):
+            continue
+        if isinstance(sample, list) and len(sample) == 2:
+            try:
+                values.append(float(sample[1]))
+            except (TypeError, ValueError):
+                pass
+    return max(values) if values else None
+
+
+def two_node_metric_path_chart(run_dir: Path) -> dict[str, object]:
+    """Create a chart only from a completed run's raw K8s/vLLM snapshots.
+
+    This intentionally rejects absent queue/KV or timing series.  A rendered
+    chart must be evidence of the metric path, never a visually plausible
+    placeholder when a provider run merely created VMs.
+    """
+
+    evidence = run_dir / "server-evidence"
+    if not evidence.is_dir():
+        raise SystemExit(f"two-node evidence directory is missing: {evidence}")
+    phases = ("before", "during", "after")
+    labels = ["Baseline", "Pressure", "Recovery"]
+    timings = {phase: _timing_payloads(evidence, phase) for phase in phases}
+    if any(not timings[phase] for phase in phases):
+        raise SystemExit("two-node timing evidence is incomplete; refusing to chart an unmeasured metric path")
+    queues = {
+        phase: _prometheus_metric_maximum(
+            evidence / f"pressure-{phase}-queue-kv-ttft-prometheus.json",
+            ("num_requests_waiting",),
+        )
+        for phase in phases
+    }
+    kv = {
+        phase: _prometheus_metric_maximum(
+            evidence / f"pressure-{phase}-queue-kv-ttft-prometheus.json",
+            ("kv_cache_usage_perc", "gpu_cache_usage_perc"),
+        )
+        for phase in phases
+    }
+    if any(queues[phase] is None for phase in phases) or any(kv[phase] is None for phase in phases):
+        raise SystemExit("two-node queue/KV Prometheus evidence is incomplete; refusing to chart an unmeasured metric path")
+    ttft = [percentile([float(record["ttft_seconds"]) * 1000 for record in timings[phase]], 0.5) for phase in phases]
+    queue_values = [float(queues[phase]) for phase in phases]
+    kv_values = [float(kv[phase]) * 100 for phase in phases]
+    manifest = json.loads((run_dir / "run-manifest.json").read_text(encoding="utf-8"))
+    workload = manifest.get("workload") if isinstance(manifest, Mapping) else None
+    model = workload.get("model_id") if isinstance(workload, Mapping) else "frozen model"
+    (OUT / "two-node-vllm-metric-path.svg").write_text(svg_chart(
+        "Two-node Kubernetes vLLM metric path",
+        f"Raw stream timing + Prometheus snapshots from {run_dir.name}; {model}",
+        [
+            ("p50 TTFT", labels, ttft, COLORS["orange"], "milliseconds; curl first response byte"),
+            ("Max queued requests", labels, queue_values, COLORS["blue"], "vLLM waiting requests"),
+            ("Max KV cache use", labels, kv_values, COLORS["green"], "percent"),
+        ],
+    ), encoding="utf-8")
+    return {
+        "run": run_dir.name,
+        "artifact": "two-node-vllm-metric-path.svg",
+        "timing_samples": {phase: len(timings[phase]) for phase in phases},
+        "p50_ttft_ms": dict(zip(phases, ttft, strict=True)),
+        "max_queue_depth": dict(zip(phases, queue_values, strict=True)),
+        "max_kv_cache_percent": dict(zip(phases, kv_values, strict=True)),
+    }
+
+
+def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[str, object], two_node: dict[str, object], metric_path: dict[str, object] | None = None) -> None:
     def stats(arm: str) -> dict[str, float | int]:
         values = requests[arm]
         field = lambda name: [float(item[name]) for item in values]
@@ -494,6 +599,7 @@ def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[st
         "gpu_measurements": {arm: stats(arm) for arm in ("c4", "c32")},
         "local_hpa_verdict": verdict["claims"]["local_hpa_signal_plumbing"],
         "two_node_canary": two_node,
+        "two_node_metric_path": metric_path,
         "boundaries": [
             "GPU measurements are standalone vLLM serving data from one rented VM, not a Kubernetes HPA experiment.",
             "Local HPA proof validates independent signal plumbing; the KV source is synthetic.",
@@ -506,7 +612,10 @@ def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[st
     (OUT / "evidence-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--two-node-run", type=Path, help="completed two-node run directory whose raw K8s/vLLM evidence must be charted")
+    args = parser.parse_args(argv)
     OUT.mkdir(parents=True, exist_ok=True)
     if not VERDICT.is_file():
         raise SystemExit("run scripts/analyze_evidence.py --output /var/tmp/srecon26-verdict.json first")
@@ -517,7 +626,8 @@ def main() -> None:
     gpu_latency_chart(requests)
     hpa_signal_chart(verdict)
     two_node = two_node_startup_chart()
-    write_summary(requests, verdict, two_node)
+    metric_path = two_node_metric_path_chart(args.two_node_run.resolve()) if args.two_node_run is not None else None
+    write_summary(requests, verdict, two_node, metric_path)
 
 
 if __name__ == "__main__":

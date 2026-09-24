@@ -735,7 +735,7 @@ def main() -> int:
     if run_error is None and not finalization_errors:
         try:
             subprocess.run(
-                [sys.executable, str(ROOT / "scripts/build_evidence_pack.py")],
+                [sys.executable, str(ROOT / "scripts/build_evidence_pack.py"), "--two-node-run", str(args.output)],
                 cwd=ROOT,
                 check=True,
                 timeout=90,
