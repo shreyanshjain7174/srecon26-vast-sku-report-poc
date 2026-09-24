@@ -205,10 +205,11 @@ class VastCliGuardProvider:
     def get_instance(self, instance_id: int) -> GuardedInstance | None:
         raw = self._run(["show", "instance", str(instance_id), "--raw"])
         # Vast CLI currently uses either an empty object or its documented
-        # ``instances`` list envelope for an exact-ID miss.  Accept only these
-        # two fully empty shapes; an error envelope or any record remains
-        # unsafe and cannot become absence proof.
-        if raw == {} or raw == {"instances": []}:
+        # ``instances`` envelope for an exact-ID miss.  Older releases emit an
+        # empty list; the current release emits null.  Accept only these fully
+        # empty shapes; an error envelope or any record remains unsafe and
+        # cannot become absence proof.
+        if raw in ({}, {"instances": []}, {"instances": None}):
             return None
         if not isinstance(raw, dict):
             raise GuardSafetyError("provider exact-instance response has an unexpected shape")

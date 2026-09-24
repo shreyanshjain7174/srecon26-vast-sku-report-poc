@@ -54,7 +54,7 @@ def test_vast_exact_instance_refuses_unknown_response_instead_of_claiming_absenc
         provider.get_instance(417)
 
 
-@pytest.mark.parametrize("raw", ({}, {"instances": []}))
+@pytest.mark.parametrize("raw", ({}, {"instances": []}, {"instances": None}))
 def test_vast_exact_instance_accepts_only_explicit_empty_absence_shape(tmp_path: Path, raw: object) -> None:
     binary = tmp_path / "vastai"
     binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
