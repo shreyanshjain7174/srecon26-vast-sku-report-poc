@@ -104,14 +104,17 @@ def test_heartbeat_cadence_is_bounded_by_guard_timer_and_wired_to_ssh(tmp_path: 
 
 
 class FakeArmedGuard:
-    def __init__(self, *, status: str) -> None:
-        self.arm_receipt = object()
+    def __init__(self, *, status: str, status_error: bool = False) -> None:
+        self.arm_receipt = SimpleNamespace(root_hash="a" * 64)
         self.response = {"status": status, "root_hash": "a" * 64}
+        self.status_error = status_error
         self.status_calls = 0
         self.export_calls = 0
 
     def status(self) -> dict[str, object]:
         self.status_calls += 1
+        if self.status_error:
+            raise RuntimeError("status unavailable")
         return self.response
 
     def export_evidence(self, root_hash: str) -> SimpleNamespace:
@@ -137,3 +140,19 @@ def test_every_armed_guard_is_statused_and_exported_without_local_instance(tmp_p
     assert server.export_calls == worker.export_calls == 1
     assert evidence["server"]["instance_observed_locally"] is False
     assert evidence["worker"]["journal_artifact"] == "worker-azure-guard-journal.ndjson"
+
+
+def test_armed_guard_export_is_attempted_even_when_status_fails(tmp_path: Path) -> None:
+    server = FakeArmedGuard(status="ARMED", status_error=True)
+    worker = FakeArmedGuard(status="AWAITING_INSTANCE")
+
+    _evidence, errors = finalize_azure_guard_channels(
+        guards={"server": server, "worker": worker},  # type: ignore[arg-type]
+        labels={"server": "server-label", "worker": "worker-label"},
+        observed_labels=set(), output=tmp_path, absence_timeout_seconds=30,
+        sleep=lambda _seconds: None,
+    )
+
+    assert server.status_calls == 1
+    assert server.export_calls == 1
+    assert any("server Azure guard status failed" in error for error in errors)

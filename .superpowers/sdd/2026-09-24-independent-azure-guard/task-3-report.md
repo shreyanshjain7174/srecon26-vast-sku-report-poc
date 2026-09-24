@@ -85,8 +85,10 @@ description of the paid two-node guard selection and shared Azure channel.
   Each role constructs its own `AzureGuardSshConfig` and transport.
 - Every successfully armed Azure channel is statused and journal-exported
   during finalization, including a channel for which the local controller did
-  not observe an instance ID. Only a locally observed instance requires the
-  independent guard to reach three-read `ABSENCE_CONFIRMED`.
+  not observe an instance ID. If status retrieval fails, export is still
+  attempted against the bound arm root and the run remains evidence-incomplete.
+  Only a locally observed instance requires the independent guard to reach
+  three-read `ABSENCE_CONFIRMED`.
 - The evidence pack no longer treats manifest status strings as proof. It
   validates each Azure receipt's backend, role, nonce, exact label, deadline,
   root hash, remote host, script hash, and heartbeat; rejects a shared remote
@@ -106,8 +108,8 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q && semgrep scan --config a
 
 Observed fix-round results:
 
-- Pytest: `383 passed in 6.73s`.
-- Focused runner/evidence tests: `20 passed in 0.09s`.
+- Pytest: `384 passed in 4.50s`.
+- Focused runner/evidence tests: `21 passed in 0.11s`.
 - Semgrep: 290 rules over four changed Python files, zero findings and zero
   errors.
 - Python compilation and `git diff --check`: passed.

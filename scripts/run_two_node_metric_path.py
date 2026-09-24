@@ -217,7 +217,7 @@ def finalize_azure_guard_channels(
                 break
             status = last_status.get("status")
             if not observed or status == "ABSENCE_CONFIRMED" or status in unsafe or monotonic() >= stop_at:
-                if observed and status in unsafe:
+                if status in unsafe:
                     errors.append(f"{role} Azure guard reached unsafe terminal status {status}")
                 break
             sleep(5)
@@ -227,14 +227,15 @@ def finalize_azure_guard_channels(
             "instance_observed_locally": observed,
             "absence_required": observed,
         }
-        if last_status is not None:
+        export_root = last_status.get("root_hash") if last_status is not None else getattr(guard.arm_receipt, "root_hash", None)
+        if isinstance(export_root, str):
             try:
-                root_hash = str(last_status["root_hash"])
-                exported = guard.export_evidence(root_hash)
+                exported = guard.export_evidence(export_root)
                 journal_path = output / f"{role}-azure-guard-journal.ndjson"
                 journal_path.write_text(exported.journal, encoding="utf-8")
                 role_evidence.update(
                     {
+                        "exported_root_hash": export_root,
                         "journal_artifact": journal_path.name,
                         "journal_sha256": exported.journal_sha256,
                     }
@@ -242,6 +243,8 @@ def finalize_azure_guard_channels(
             except Exception as error:
                 errors.append(f"{role} Azure guard evidence export failed: {error}")
                 role_evidence["export_error"] = str(error)
+        else:
+            errors.append(f"{role} Azure guard evidence export lacked a bound root")
         if observed and (last_status is None or last_status.get("status") != "ABSENCE_CONFIRMED"):
             errors.append(f"{role} Azure guard did not publish three-read ABSENCE_CONFIRMED")
         evidence[role] = role_evidence
