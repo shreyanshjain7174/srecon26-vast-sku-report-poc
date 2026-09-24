@@ -105,3 +105,56 @@ standard-library APIs, but was not runtime-proven here. The worker imports
 Slow provider operations can exceed a 15-second timer interval; oneshots do not
 overlap. Process/service limits are 120/130 seconds. Loss of the controller or
 provider connectivity cannot be represented as guaranteed billing safety.
+
+## Review fix round 1 of 5
+
+Both requested findings are fixed. `GuardGateway` now accepts an injectable
+UTC clock and resamples it after blocking lock/readiness/provider/receipt work,
+immediately before authorization, and after durable arm/heartbeat completion.
+The previous request-time `now` keyword remains accepted for compatibility but
+cannot authorize a request. Tests explicitly supply a stale request timestamp
+while the injected current clock advances beyond heartbeat or hard deadlines.
+Timer ticks also obtain a fresh time for each run after acquiring the gateway
+lock and reading the receipt.
+
+With the parent's explicit scope approval, `GuardWorker.heartbeat` gained an
+optional clock callback. The gateway uses it to check the current time after
+the worker acquires its own lock and reloads durable state, immediately before
+renewal. A timeout or hard deadline crossed during that inner wait rejects the
+heartbeat without changing its saved timestamp or journal. Existing callers
+that supply only a fixed `now` retain their prior behavior.
+
+The alarm now raises `GuardProcessDeadline`, a dedicated `BaseException` that
+cannot be swallowed by ordinary provider, worker, per-run, or RPC `Exception`
+handlers. Only the process boundary handles it. The alarm remains enabled
+through unbuffered response output, and a deadline refusal uses nonblocking
+output so a stalled consumer cannot extend process lifetime. Partial responses
+are not followed by a second JSON object. Broken output channels exit quietly.
+
+Focused regressions cover expiry during gateway-lock/readiness/provider work,
+receipt reads, the worker's locked state load, durable-write completion, and
+fatal alarm propagation through worker and RPC handlers. A real subprocess
+test shortens the production alarm to one second while provider destruction
+sleeps for ten seconds; the process exits within three seconds with exit code
+2, one fixed refusal object, and empty stderr. This exercises direct invocation
+without depending on the outer systemd deadline.
+
+Validation after the final edits:
+
+```sh
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src:. python3 -m pytest \
+  tests/unit/test_azure_guard_rpc.py tests/unit/test_azure_guard_transport.py \
+  tests/unit/test_guard.py tests/unit/test_guard_client.py \
+  tests/integration/test_guard_idempotency.py \
+  tests/integration/test_guard_deadline.py \
+  tests/integration/test_azure_guard_installer.py -q
+semgrep scan --config .semgrep.yml --config p/python --config p/security-audit \
+  --error guard/ssh_rpc.py guard/guard_worker.py tests/unit/test_azure_guard_rpc.py
+git diff --check
+```
+
+Results: **173 passed, 1 skipped**; the skip is still the opt-in disposable
+Ubuntu installation test. Semgrep ran **202 applicable rules over 3 Python
+targets with 0 findings**. Whitespace checks passed. No Azure, SSH, provider,
+container, or deployment operations occurred during this fix round. The prior
+Ubuntu runtime-validation limitation remains unchanged.

@@ -59,6 +59,10 @@ _FIELDS = {
 _SAFE_TERMINAL = {"ABSENCE_CONFIRMED", "DISARMED"}
 
 
+class GuardProcessDeadline(BaseException):
+    """Unrecoverable process deadline; ordinary worker recovery cannot catch it."""
+
+
 def _refuse() -> None:
     raise GuardSafetyError("guard request refused")
 
@@ -198,13 +202,30 @@ def install_credential(stream: BinaryIO, path: Path = SECRET_FILE, *, require_ro
 
 class GuardGateway:
     def __init__(self, worker: GuardWorker, metadata: Mapping[str, str], *, require_root_owner: bool = True,
-                 readiness_check: Callable[[], None] | None = None) -> None:
+                 readiness_check: Callable[[], None] | None = None,
+                 clock: Callable[[], datetime] | None = None) -> None:
         self.worker = worker
         self.root = worker.root
         self.metadata = dict(metadata)
         self.require_root_owner = require_root_owner
         self.readiness_check = readiness_check
+        self.clock = clock or (lambda: datetime.now(UTC))
         check_path(self.root, directory=True, mode=0o700, require_root_owner=require_root_owner)
+
+    def _now(self) -> datetime:
+        value = self.clock()
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() != timedelta(0):
+            _refuse()
+        return value.astimezone(UTC)
+
+    def _authorize_receipt(self, receipt: Mapping[str, object]) -> datetime:
+        # Call only after all potentially blocking receipt/readiness work.
+        now = self._now()
+        if receipt["status"] not in {"ARMED", "AWAITING_INSTANCE"} or receipt["teardown_authority_at"] is not None:
+            _refuse()
+        if now >= receipt["hard_deadline"] or now - receipt["last_heartbeat"] > timedelta(seconds=int(receipt["heartbeat_timeout_seconds"])):
+            _refuse()
+        return now
 
     @contextmanager
     def locked(self) -> Iterator[None]:
@@ -244,21 +265,20 @@ class GuardGateway:
             _refuse()
         return receipt
 
-    def dispatch(self, command: str, payload: dict[str, object], *, now: datetime) -> dict[str, object]:
+    def dispatch(self, command: str, payload: dict[str, object], *, now: datetime | None = None) -> dict[str, object]:
+        # Retain the old request-time keyword for callers, but never use it as
+        # authorization time. Tests inject a clock, just like production does.
         # Also validate callers that use this API directly (tests/local tooling).
         validate_request(_encode({"protocol": PROTOCOL, "command": command, "payload": payload}))
         with self.locked():
             if command in {"arm", "preflight"} and self.readiness_check is not None:
                 self.readiness_check()
             if command == "arm":
-                return self._arm(payload, now)
+                return self._arm(payload)
             binding = self._binding()
             if command == "preflight":
                 receipt = self._bound_receipt(binding)
-                if receipt["status"] not in {"ARMED", "AWAITING_INSTANCE"} or receipt["teardown_authority_at"] is not None:
-                    _refuse()
-                if now >= receipt["hard_deadline"] or now - receipt["last_heartbeat"] > timedelta(seconds=int(receipt["heartbeat_timeout_seconds"])):
-                    _refuse()
+                self._authorize_receipt(receipt)
                 # ARMED is the attestation status; the worker can still be
                 # waiting for the provider create to become visible.
                 return {**receipt, "status": "ARMED", "worker_status": receipt["status"]}
@@ -272,19 +292,19 @@ class GuardGateway:
                 if any(payload[key] != binding[key] for key in ("run_id", "label")):
                     _refuse()
                 receipt = self._bound_receipt(binding)
-                if receipt["status"] not in {"ARMED", "AWAITING_INSTANCE"}:
-                    _refuse()
-                if now >= receipt["hard_deadline"] or now - receipt["last_heartbeat"] > timedelta(seconds=int(receipt["heartbeat_timeout_seconds"])):
-                    _refuse()
-                self.worker.heartbeat(nonce, now=now)
+                current = self._authorize_receipt(receipt)
+                self.worker.heartbeat(nonce, now=current, clock=self._now)
+                receipt = self._bound_receipt(binding)
+                self._authorize_receipt(receipt)
+                return receipt
             elif command == "anchor":
-                self.worker.anchor(nonce, str(payload["root_hash"]), now=now)
+                self.worker.anchor(nonce, str(payload["root_hash"]), now=self._now())
                 return {**self._receipt(nonce), "anchored_root_hash": payload["root_hash"]}
             elif command == "export":
                 return self._export(nonce, str(payload["root_hash"]))
             return self._receipt(nonce)
 
-    def _arm(self, payload: dict[str, object], now: datetime) -> dict[str, object]:
+    def _arm(self, payload: dict[str, object]) -> dict[str, object]:
         nonce = str(payload["nonce"])
         for existing in self._runs():
             receipt = self._receipt(existing)
@@ -297,10 +317,7 @@ class GuardGateway:
                 if binding != payload:
                     _refuse()
                 receipt = self._bound_receipt(binding)
-                if receipt["status"] not in {"ARMED", "AWAITING_INSTANCE"} or receipt["teardown_authority_at"] is not None:
-                    _refuse()
-                if now >= receipt["hard_deadline"] or now - receipt["last_heartbeat"] > timedelta(seconds=int(receipt["heartbeat_timeout_seconds"])):
-                    _refuse()
+                self._authorize_receipt(receipt)
                 return {**receipt, "status": "ARMED", "worker_status": receipt["status"]}
         if (self.root / nonce).exists():
             # A crash between worker arm and binding commit leaves a watcher
@@ -308,9 +325,11 @@ class GuardGateway:
             _refuse()
         self.worker.provider_preflight()
         self.worker.heartbeat_timeout = timedelta(seconds=int(payload["heartbeat_timeout_seconds"]))
-        self.worker.arm(None, str(payload["label"]), nonce, _timestamp(payload["hard_deadline"]), now=now)
+        self.worker.arm(None, str(payload["label"]), nonce, _timestamp(payload["hard_deadline"]), now=self._now())
         self.worker._durable_replace(binding_path, payload)
-        return self._bound_receipt(payload)
+        receipt = self._bound_receipt(payload)
+        self._authorize_receipt(receipt)
+        return receipt
 
     def _export(self, nonce: str, expected_root: str) -> dict[str, object]:
         with self.worker._locked(nonce) as directory:
@@ -331,7 +350,7 @@ class GuardGateway:
             _encode(response)
             return response
 
-    def tick_all(self, *, now: datetime) -> bool:
+    def tick_all(self, *, now: datetime | None = None) -> bool:
         failed = False
         with self.locked():
             for nonce in self._runs():
@@ -339,7 +358,7 @@ class GuardGateway:
                     # Incomplete/crashed or unsafe arms fail this tick, but
                     # must not prevent an independent arm's teardown check.
                     self._receipt(nonce)
-                    self.worker.tick(nonce, now=now)
+                    self.worker.tick(nonce, now=self._now())
                 except Exception:
                     # One corrupt/provider-failed run must not stop other ticks.
                     failed = True
@@ -391,33 +410,53 @@ def serve(arguments: list[str], original_command: str | None, stream: BinaryIO, 
         if arguments == ["tick-all"]:
             if original_command is not None:
                 _refuse()
-            if not gateway_factory().tick_all(now=datetime.now(UTC)):
+            if not gateway_factory().tick_all():
                 _refuse()
             return 0, _encode({"status": "TICK_COMPLETE"})
         if arguments or original_command != "guardctl":
             _refuse()
         command, payload = validate_request(read_bounded(stream, MAX_REQUEST_BYTES))
-        result = gateway_factory().dispatch(command, payload, now=datetime.now(UTC))
+        result = gateway_factory().dispatch(command, payload)
         return 0, _encode(result)
     except Exception:
         return 2, _encode({"status": "REFUSED", "error": "guard request refused"})
 
 
 def _deadline(_signal: int, _frame: object) -> None:
-    _refuse()
+    raise GuardProcessDeadline()
 
 
 def main() -> int:
     os.umask(0o077)
     signal.signal(signal.SIGALRM, _deadline)
     signal.alarm(120 if sys.argv[1:] == ["tick-all"] else 15)
-    # Suppress accidental diagnostic output from the worker/provider boundary.
-    with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink), redirect_stderr(sink):
-        code, response = serve(sys.argv[1:], os.environ.get("SSH_ORIGINAL_COMMAND"), sys.stdin.buffer)
-    signal.alarm(0)
-    sys.stdout.buffer.write(response)
-    sys.stdout.buffer.flush()
-    return code
+    response_started = False
+    try:
+        # Suppress accidental diagnostic output from the worker/provider boundary.
+        with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink), redirect_stderr(sink):
+            code, response = serve(sys.argv[1:], os.environ.get("SSH_ORIGINAL_COMMAND"), sys.stdin.buffer)
+        # Keep the alarm active through output, without a Python buffer that
+        # could block again during interpreter shutdown after a timeout.
+        response_started = True
+        while response:
+            response = response[os.write(sys.stdout.fileno(), response):]
+        return code
+    except GuardProcessDeadline:
+        # Handle termination only here. Never let a stalled stdout consumer
+        # extend the process deadline, nor append an error to a partial reply.
+        if not response_started:
+            try:
+                descriptor = sys.stdout.fileno()
+                os.set_blocking(descriptor, False)
+                os.write(descriptor, _encode({"status": "REFUSED", "error": "guard request refused"}))
+            except OSError:
+                pass
+        return 2
+    except OSError:
+        # A disconnected output channel must not produce a traceback.
+        return 2
+    finally:
+        signal.alarm(0)
 
 
 if __name__ == "__main__":

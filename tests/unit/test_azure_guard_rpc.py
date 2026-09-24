@@ -5,6 +5,10 @@ import io
 import json
 import os
 import subprocess
+import sys
+import textwrap
+import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -58,6 +62,16 @@ def arm_payload(**updates: object) -> dict[str, object]:
 
 def request(command: str, payload: dict[str, object]) -> bytes:
     return (json.dumps({"protocol": ssh_rpc.PROTOCOL, "command": command, "payload": payload}) + "\n").encode()
+
+
+def dispatch_at(server, command, payload, *, now):
+    server.clock = lambda: now
+    return server.dispatch(command, payload)
+
+
+def tick_at(server, *, now):
+    server.clock = lambda: now
+    return server.tick_all()
 
 
 @pytest.fixture
@@ -149,7 +163,7 @@ def test_input_reads_are_bounded():
 def test_all_successful_runtime_responses_satisfy_real_client(gateway):
     server, provider = gateway
     payload = arm_payload()
-    arm = server.dispatch("arm", payload, now=NOW)
+    arm = dispatch_at(server, "arm", payload, now=NOW)
     assert provider.inventory_reads == 1
     binding = json.loads(ssh_rpc._encode(arm))
     _validate_response("arm", payload, ssh_rpc._encode(arm).decode(), None)
@@ -159,11 +173,11 @@ def test_all_successful_runtime_responses_satisfy_real_client(gateway):
         ("status", {"nonce": NONCE}),
         ("anchor", {"nonce": NONCE, "root_hash": "a" * 64}),
     ]:
-        receipt = server.dispatch(command, body, now=NOW + timedelta(seconds=5))
+        receipt = dispatch_at(server, command, body, now=NOW + timedelta(seconds=5))
         _validate_response(command, body, ssh_rpc._encode(receipt).decode(), binding)
         assert receipt["heartbeat_timeout_seconds"] == 45
     body = {"nonce": NONCE, "root_hash": receipt["root_hash"]}
-    exported = server.dispatch("export", body, now=NOW)
+    exported = dispatch_at(server, "export", body, now=NOW)
     _validate_response("export", body, ssh_rpc._encode(exported).decode(), binding)
     assert hashlib.sha256(exported["journal"].encode()).hexdigest() == exported["journal_sha256"]
     assert json.loads(exported["journal"].splitlines()[-1])["event_hash"] == exported["root_hash"]
@@ -171,108 +185,108 @@ def test_all_successful_runtime_responses_satisfy_real_client(gateway):
 
 def test_preflight_attests_waiting_worker_without_changing_durable_state(gateway):
     server, _ = gateway
-    server.dispatch("arm", arm_payload(), now=NOW)
-    server.tick_all(now=NOW + timedelta(seconds=1))
-    response = server.dispatch("preflight", {}, now=NOW + timedelta(seconds=2))
+    dispatch_at(server, "arm", arm_payload(), now=NOW)
+    tick_at(server, now=NOW + timedelta(seconds=1))
+    response = dispatch_at(server, "preflight", {}, now=NOW + timedelta(seconds=2))
     assert response["status"] == "ARMED" and response["worker_status"] == "AWAITING_INSTANCE"
     assert server.worker.status(NONCE).status == "AWAITING_INSTANCE"
 
 
 def test_arm_replay_preserves_timeout_heartbeat_and_reconciled_instance(gateway):
     server, provider = gateway
-    first = server.dispatch("arm", arm_payload(), now=NOW)
+    first = dispatch_at(server, "arm", arm_payload(), now=NOW)
     provider.instances[417] = GuardedInstance(417, LABEL)
-    server.tick_all(now=NOW + timedelta(seconds=1))
-    repeated = server.dispatch("arm", arm_payload(), now=NOW + timedelta(seconds=10))
+    tick_at(server, now=NOW + timedelta(seconds=1))
+    repeated = dispatch_at(server, "arm", arm_payload(), now=NOW + timedelta(seconds=10))
     assert repeated["last_heartbeat"] == first["last_heartbeat"]
     assert repeated["instance_id"] == 417
     assert provider.inventory_reads == 1
     for update in ({"heartbeat_timeout_seconds": 120}, {"run_id": "different"}, {"hard_deadline": "2026-09-24T11:00:00Z"}):
         with pytest.raises(GuardSafetyError):
-            server.dispatch("arm", arm_payload(**update), now=NOW + timedelta(seconds=10))
+            dispatch_at(server, "arm", arm_payload(**update), now=NOW + timedelta(seconds=10))
 
 
 def test_restarted_timer_uses_persisted_timeout_and_retries_absence(gateway):
     server, provider = gateway
-    server.dispatch("arm", arm_payload(), now=NOW)
+    dispatch_at(server, "arm", arm_payload(), now=NOW)
     provider.instances[417] = GuardedInstance(417, LABEL)
-    assert server.tick_all(now=NOW + timedelta(seconds=1))
+    assert tick_at(server, now=NOW + timedelta(seconds=1))
     restarted = ssh_rpc.GuardGateway(GuardWorker(server.root, provider, heartbeat_timeout=timedelta(seconds=600), require_root_owner=False), METADATA, require_root_owner=False)
-    assert restarted.tick_all(now=NOW + timedelta(seconds=46))
+    assert tick_at(restarted, now=NOW + timedelta(seconds=46))
     assert provider.destroyed == [417]
     for seconds in (47, 48, 49):
-        assert restarted.tick_all(now=NOW + timedelta(seconds=seconds))
-    receipt = restarted.dispatch("status", {"nonce": NONCE}, now=NOW)
+        assert tick_at(restarted, now=NOW + timedelta(seconds=seconds))
+    receipt = dispatch_at(restarted, "status", {"nonce": NONCE}, now=NOW)
     assert receipt["status"] == "ABSENCE_CONFIRMED"
     assert len(receipt["absence_observations"]) == 3
 
 
 def test_expired_heartbeat_cannot_be_revived_before_timer_runs(gateway):
     server, _ = gateway
-    server.dispatch("arm", arm_payload(), now=NOW)
+    dispatch_at(server, "arm", arm_payload(), now=NOW)
     for command, payload in [
         ("arm", arm_payload()), ("preflight", {}),
         ("heartbeat", {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "monotonic_ns": 1}),
     ]:
         with pytest.raises(GuardSafetyError):
-            server.dispatch(command, payload, now=NOW + timedelta(seconds=46))
+            dispatch_at(server, command, payload, now=NOW + timedelta(seconds=46))
 
 
 def test_arm_checks_empty_account_and_refuses_other_unresolved_run(gateway):
     server, provider = gateway
     provider.instances[88] = GuardedInstance(88, "unrelated")
     with pytest.raises(GuardSafetyError):
-        server.dispatch("arm", arm_payload(), now=NOW)
+        dispatch_at(server, "arm", arm_payload(), now=NOW)
     assert not (server.root / NONCE).exists()
     provider.instances.clear()
-    server.dispatch("arm", arm_payload(), now=NOW)
+    dispatch_at(server, "arm", arm_payload(), now=NOW)
     other = arm_payload(nonce="nonce_other123", label="other--nonce-nonce_other123")
     with pytest.raises(GuardSafetyError):
-        server.dispatch("arm", other, now=NOW)
+        dispatch_at(server, "arm", other, now=NOW)
     for seconds in (301, 302, 303, 304):
-        server.tick_all(now=NOW + timedelta(seconds=seconds))
+        tick_at(server, now=NOW + timedelta(seconds=seconds))
     assert server.worker.status(NONCE).status == "ABSENCE_CONFIRMED"
     other["hard_deadline"] = "2026-09-24T10:15:00Z"
-    assert server.dispatch("arm", other, now=NOW + timedelta(seconds=305))["status"] == "ARMED"
+    assert dispatch_at(server, "arm", other, now=NOW + timedelta(seconds=305))["status"] == "ARMED"
 
 
 def test_unknown_status_does_not_create_durable_run(gateway):
     server, _ = gateway
-    server.dispatch("arm", arm_payload(), now=NOW)
+    dispatch_at(server, "arm", arm_payload(), now=NOW)
     with pytest.raises(FileNotFoundError):
-        server.dispatch("status", {"nonce": "unknown_nonce"}, now=NOW)
+        dispatch_at(server, "status", {"nonce": "unknown_nonce"}, now=NOW)
     assert not (server.root / "unknown_nonce").exists()
 
 
 def test_export_rejects_stale_root_and_tampering(gateway):
     server, _ = gateway
-    receipt = server.dispatch("arm", arm_payload(), now=NOW)
-    server.dispatch("anchor", {"nonce": NONCE, "root_hash": "b" * 64}, now=NOW)
+    receipt = dispatch_at(server, "arm", arm_payload(), now=NOW)
+    dispatch_at(server, "anchor", {"nonce": NONCE, "root_hash": "b" * 64}, now=NOW)
     with pytest.raises(GuardSafetyError):
-        server.dispatch("export", {"nonce": NONCE, "root_hash": receipt["root_hash"]}, now=NOW)
+        dispatch_at(server, "export", {"nonce": NONCE, "root_hash": receipt["root_hash"]}, now=NOW)
     journal = server.root / NONCE / "journal.ndjson"
     current = server.worker.status(NONCE)
     journal.write_bytes(journal.read_bytes().replace(b'"armed"', b'"altered"'))
     with pytest.raises(GuardSafetyError):
-        server.dispatch("export", {"nonce": NONCE, "root_hash": current.root_hash}, now=NOW)
+        dispatch_at(server, "export", {"nonce": NONCE, "root_hash": current.root_hash}, now=NOW)
 
 
 def test_export_response_limit_counts_json_escaping(gateway, monkeypatch):
     server, _ = gateway
-    receipt = server.dispatch("arm", arm_payload(), now=NOW)
+    receipt = dispatch_at(server, "arm", arm_payload(), now=NOW)
     journal_bytes = (server.root / NONCE / "journal.ndjson").stat().st_size
     monkeypatch.setattr(ssh_rpc, "MAX_RESPONSE_BYTES", journal_bytes + 20)
     with pytest.raises(GuardSafetyError):
-        server.dispatch("export", {"nonce": NONCE, "root_hash": receipt["root_hash"]}, now=NOW)
+        dispatch_at(server, "export", {"nonce": NONCE, "root_hash": receipt["root_hash"]}, now=NOW)
 
 
 def test_broken_prior_run_does_not_stop_other_timer_tick(gateway):
     server, provider = gateway
-    server.dispatch("arm", arm_payload(), now=NOW)
+    dispatch_at(server, "arm", arm_payload(), now=NOW)
     provider.instances[417] = GuardedInstance(417, LABEL)
-    server.tick_all(now=NOW + timedelta(seconds=1))
+    tick_at(server, now=NOW + timedelta(seconds=1))
     (server.root / "aaa_crashed_arm").mkdir(mode=0o700)
-    assert not server.tick_all(now=NOW + timedelta(seconds=46))
+    assert not tick_at(server, now=NOW + timedelta(seconds=46))
     assert provider.destroyed == [417]
 
 
@@ -340,7 +354,7 @@ def test_provider_exception_cannot_escape_in_response(monkeypatch):
     assert code == 2 and b"credential-sentinel" not in raw and b"stderr" not in raw
 
 
-def test_main_suppresses_accidental_diagnostics_and_emits_only_response(monkeypatch, capsys):
+def test_main_suppresses_accidental_diagnostics_and_emits_only_response(monkeypatch, capfd):
     expected = b'{"status":"REFUSED"}\n'
     def noisy_serve(*_args):
         print("private-diagnostic-sentinel")
@@ -355,14 +369,14 @@ def test_main_suppresses_accidental_diagnostics_and_emits_only_response(monkeypa
         assert ssh_rpc.main() == 2
     finally:
         os.umask(previous)
-    captured = capsys.readouterr()
+    captured = capfd.readouterr()
     assert captured.out.encode() == expected and captured.err == ""
 
 
 def test_local_timer_entrypoint_never_reads_stdin(monkeypatch):
     monkeypatch.setattr(ssh_rpc.os, "geteuid", lambda: 0)
     class Timer:
-        def tick_all(self, *, now):
+        def tick_all(self):
             return True
     code, raw = ssh_rpc.serve(["tick-all"], None, io.BytesIO(), gateway_factory=Timer)
     assert code == 0 and json.loads(raw)["status"] == "TICK_COMPLETE"
@@ -378,11 +392,11 @@ def test_arm_and_preflight_require_live_enabled_timer(monkeypatch, gateway, acti
     monkeypatch.setattr(ssh_rpc.subprocess, "run", systemctl)
     server.readiness_check = ssh_rpc.check_timer_ready
     if active == "active" and enabled == "enabled":
-        assert server.dispatch("arm", arm_payload(), now=NOW)["status"] == "ARMED"
-        assert server.dispatch("preflight", {}, now=NOW)["status"] == "ARMED"
+        assert dispatch_at(server, "arm", arm_payload(), now=NOW)["status"] == "ARMED"
+        assert dispatch_at(server, "preflight", {}, now=NOW)["status"] == "ARMED"
     else:
         with pytest.raises(GuardSafetyError):
-            server.dispatch("arm", arm_payload(), now=NOW)
+            dispatch_at(server, "arm", arm_payload(), now=NOW)
         assert provider.inventory_reads == 0
 
 
@@ -415,3 +429,171 @@ def test_installer_metadata_schema_is_strict(updates):
     config["vast_bin"] = "/opt/vast/bin/vastai"
     with pytest.raises((GuardSafetyError, ValueError)):
         ssh_rpc.validate_config({**config, **updates})
+
+
+@pytest.mark.parametrize("block_at", ["gateway_lock", "readiness", "provider"])
+def test_arm_rechecks_current_clock_after_blocking_setup(gateway, monkeypatch, block_at):
+    server, provider = gateway
+    current = [NOW]
+    server.clock = lambda: current[0]
+    def expire():
+        current[0] = NOW + timedelta(minutes=6)
+    if block_at == "gateway_lock":
+        original = server.locked
+        @contextmanager
+        def delayed_lock():
+            with original():
+                expire()
+                yield
+        monkeypatch.setattr(server, "locked", delayed_lock)
+    elif block_at == "readiness":
+        server.readiness_check = expire
+    else:
+        def delayed_inventory():
+            expire()
+            return 0
+        monkeypatch.setattr(provider, "instance_inventory_count", delayed_inventory)
+    with pytest.raises(GuardSafetyError):
+        server.dispatch("arm", arm_payload(), now=NOW)
+    assert not (server.root / NONCE).exists()
+
+
+@pytest.mark.parametrize("command", ["arm", "preflight", "heartbeat"])
+@pytest.mark.parametrize("expired_by", ["heartbeat", "deadline"])
+def test_authorization_rechecks_after_receipt_read_despite_stale_request_time(gateway, monkeypatch, command, expired_by):
+    server, _ = gateway
+    dispatch_at(server, "arm", arm_payload(), now=NOW)
+    current = [NOW + timedelta(seconds=1)]
+    server.clock = lambda: current[0]
+    original = server._bound_receipt
+    def delayed_receipt(binding):
+        receipt = original(binding)
+        current[0] = NOW + timedelta(seconds=46 if expired_by == "heartbeat" else 301)
+        return receipt
+    monkeypatch.setattr(server, "_bound_receipt", delayed_receipt)
+    payload = arm_payload() if command == "arm" else {}
+    if command == "heartbeat":
+        payload = {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "monotonic_ns": 1}
+    with pytest.raises(GuardSafetyError):
+        server.dispatch(command, payload, now=NOW)
+    assert server.worker.status(NONCE).last_heartbeat == NOW
+
+
+def test_heartbeat_rechecks_current_time_after_worker_lock_and_state_read(gateway, monkeypatch):
+    server, _ = gateway
+    dispatch_at(server, "arm", arm_payload(), now=NOW)
+    current = [NOW + timedelta(seconds=1)]
+    server.clock = lambda: current[0]
+    original = server.worker._load
+    calls = 0
+    def delayed_worker_load(directory):
+        nonlocal calls
+        state = original(directory)
+        calls += 1
+        # First read is the gateway receipt; second is under heartbeat's lock.
+        if calls == 2:
+            current[0] = NOW + timedelta(seconds=46)
+        return state
+    monkeypatch.setattr(server.worker, "_load", delayed_worker_load)
+    payload = {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "monotonic_ns": 1}
+    with pytest.raises(GuardSafetyError, match="authorization has expired"):
+        server.dispatch("heartbeat", payload, now=NOW)
+    assert server.worker.status(NONCE).last_heartbeat == NOW
+    assert server.worker.status(NONCE).event_count == 1
+
+
+@pytest.mark.parametrize("command", ["arm", "heartbeat"])
+def test_no_armed_response_if_durable_write_finishes_after_deadline(gateway, monkeypatch, command):
+    server, _ = gateway
+    current = [NOW]
+    if command == "heartbeat":
+        dispatch_at(server, "arm", arm_payload(), now=NOW)
+        current[0] += timedelta(seconds=1)
+    server.clock = lambda: current[0]
+    original = server.worker._durable_replace
+    def delayed_persist(path, payload):
+        original(path, payload)
+        if path.name == ("rpc-binding.json" if command == "arm" else "state.json"):
+            current[0] = NOW + timedelta(minutes=6)
+    monkeypatch.setattr(server.worker, "_durable_replace", delayed_persist)
+    payload = arm_payload() if command == "arm" else {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "monotonic_ns": 1}
+    with pytest.raises(GuardSafetyError):
+        server.dispatch(command, payload, now=NOW)
+    # Persistence keeps the watcher available, but never claims it is still safe.
+    assert (server.root / NONCE / "state.json").is_file()
+
+
+def test_process_deadline_bypasses_provider_worker_and_tick_recovery(gateway, monkeypatch):
+    server, provider = gateway
+    dispatch_at(server, "arm", arm_payload(), now=NOW)
+    provider.instances[417] = GuardedInstance(417, LABEL)
+    tick_at(server, now=NOW + timedelta(seconds=1))
+    def expire_during_destroy(*_args):
+        ssh_rpc._deadline(ssh_rpc.signal.SIGALRM, None)
+    monkeypatch.setattr(provider, "destroy_exact", expire_during_destroy)
+    with pytest.raises(ssh_rpc.GuardProcessDeadline):
+        tick_at(server, now=NOW + timedelta(seconds=46))
+    assert server.worker.status(NONCE).status == "TEARDOWN_REQUESTED"
+
+
+def test_serve_does_not_handle_process_deadline(monkeypatch):
+    monkeypatch.setattr(ssh_rpc.os, "geteuid", lambda: 0)
+    class ExpiringTimer:
+        def tick_all(self):
+            ssh_rpc._deadline(ssh_rpc.signal.SIGALRM, None)
+    with pytest.raises(ssh_rpc.GuardProcessDeadline):
+        ssh_rpc.serve(["tick-all"], None, io.BytesIO(), gateway_factory=ExpiringTimer)
+
+
+def test_direct_timer_process_deadline_cannot_be_swallowed_by_worker(tmp_path):
+    source = textwrap.dedent('''
+        import functools, os, signal, sys, time
+        from datetime import UTC, datetime, timedelta
+        from pathlib import Path
+        from guard import ssh_rpc
+        from guard.guard_worker import GuardWorker, GuardedInstance
+        os.umask(0o077)
+        class Provider:
+            def instance_inventory_count(self): return 0
+            def find_instances(self, label): return (GuardedInstance(417, label),)
+            def get_instance(self, instance_id): return GuardedInstance(instance_id, label)
+            def destroy_exact(self, *args): time.sleep(10)
+        nonce = "direct_deadline_123"
+        label = "direct--nonce-" + nonce
+        start = datetime.now(UTC)
+        worker = GuardWorker(Path(sys.argv[1]) / "state", Provider(), heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
+        worker.arm(417, label, nonce, start + timedelta(minutes=5), now=start)
+        gateway = ssh_rpc.GuardGateway(worker, {}, require_root_owner=False, clock=lambda: start + timedelta(seconds=2))
+        ssh_rpc.os.geteuid = lambda: 0
+        ssh_rpc.serve = functools.partial(ssh_rpc.serve, gateway_factory=lambda: gateway)
+        actual_alarm = signal.alarm
+        signal.alarm = lambda duration: actual_alarm(1 if duration else 0)
+        sys.argv = ["guardctl", "tick-all"]
+        raise SystemExit(ssh_rpc.main())
+    ''')
+    started = time.monotonic()
+    completed = subprocess.run(
+        [sys.executable, "-c", source, str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[2], stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=4,
+        env={"PATH": os.defpath, "PYTHONPATH": ".", "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert time.monotonic() - started < 3
+    assert completed.returncode == 2 and completed.stderr == b""
+    assert json.loads(completed.stdout) == {"status": "REFUSED", "error": "guard request refused"}
+
+
+def test_process_boundary_is_quiet_when_output_disconnects(monkeypatch, capfd):
+    monkeypatch.setattr(ssh_rpc, "serve", lambda *_args: (0, b'{"status":"TICK_COMPLETE"}\n'))
+    monkeypatch.setattr(ssh_rpc.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(ssh_rpc.signal, "alarm", lambda *_args: None)
+    def disconnected(*_args):
+        raise BrokenPipeError()
+    monkeypatch.setattr(ssh_rpc.os, "write", disconnected)
+    previous = os.umask(0o077)
+    try:
+        assert ssh_rpc.main() == 2
+    finally:
+        os.umask(previous)
+    captured = capfd.readouterr()
+    assert captured.out == "" and captured.err == ""

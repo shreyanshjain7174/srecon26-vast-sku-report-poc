@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Iterator, Mapping, Protocol
+from typing import Callable, Iterator, Mapping, Protocol
 
 
 _GENESIS_HASH = "0" * 64
@@ -477,12 +477,18 @@ class GuardWorker:
             self._append_event(directory, state, "armed", now, {"instance_id": instance_id, "label": label})
             return self._persist(directory, state)
 
-    def heartbeat(self, nonce: str, *, now: datetime) -> GuardReceipt:
+    def heartbeat(self, nonce: str, *, now: datetime, clock: Callable[[], datetime] | None = None) -> GuardReceipt:
         now = _utc(now)
         with self._locked(nonce) as directory:
             state = self._load(directory)
             if state.get("teardown_authority_at") is not None:
                 raise GuardSafetyError("heartbeat is forbidden after teardown authority activates")
+            if clock is not None:
+                # The gateway's request timestamp may precede a wait for this
+                # lock or journal recovery. Recheck inside the mutation lock.
+                now = _utc(clock())
+                if now >= _parse_stamp(state["hard_deadline"]) or now - _parse_stamp(state["last_heartbeat"]) > timedelta(seconds=int(state["heartbeat_timeout_seconds"])):
+                    raise GuardSafetyError("heartbeat authorization has expired")
             state["last_heartbeat"] = _stamp(now)
             self._append_event(directory, state, "heartbeat", now)
             return self._persist(directory, state)
