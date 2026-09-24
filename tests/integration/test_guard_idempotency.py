@@ -228,6 +228,31 @@ def test_teardown_error_reconciles_and_retries_only_the_exact_owned_target(tmp_p
     assert provider.destroy_calls == [(INSTANCE_ID, LABEL), (INSTANCE_ID, LABEL)]
 
 
+def test_destroy_response_error_starts_absence_proof_when_another_finalizer_won_the_race(tmp_path) -> None:
+    class ConcurrentFinalizerProvider(FakeProvider):
+        def destroy_exact(self, instance_id: int, expected_label: str) -> None:
+            self.destroy_calls.append((instance_id, expected_label))
+            # Another independently-authorized finalizer removed the exact
+            # nonce-bound target while this destroy request was in flight.
+            self.instance = None
+            raise TimeoutError("provider response lost after request")
+
+    provider = ConcurrentFinalizerProvider()
+    worker = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
+    worker.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(seconds=10), now=NOW)
+
+    first = worker.tick(NONCE, now=NOW + timedelta(seconds=11))
+    second = worker.tick(NONCE, now=NOW + timedelta(seconds=12))
+    third = worker.tick(NONCE, now=NOW + timedelta(seconds=13))
+    confirmed = worker.tick(NONCE, now=NOW + timedelta(seconds=14))
+
+    assert provider.destroy_calls == [(INSTANCE_ID, LABEL)]
+    assert first.status == "TEARDOWN_REQUESTED"
+    assert second.status == "ABSENCE_PENDING"
+    assert third.status == "ABSENCE_PENDING"
+    assert confirmed.status == "ABSENCE_CONFIRMED"
+
+
 def test_destroy_success_requires_provider_confirmed_absence_before_terminal_receipt(tmp_path) -> None:
     class DelayedAbsenceProvider(FakeProvider):
         def destroy_exact(self, instance_id: int, expected_label: str) -> None:

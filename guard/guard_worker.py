@@ -724,7 +724,22 @@ class GuardWorker:
             try:
                 self.provider.destroy_exact(instance.instance_id, instance.label)
             except Exception as exc:
-                return self._teardown_error(directory, state, now, f"destroy_{type(exc).__name__}")
+                # The destroy request and the independently-owned lease
+                # finalizer can race.  A failed/ambiguous destroy response is
+                # not evidence that the target remains billable: reconcile
+                # exact ID plus nonce-bound label before declaring failure.
+                # If the target is gone, start the usual three-read absence
+                # quorum; if it remains, _observe_absence records the error.
+                try:
+                    return self._observe_absence(directory, state, now)
+                except Exception as absence_error:
+                    self._reset_absence_quorum(directory, state, now, f"destroy_{type(exc).__name__}; absence_{type(absence_error).__name__}")
+                    return self._teardown_error(
+                        directory,
+                        state,
+                        now,
+                        f"destroy_{type(exc).__name__}; absence_{type(absence_error).__name__}",
+                    )
             # A successful CLI exit is not sufficient: the provider must
             # independently confirm that this exact ID has disappeared.
             try:
