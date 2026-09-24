@@ -29,8 +29,6 @@ from srecon26_poc.contracts import InstanceContract, OfferContract, ProbeOutcome
 from srecon26_poc.live_dispatch import REPORT_MARGIN, ProviderFaultEvidence
 from srecon26_poc.live_factory import (
     DynamicAzureGuard,
-    DynamicGitHubGuard,
-    GitHubGuardConfig,
     LiveFactoryError,
     ProviderStartupFault,
     SshRemoteWorkload,
@@ -77,20 +75,36 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--server-machine", type=int, required=True)
     parser.add_argument("--worker-offer", type=int, required=True)
     parser.add_argument("--worker-machine", type=int, required=True)
-    parser.add_argument("--guard-backend", choices=("github", "azure"), default="github")
-    parser.add_argument("--server-guard-repository")
-    parser.add_argument("--server-guard-issue", type=int)
-    parser.add_argument("--worker-guard-repository")
-    parser.add_argument("--worker-guard-issue", type=int)
-    parser.add_argument("--guard-author")
-    parser.add_argument("--azure-guard-host")
-    parser.add_argument("--azure-guard-user")
-    parser.add_argument("--azure-guard-identity", type=Path)
-    parser.add_argument("--azure-guard-known-hosts", type=Path)
-    parser.add_argument("--azure-guard-port", type=int, default=22)
+    parser.add_argument(
+        "--guard-backend",
+        choices=("azure",),
+        required=True,
+        help="required paid-run safety backend; GitHub guards are not accepted by this entry point",
+    )
+    parser.add_argument("--server-azure-guard-host")
+    parser.add_argument("--server-azure-guard-user")
+    parser.add_argument("--server-azure-guard-identity", type=Path)
+    parser.add_argument("--server-azure-guard-known-hosts", type=Path)
+    parser.add_argument("--server-azure-guard-port", type=int, default=22)
+    parser.add_argument("--worker-azure-guard-host")
+    parser.add_argument("--worker-azure-guard-user")
+    parser.add_argument("--worker-azure-guard-identity", type=Path)
+    parser.add_argument("--worker-azure-guard-known-hosts", type=Path)
+    parser.add_argument("--worker-azure-guard-port", type=int, default=22)
     parser.add_argument("--azure-guard-timeout-seconds", type=int, default=20)
     parser.add_argument("--azure-guard-absence-timeout-seconds", type=int, default=240)
-    parser.add_argument("--heartbeat-seconds", type=int, default=300)
+    parser.add_argument(
+        "--guard-heartbeat-timeout-seconds",
+        type=int,
+        required=True,
+        help="expiry configured on both guard workers; must be >= --heartbeat-seconds",
+    )
+    parser.add_argument(
+        "--heartbeat-seconds",
+        type=int,
+        default=120,
+        help="nominal workload heartbeat interval; blocking SSH emits at half this interval",
+    )
     parser.add_argument("--report-adapter-factory", default=os.environ.get("SRECON26_REPORT_ADAPTER_FACTORY"))
     parser.add_argument("--vast-cli", default=os.environ.get("SRECON26_VAST_CLI", "vastai"))
     parser.add_argument("--vm-template", choices=("ubuntu-cli", "ubuntu-desktop"), default="ubuntu-cli")
@@ -99,35 +113,38 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def validate_configuration(args: argparse.Namespace) -> None:
-    if args.guard_backend == "github":
-        required = {
-            "--server-guard-repository": args.server_guard_repository,
-            "--server-guard-issue": args.server_guard_issue,
-            "--worker-guard-repository": args.worker_guard_repository,
-            "--worker-guard-issue": args.worker_guard_issue,
-            "--guard-author": args.guard_author,
-        }
-        missing = [name for name, value in required.items() if value in (None, "")]
-        if missing:
-            raise SystemExit(f"GitHub guard backend requires {', '.join(missing)}")
-        if args.server_guard_repository == args.worker_guard_repository and args.server_guard_issue == args.worker_guard_issue:
-            raise SystemExit("server and worker must use distinct independent GitHub guard channels")
-    else:
-        required = {
-            "--azure-guard-host": args.azure_guard_host,
-            "--azure-guard-user": args.azure_guard_user,
-            "--azure-guard-identity": args.azure_guard_identity,
-            "--azure-guard-known-hosts": args.azure_guard_known_hosts,
-        }
-        missing = [name for name, value in required.items() if value in (None, "")]
-        if missing:
-            raise SystemExit(f"Azure guard backend requires {', '.join(missing)}")
-        if not 1 <= args.azure_guard_port <= 65535:
-            raise SystemExit("Azure guard port must be from 1 to 65535")
-        if not 1 <= args.azure_guard_timeout_seconds <= 60:
-            raise SystemExit("Azure guard timeout must be from 1 to 60 seconds")
-        if not 30 <= args.azure_guard_absence_timeout_seconds <= 600:
-            raise SystemExit("Azure guard absence timeout must be from 30 to 600 seconds")
+    required = {
+        "--server-azure-guard-host": args.server_azure_guard_host,
+        "--server-azure-guard-user": args.server_azure_guard_user,
+        "--server-azure-guard-identity": args.server_azure_guard_identity,
+        "--server-azure-guard-known-hosts": args.server_azure_guard_known_hosts,
+        "--worker-azure-guard-host": args.worker_azure_guard_host,
+        "--worker-azure-guard-user": args.worker_azure_guard_user,
+        "--worker-azure-guard-identity": args.worker_azure_guard_identity,
+        "--worker-azure-guard-known-hosts": args.worker_azure_guard_known_hosts,
+    }
+    missing = [name for name, value in required.items() if value in (None, "")]
+    if missing:
+        raise SystemExit(f"Azure guard backend requires {', '.join(missing)}")
+    if args.server_azure_guard_host.casefold() == args.worker_azure_guard_host.casefold():
+        raise SystemExit("server and worker Azure guards require distinct controller hosts")
+    if args.server_azure_guard_identity.expanduser().resolve() == args.worker_azure_guard_identity.expanduser().resolve():
+        raise SystemExit("server and worker Azure guards require distinct SSH identities")
+    if args.server_azure_guard_known_hosts.expanduser().resolve() == args.worker_azure_guard_known_hosts.expanduser().resolve():
+        raise SystemExit("server and worker Azure guards require distinct pinned known-hosts files")
+    for role, port in (("server", args.server_azure_guard_port), ("worker", args.worker_azure_guard_port)):
+        if not 1 <= port <= 65535:
+            raise SystemExit(f"{role} Azure guard port must be from 1 to 65535")
+    if not 1 <= args.azure_guard_timeout_seconds <= 60:
+        raise SystemExit("Azure guard timeout must be from 1 to 60 seconds")
+    if not 30 <= args.azure_guard_absence_timeout_seconds <= 600:
+        raise SystemExit("Azure guard absence timeout must be from 30 to 600 seconds")
+    if not 30 <= args.heartbeat_seconds <= 600:
+        raise SystemExit("heartbeat seconds must be from 30 to 600")
+    if not 30 <= args.guard_heartbeat_timeout_seconds <= 600:
+        raise SystemExit("guard heartbeat timeout must be from 30 to 600 seconds")
+    if args.heartbeat_seconds > args.guard_heartbeat_timeout_seconds:
+        raise SystemExit("heartbeat seconds must not exceed the configured guard heartbeat timeout")
     if not args.report_adapter_factory:
         raise SystemExit("--report-adapter-factory is required before a paid two-node run")
 
@@ -137,34 +154,113 @@ def build_guards(
     *,
     on_server_armed: Callable[[Mapping[str, object]], None],
     on_worker_armed: Callable[[Mapping[str, object]], None],
-) -> tuple[DynamicGitHubGuard | DynamicAzureGuard, DynamicGitHubGuard | DynamicAzureGuard]:
+) -> tuple[DynamicAzureGuard, DynamicAzureGuard]:
     """Build two nonce-isolated clients without accepting secret material."""
-
-    if args.guard_backend == "github":
-        common = {"ref": "main", "trusted_author": args.guard_author, "heartbeat_seconds": args.heartbeat_seconds}
-        return (
-            DynamicGitHubGuard(
-                GitHubGuardConfig(repository=args.server_guard_repository, issue_number=args.server_guard_issue, **common),
-                on_armed=on_server_armed,
-            ),
-            DynamicGitHubGuard(
-                GitHubGuardConfig(repository=args.worker_guard_repository, issue_number=args.worker_guard_issue, **common),
-                on_armed=on_worker_armed,
-            ),
-        )
-    config = AzureGuardSshConfig(
-        host=args.azure_guard_host,
-        user=args.azure_guard_user,
-        identity_file=args.azure_guard_identity,
-        known_hosts_file=args.azure_guard_known_hosts,
-        port=args.azure_guard_port,
+    server_config = AzureGuardSshConfig(
+        host=args.server_azure_guard_host,
+        user=args.server_azure_guard_user,
+        identity_file=args.server_azure_guard_identity,
+        known_hosts_file=args.server_azure_guard_known_hosts,
+        port=args.server_azure_guard_port,
         timeout_seconds=args.azure_guard_timeout_seconds,
     )
-    # The clients intentionally do not share an AzureSshGuardTransport: each
-    # transport permanently binds later RPCs to one distinct nonce receipt.
+    worker_config = AzureGuardSshConfig(
+        host=args.worker_azure_guard_host,
+        user=args.worker_azure_guard_user,
+        identity_file=args.worker_azure_guard_identity,
+        known_hosts_file=args.worker_azure_guard_known_hosts,
+        port=args.worker_azure_guard_port,
+        timeout_seconds=args.azure_guard_timeout_seconds,
+    )
+    # Each transport permanently binds later RPCs to one nonce receipt and a
+    # different pinned controller host, key, and known-hosts trust root.
     return (
-        DynamicAzureGuard(config, on_armed=on_server_armed),
-        DynamicAzureGuard(config, on_armed=on_worker_armed),
+        DynamicAzureGuard(server_config, on_armed=on_server_armed),
+        DynamicAzureGuard(worker_config, on_armed=on_worker_armed),
+    )
+
+
+def finalize_azure_guard_channels(
+    *,
+    guards: Mapping[str, DynamicAzureGuard],
+    labels: Mapping[str, str],
+    observed_labels: set[str],
+    output: Path,
+    absence_timeout_seconds: int,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[dict[str, object], list[str]]:
+    """Status and export every armed channel, polling absence when needed."""
+
+    evidence: dict[str, object] = {}
+    errors: list[str] = []
+    unsafe = {"OWNERSHIP_MISMATCH", "TEARDOWN_RETRIES_EXHAUSTED", "DISARMED"}
+    for role in ("server", "worker"):
+        guard = guards[role]
+        label = labels[role]
+        observed = label in observed_labels
+        if guard.arm_receipt is None:
+            evidence[role] = {
+                "status": "NOT_ARMED",
+                "instance_observed_locally": observed,
+                "absence_required": observed,
+            }
+            continue
+
+        last_status: dict[str, object] | None = None
+        stop_at = monotonic() + absence_timeout_seconds
+        while True:
+            try:
+                last_status = guard.status()
+            except Exception as error:
+                errors.append(f"{role} Azure guard status failed: {error}")
+                break
+            status = last_status.get("status")
+            if not observed or status == "ABSENCE_CONFIRMED" or status in unsafe or monotonic() >= stop_at:
+                if observed and status in unsafe:
+                    errors.append(f"{role} Azure guard reached unsafe terminal status {status}")
+                break
+            sleep(5)
+
+        role_evidence: dict[str, object] = {
+            **(last_status or {"status": "STATUS_UNAVAILABLE"}),
+            "instance_observed_locally": observed,
+            "absence_required": observed,
+        }
+        if last_status is not None:
+            try:
+                root_hash = str(last_status["root_hash"])
+                exported = guard.export_evidence(root_hash)
+                journal_path = output / f"{role}-azure-guard-journal.ndjson"
+                journal_path.write_text(exported.journal, encoding="utf-8")
+                role_evidence.update(
+                    {
+                        "journal_artifact": journal_path.name,
+                        "journal_sha256": exported.journal_sha256,
+                    }
+                )
+            except Exception as error:
+                errors.append(f"{role} Azure guard evidence export failed: {error}")
+                role_evidence["export_error"] = str(error)
+        if observed and (last_status is None or last_status.get("status") != "ABSENCE_CONFIRMED"):
+            errors.append(f"{role} Azure guard did not publish three-read ABSENCE_CONFIRMED")
+        evidence[role] = role_evidence
+    return evidence, errors
+
+
+def workload_config(args: argparse.Namespace) -> SshWorkloadConfig:
+    """Bind the paid runner's heartbeat cadence to every blocking SSH call."""
+
+    return SshWorkloadConfig(
+        user="root",
+        identity_file=Path.home() / ".ssh/id_rsa",
+        public_key_file=Path.home() / ".ssh/id_rsa.pub",
+        known_hosts_file=Path.home() / ".ssh/known_hosts",
+        k3s_binary=ROOT / "artifacts/tools/k3s-v1.36.4+k3s1",
+        nvidia_runtime_template=ROOT / "infra/k3s/nvidia-runtime.toml",
+        local_script=ROOT / "scripts/remote_host_canary.sh",
+        local_manifest_dir=ROOT / "infra/k3s",
+        heartbeat_seconds=args.heartbeat_seconds,
     )
 
 
@@ -199,8 +295,6 @@ def main() -> int:
         raise SystemExit("output path already exists; refusing replay")
     if args.server_offer == args.worker_offer or args.server_machine == args.worker_machine:
         raise SystemExit("server and worker need distinct offers and machines")
-    if not 30 <= args.heartbeat_seconds <= 600:
-        raise SystemExit("heartbeat seconds must be from 30 to 600")
     args.output.mkdir(parents=True, mode=0o700)
     deadline = datetime.now(UTC) + timedelta(minutes=42)
     provider = VastCliProvider(args.vast_cli, reconcile_attempts=24, reconcile_interval_seconds=5)
@@ -213,15 +307,7 @@ def main() -> int:
     worker_label = f"srecon26-two-node-worker--nonce-{worker_nonce}"
     server_offer = provider.get_vms_enabled_offer(args.server_offer, machine_id=args.server_machine, label=server_label)
     worker_offer = provider.get_vms_enabled_offer(args.worker_offer, machine_id=args.worker_machine, label=worker_label)
-    work = SshRemoteWorkload(
-        VastSshResolver(args.vast_cli),
-        SshWorkloadConfig(
-            user="root", identity_file=Path.home() / ".ssh/id_rsa", public_key_file=Path.home() / ".ssh/id_rsa.pub",
-            known_hosts_file=Path.home() / ".ssh/known_hosts", k3s_binary=ROOT / "artifacts/tools/k3s-v1.36.4+k3s1",
-            nvidia_runtime_template=ROOT / "infra/k3s/nvidia-runtime.toml", local_script=ROOT / "scripts/remote_host_canary.sh",
-            local_manifest_dir=ROOT / "infra/k3s",
-        ),
-    )
+    work = SshRemoteWorkload(VastSshResolver(args.vast_cli), workload_config(args))
     template = (
         (OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH, OFFICIAL_UBUNTU_DESKTOP_IMAGE)
         if args.vm_template == "ubuntu-desktop"
@@ -235,6 +321,7 @@ def main() -> int:
         "real_run_contingent": True,
         "guard_backend": args.guard_backend,
         "heartbeat_seconds": args.heartbeat_seconds,
+        "guard_heartbeat_timeout_seconds": args.guard_heartbeat_timeout_seconds,
         "vm_template": args.vm_template,
         "launch": launch.to_json(),
         "status": "preflighted",
@@ -250,7 +337,7 @@ def main() -> int:
     def record_guard(role: str, receipt: Mapping[str, object]) -> None:
         guards = manifest["guards"]
         assert isinstance(guards, dict)
-        guards[role] = dict(receipt)
+        guards[role] = {**receipt, "role": role}
         armed_roles.add(role)
         manifest["status"] = "guards-arming" if len(armed_roles) == 1 else "guards-armed"
         write_json(args.output / "run-manifest.json", manifest)
@@ -480,47 +567,13 @@ def main() -> int:
         return errors
 
     def finalize_azure_guards() -> list[str]:
-        if args.guard_backend != "azure" or not observed_instances:
-            return []
-        errors: list[str] = []
-        guard_evidence: dict[str, object] = {}
-        for role, guard in (("server", server_guard), ("worker", worker_guard)):
-            assert isinstance(guard, DynamicAzureGuard)
-            label = server_label if role == "server" else worker_label
-            if label not in observed_instances:
-                guard_evidence[role] = {"status": "NO_INSTANCE_OBSERVED"}
-                continue
-            last_status: dict[str, object] | None = None
-            stop_at = time.monotonic() + args.azure_guard_absence_timeout_seconds
-            while time.monotonic() < stop_at:
-                try:
-                    last_status = guard.status()
-                except Exception as error:
-                    errors.append(f"{role} Azure guard status failed: {error}")
-                    break
-                if last_status.get("status") == "ABSENCE_CONFIRMED":
-                    break
-                if last_status.get("status") in {"OWNERSHIP_MISMATCH", "TEARDOWN_RETRIES_EXHAUSTED", "DISARMED"}:
-                    errors.append(f"{role} Azure guard reached unsafe terminal status {last_status.get('status')}")
-                    break
-                time.sleep(5)
-            if last_status is None or last_status.get("status") != "ABSENCE_CONFIRMED":
-                errors.append(f"{role} Azure guard did not publish three-read ABSENCE_CONFIRMED")
-                guard_evidence[role] = last_status or {"status": "STATUS_UNAVAILABLE"}
-                continue
-            try:
-                root_hash = str(last_status["root_hash"])
-                exported = guard.export_evidence(root_hash)
-                journal_path = args.output / f"{role}-azure-guard-journal.ndjson"
-                journal_path.write_text(exported.journal, encoding="utf-8")
-                guard_evidence[role] = {
-                    **last_status,
-                    "journal_artifact": journal_path.name,
-                    "journal_sha256": exported.journal_sha256,
-                }
-            except Exception as error:
-                errors.append(f"{role} Azure guard evidence export failed: {error}")
-                guard_evidence[role] = {**last_status, "export_error": str(error)}
+        guard_evidence, errors = finalize_azure_guard_channels(
+            guards={"server": server_guard, "worker": worker_guard},
+            labels={"server": server_label, "worker": worker_label},
+            observed_labels=set(observed_instances),
+            output=args.output,
+            absence_timeout_seconds=args.azure_guard_absence_timeout_seconds,
+        )
         manifest["azure_guard_finalization"] = guard_evidence
         return errors
 
