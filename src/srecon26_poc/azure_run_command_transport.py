@@ -13,6 +13,7 @@ import json
 import re
 import stat
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -39,6 +40,10 @@ class AzureRunCommandTransportError(AzureGuardTransportError):
 
 
 Runner = Callable[[Sequence[str], str, int], subprocess.CompletedProcess[str]]
+Clock = Callable[[], float]
+Sleeper = Callable[[float], None]
+_PENDING_EXECUTION_STATES = frozenset({"Creating", "Pending", "Running"})
+_POLL_INTERVAL_SECONDS = 1.0
 
 
 def _run(arguments: Sequence[str], request: str, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -123,8 +128,8 @@ def _json_object(raw: str) -> Mapping[str, object]:
     return value
 
 
-def _instance_view_output(raw: str) -> str:
-    """Extract only successful fixed-gateway stdout from the Azure envelope."""
+def _instance_view_output(raw: str) -> str | None:
+    """Extract successful stdout, or signal a still-pending managed command."""
 
     response = _json_object(raw)
     properties = response.get("properties")
@@ -134,6 +139,8 @@ def _instance_view_output(raw: str) -> str:
     if not isinstance(view, dict):
         raise AzureRunCommandTransportError("Azure Run Command lacks instance view")
     state, exit_code, output = view.get("executionState"), view.get("exitCode"), view.get("output")
+    if state in _PENDING_EXECUTION_STATES:
+        return None
     if state != "Succeeded" or type(exit_code) is not int or exit_code != 0:
         raise AzureRunCommandTransportError("Azure Run Command refused the guard request")
     if not isinstance(output, str) or not output:
@@ -146,9 +153,18 @@ def _instance_view_output(raw: str) -> str:
 class AzureRunCommandGuardTransport(GuardTransport):
     """Use Azure-managed Run Command to execute one fixed guard RPC gateway."""
 
-    def __init__(self, config: AzureRunCommandGuardConfig, *, runner: Runner | None = None) -> None:
+    def __init__(
+        self,
+        config: AzureRunCommandGuardConfig,
+        *,
+        runner: Runner | None = None,
+        clock: Clock = time.monotonic,
+        sleeper: Sleeper = time.sleep,
+    ) -> None:
         self.config = config.validated()
         self.runner = runner or _run
+        self.clock = clock
+        self.sleeper = sleeper
         self._arm_binding: dict[str, object] | None = None
 
     def _command_name(self) -> str:
@@ -180,6 +196,8 @@ class AzureRunCommandGuardTransport(GuardTransport):
             "--vm-name", self.config.vm_name,
             "--name", name,
             "--script", script,
+            "--async-execution", "true",
+            "--no-wait",
             "--only-show-errors", "--output", "json",
         )
 
@@ -232,6 +250,19 @@ class AzureRunCommandGuardTransport(GuardTransport):
             raise AzureRunCommandTransportError("Azure Run Command response exceeds the size limit")
         return completed
 
+    def _wait_for_instance_view(self, name: str) -> str:
+        """Poll the fixed Azure resource until success or the pinned deadline."""
+
+        deadline = self.clock() + self.config.timeout_seconds
+        while True:
+            output = _instance_view_output(self._invoke(self.instance_view_command(name)).stdout)
+            if output is not None:
+                return output
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                raise AzureRunCommandTransportError("Azure Run Command did not complete before the pinned timeout")
+            self.sleeper(min(_POLL_INTERVAL_SECONDS, remaining))
+
     def call(self, command: str, payload: dict[str, object]) -> dict[str, object]:
         if command == "arm" and payload.get("heartbeat_timeout_seconds") != self.config.heartbeat_timeout_seconds:
             raise AzureRunCommandTransportError("Azure guard arm request differs from the configured heartbeat timeout")
@@ -246,7 +277,7 @@ class AzureRunCommandGuardTransport(GuardTransport):
             # A create failure can happen after Azure accepts the request, so
             # always attempt cleanup once create has been invoked.
             self._invoke(self.create_command(name, self._script(encoded)))
-            output = _instance_view_output(self._invoke(self.instance_view_command(name)).stdout)
+            output = self._wait_for_instance_view(name)
             try:
                 response = _validate_response(command, payload, output, self._arm_binding)
             except AzureGuardTransportError as error:

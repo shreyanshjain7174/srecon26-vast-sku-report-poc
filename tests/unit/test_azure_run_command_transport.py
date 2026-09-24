@@ -40,13 +40,14 @@ def _view(output: str, *, state: str = "Succeeded", exit_code: int = 0) -> str:
     }}})
 
 
-def _transport(runner) -> AzureRunCommandGuardTransport:
+def _transport(runner, **kwargs) -> AzureRunCommandGuardTransport:
     return AzureRunCommandGuardTransport(
         AzureRunCommandGuardConfig(
             subscription_id="11111111-1111-1111-1111-111111111111",
             resource_group="guard-rg", vm_name="guard-vm", az_path=Path(sys.executable),
         ),
         runner=runner,
+        **kwargs,
     )
 
 
@@ -91,6 +92,8 @@ def test_uses_fixed_run_command_and_base64_stdin_gateway() -> None:
     assert "RunShellScript" not in create[0]
     assert "--script" in create[0]
     assert "--scripts" not in create[0]
+    assert create[0][create[0].index("--async-execution") + 1] == "true"
+    assert "--no-wait" in create[0]
     script = create[0][create[0].index("--script") + 1]
     assert "SSH_ORIGINAL_COMMAND=guardctl" in script
     assert "/usr/local/libexec/srecon26-guard/ssh_rpc.py" in script
@@ -105,6 +108,39 @@ def test_uses_fixed_run_command_and_base64_stdin_gateway() -> None:
     assert delete[0][1:4] == ["vm", "run-command", "delete"]
     assert delete[0][delete[0].index("--run-command-name") + 1].startswith("srecon26-rpc-")
     assert "--yes" in delete[0]
+
+
+def test_polls_pending_instance_view_before_validating_and_deleting() -> None:
+    calls: list[list[str]] = []
+    time = [0.0]
+    sleeps: list[float] = []
+    instance_views = 0
+
+    def clock() -> float:
+        return time[0]
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        time[0] += seconds
+
+    def runner(arguments, stdin: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        nonlocal instance_views
+        calls.append(list(arguments))
+        if "create" in arguments or "delete" in arguments:
+            return subprocess.CompletedProcess(arguments, 0, stdout="{}", stderr="")
+        instance_views += 1
+        if instance_views == 1:
+            pending = json.dumps({"properties": {"instanceView": {
+                "executionState": "Running", "exitCode": None, "output": "",
+            }}})
+            return subprocess.CompletedProcess(arguments, 0, stdout=pending, stderr="")
+        return subprocess.CompletedProcess(arguments, 0, stdout=_view(json.dumps(_receipt()) + "\n"), stderr="")
+
+    response = _transport(runner, clock=clock, sleeper=sleeper).call("arm", _arm())
+
+    assert response["status"] == "ARMED"
+    assert sleeps == [1.0]
+    assert [call[3] for call in calls] == ["create", "get", "get", "delete"]
 
 
 @pytest.mark.parametrize(
