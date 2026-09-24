@@ -54,12 +54,13 @@ def test_vast_exact_instance_refuses_unknown_response_instead_of_claiming_absenc
         provider.get_instance(417)
 
 
-def test_vast_exact_instance_accepts_only_explicit_empty_object_as_absence(tmp_path: Path) -> None:
+@pytest.mark.parametrize("raw", ({}, {"instances": []}))
+def test_vast_exact_instance_accepts_only_explicit_empty_absence_shape(tmp_path: Path, raw: object) -> None:
     binary = tmp_path / "vastai"
     binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     binary.chmod(0o755)
     provider = VastCliGuardProvider(tmp_path / "secret", vast_bin=str(binary))
-    provider._run = lambda _args: {}  # type: ignore[method-assign]
+    provider._run = lambda _args: raw  # type: ignore[method-assign]
 
     assert provider.get_instance(417) is None
 
