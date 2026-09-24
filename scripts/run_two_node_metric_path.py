@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.build_evidence_pack import post_deadline_absence
 from srecon26_poc.azure_guard_transport import AzureGuardSshConfig
+from srecon26_poc.azure_run_command_transport import AzureRunCommandGuardConfig, AzureRunCommandGuardTransport
 from srecon26_poc.contracts import InstanceContract, OfferContract, ProbeOutcome, classify_fault
 from srecon26_poc.live_dispatch import REPORT_MARGIN, ProviderFaultEvidence
 from srecon26_poc.live_dispatch import (
@@ -98,6 +99,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--worker-azure-guard-identity", type=Path)
     parser.add_argument("--worker-azure-guard-known-hosts", type=Path)
     parser.add_argument("--worker-azure-guard-port", type=int, default=22)
+    parser.add_argument("--azure-guard-transport", choices=("ssh", "run-command"), default="ssh")
+    parser.add_argument("--azure-subscription-id")
+    parser.add_argument("--azure-guard-resource-group")
+    parser.add_argument("--server-azure-guard-vm")
+    parser.add_argument("--worker-azure-guard-vm")
+    parser.add_argument("--azure-cli", type=Path, default=Path("/opt/homebrew/bin/az"))
     parser.add_argument("--azure-guard-timeout-seconds", type=int, default=20)
     parser.add_argument("--azure-guard-absence-timeout-seconds", type=int, default=240)
     parser.add_argument(
@@ -120,28 +127,41 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def validate_configuration(args: argparse.Namespace) -> None:
-    required = {
-        "--server-azure-guard-host": args.server_azure_guard_host,
-        "--server-azure-guard-user": args.server_azure_guard_user,
-        "--server-azure-guard-identity": args.server_azure_guard_identity,
-        "--server-azure-guard-known-hosts": args.server_azure_guard_known_hosts,
-        "--worker-azure-guard-host": args.worker_azure_guard_host,
-        "--worker-azure-guard-user": args.worker_azure_guard_user,
-        "--worker-azure-guard-identity": args.worker_azure_guard_identity,
-        "--worker-azure-guard-known-hosts": args.worker_azure_guard_known_hosts,
-    }
+    required = (
+        {
+            "--server-azure-guard-host": args.server_azure_guard_host,
+            "--server-azure-guard-user": args.server_azure_guard_user,
+            "--server-azure-guard-identity": args.server_azure_guard_identity,
+            "--server-azure-guard-known-hosts": args.server_azure_guard_known_hosts,
+            "--worker-azure-guard-host": args.worker_azure_guard_host,
+            "--worker-azure-guard-user": args.worker_azure_guard_user,
+            "--worker-azure-guard-identity": args.worker_azure_guard_identity,
+            "--worker-azure-guard-known-hosts": args.worker_azure_guard_known_hosts,
+        }
+        if args.azure_guard_transport == "ssh"
+        else {
+            "--azure-subscription-id": args.azure_subscription_id,
+            "--azure-guard-resource-group": args.azure_guard_resource_group,
+            "--server-azure-guard-vm": args.server_azure_guard_vm,
+            "--worker-azure-guard-vm": args.worker_azure_guard_vm,
+            "--azure-cli": args.azure_cli,
+        }
+    )
     missing = [name for name, value in required.items() if value in (None, "")]
     if missing:
         raise SystemExit(f"Azure guard backend requires {', '.join(missing)}")
-    if args.server_azure_guard_host.casefold() == args.worker_azure_guard_host.casefold():
-        raise SystemExit("server and worker Azure guards require distinct controller hosts")
-    if args.server_azure_guard_identity.expanduser().resolve() == args.worker_azure_guard_identity.expanduser().resolve():
-        raise SystemExit("server and worker Azure guards require distinct SSH identities")
-    if args.server_azure_guard_known_hosts.expanduser().resolve() == args.worker_azure_guard_known_hosts.expanduser().resolve():
-        raise SystemExit("server and worker Azure guards require distinct pinned known-hosts files")
-    for role, port in (("server", args.server_azure_guard_port), ("worker", args.worker_azure_guard_port)):
-        if not 1 <= port <= 65535:
-            raise SystemExit(f"{role} Azure guard port must be from 1 to 65535")
+    if args.azure_guard_transport == "ssh":
+        if args.server_azure_guard_host.casefold() == args.worker_azure_guard_host.casefold():
+            raise SystemExit("server and worker Azure guards require distinct controller hosts")
+        if args.server_azure_guard_identity.expanduser().resolve() == args.worker_azure_guard_identity.expanduser().resolve():
+            raise SystemExit("server and worker Azure guards require distinct SSH identities")
+        if args.server_azure_guard_known_hosts.expanduser().resolve() == args.worker_azure_guard_known_hosts.expanduser().resolve():
+            raise SystemExit("server and worker Azure guards require distinct pinned known-hosts files")
+        for role, port in (("server", args.server_azure_guard_port), ("worker", args.worker_azure_guard_port)):
+            if not 1 <= port <= 65535:
+                raise SystemExit(f"{role} Azure guard port must be from 1 to 65535")
+    elif args.server_azure_guard_vm.casefold() == args.worker_azure_guard_vm.casefold():
+        raise SystemExit("server and worker Azure Run Command guards require distinct managed VMs")
     if not 1 <= args.azure_guard_timeout_seconds <= 60:
         raise SystemExit("Azure guard timeout must be from 1 to 60 seconds")
     if not 30 <= args.azure_guard_absence_timeout_seconds <= 600:
@@ -163,6 +183,27 @@ def build_guards(
     on_worker_armed: Callable[[Mapping[str, object]], None],
 ) -> tuple[DynamicAzureGuard, DynamicAzureGuard]:
     """Build two nonce-isolated clients without accepting secret material."""
+    if args.azure_guard_transport == "run-command":
+        server_config = AzureRunCommandGuardConfig(
+            subscription_id=args.azure_subscription_id,
+            resource_group=args.azure_guard_resource_group,
+            vm_name=args.server_azure_guard_vm,
+            az_path=args.azure_cli,
+            timeout_seconds=args.azure_guard_timeout_seconds,
+            heartbeat_timeout_seconds=args.guard_heartbeat_timeout_seconds,
+        )
+        worker_config = AzureRunCommandGuardConfig(
+            subscription_id=args.azure_subscription_id,
+            resource_group=args.azure_guard_resource_group,
+            vm_name=args.worker_azure_guard_vm,
+            az_path=args.azure_cli,
+            timeout_seconds=args.azure_guard_timeout_seconds,
+            heartbeat_timeout_seconds=args.guard_heartbeat_timeout_seconds,
+        )
+        return (
+            DynamicAzureGuard(server_config, on_armed=on_server_armed, transport_factory=AzureRunCommandGuardTransport),
+            DynamicAzureGuard(worker_config, on_armed=on_worker_armed, transport_factory=AzureRunCommandGuardTransport),
+        )
     server_config = AzureGuardSshConfig(
         host=args.server_azure_guard_host,
         user=args.server_azure_guard_user,
@@ -292,20 +333,33 @@ def finalize_azure_guard_channels(
             )
         if not terminal_absence:
             if not observed:
-                deferred_roles[role] = {
-                    "run_id": f"two-node-{role}-{getattr(guard.arm_receipt, 'nonce', '')}",
-                    "nonce": getattr(guard.arm_receipt, "nonce", None),
-                    "label": label,
-                    "hard_deadline": arm_deadline.isoformat() if isinstance(arm_deadline, datetime) else None,
-                    "finalize_after": arm_deadline.isoformat() if isinstance(arm_deadline, datetime) else None,
-                    "endpoint": {
+                endpoint = (
+                    {
+                        "transport": "azure-run-command",
+                        "subscription_id": guard.config.subscription_id,
+                        "resource_group": guard.config.resource_group,
+                        "vm_name": guard.config.vm_name,
+                        "az_path": str(guard.config.az_path),
+                        "timeout_seconds": guard.config.timeout_seconds,
+                    }
+                    if isinstance(guard.config, AzureRunCommandGuardConfig)
+                    else {
+                        "transport": "ssh",
                         "host": guard.config.host,
                         "user": guard.config.user,
                         "port": guard.config.port,
                         "timeout_seconds": guard.config.timeout_seconds,
                         "identity_file": str(guard.config.identity_file),
                         "known_hosts_file": str(guard.config.known_hosts_file),
-                    },
+                    }
+                )
+                deferred_roles[role] = {
+                    "run_id": f"two-node-{role}-{getattr(guard.arm_receipt, 'nonce', '')}",
+                    "nonce": getattr(guard.arm_receipt, "nonce", None),
+                    "label": label,
+                    "hard_deadline": arm_deadline.isoformat() if isinstance(arm_deadline, datetime) else None,
+                    "finalize_after": arm_deadline.isoformat() if isinstance(arm_deadline, datetime) else None,
+                    "endpoint": endpoint,
                     "expected_heartbeat_timeout_seconds": guard.config.heartbeat_timeout_seconds,
                     "arm_receipt": {
                         **guard_receipts.get(role, {}),
@@ -412,6 +466,7 @@ def main() -> int:
         "hard_deadline": deadline.isoformat(),
         "real_run_contingent": True,
         "guard_backend": args.guard_backend,
+        "azure_guard_transport": args.azure_guard_transport,
         "heartbeat_seconds": args.heartbeat_seconds,
         "guard_heartbeat_timeout_seconds": args.guard_heartbeat_timeout_seconds,
         "vm_template": args.vm_template,

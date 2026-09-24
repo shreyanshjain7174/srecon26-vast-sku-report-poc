@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +62,28 @@ def test_azure_backend_builds_independent_guard_clients(tmp_path: Path) -> None:
     assert server.config.host != worker.config.host
     assert server.config.identity_file != worker.config.identity_file
     assert server.config.known_hosts_file != worker.config.known_hosts_file
+
+
+def test_paid_runner_supports_distinct_managed_azure_guard_vms(tmp_path: Path) -> None:
+    args = parse_args([
+        "--server-offer", "11", "--server-machine", "101",
+        "--worker-offer", "12", "--worker-machine", "102",
+        "--guard-backend", "azure", "--azure-guard-transport", "run-command",
+        "--azure-subscription-id", "11111111-1111-1111-1111-111111111111",
+        "--azure-guard-resource-group", "guard-rg",
+        "--server-azure-guard-vm", "server-guard",
+        "--worker-azure-guard-vm", "worker-guard",
+        "--azure-cli", sys.executable,
+        "--guard-heartbeat-timeout-seconds", "120",
+        "--output", str(tmp_path / "run"),
+        "--report-adapter-factory", "adapter:create",
+    ])
+    validate_configuration(args)
+    server, worker = build_guards(args, on_server_armed=lambda _receipt: None, on_worker_armed=lambda _receipt: None)
+
+    assert isinstance(server, DynamicAzureGuard)
+    assert isinstance(worker, DynamicAzureGuard)
+    assert server.config.vm_name != worker.config.vm_name
 
 
 @pytest.mark.parametrize(
