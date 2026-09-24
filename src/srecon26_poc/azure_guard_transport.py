@@ -467,6 +467,46 @@ class AzureSshGuardTransport(GuardTransport):
             "guardctl",
         )
 
+    def resume_arm_binding(self, receipt: Mapping[str, object]) -> None:
+        """Restore a previously validated immutable arm without re-arming."""
+
+        required = (
+            "nonce", "label", "hard_deadline", "root_hash", "heartbeat_timeout_seconds",
+            "host_key_fingerprint",
+        )
+        if any(field not in receipt for field in required):
+            raise AzureGuardTransportError("deferred finalizer arm receipt is incomplete")
+        payload = {
+            "run_id": str(receipt.get("run_id", "deferred-finalizer")),
+            "nonce": receipt["nonce"],
+            "label": receipt["label"],
+            "hard_deadline": receipt["hard_deadline"],
+            "heartbeat_timeout_seconds": receipt["heartbeat_timeout_seconds"],
+        }
+        response = {
+            "status": "ARMED",
+            "root_hash": receipt["root_hash"],
+            "nonce": receipt["nonce"],
+            "label": receipt["label"],
+            "hard_deadline": receipt["hard_deadline"],
+            "heartbeat_timeout_seconds": receipt["heartbeat_timeout_seconds"],
+        }
+        _validate_request("arm", payload)
+        _validate_response("arm", payload, json.dumps(response), None)
+        if payload["heartbeat_timeout_seconds"] != self.config.heartbeat_timeout_seconds:
+            raise AzureGuardTransportError("deferred finalizer heartbeat timeout differs from the pinned channel")
+        fingerprint = receipt["host_key_fingerprint"]
+        if not isinstance(fingerprint, str) or not _FINGERPRINT.fullmatch(fingerprint):
+            raise AzureGuardTransportError("deferred finalizer host-key fingerprint is invalid")
+        if fingerprint != self.host_key_fingerprint:
+            raise AzureGuardTransportError("deferred finalizer host-key fingerprint differs from the pinned channel")
+        self._arm_binding = {
+            "nonce": receipt["nonce"],
+            "label": receipt["label"],
+            "hard_deadline": receipt["hard_deadline"],
+            "heartbeat_timeout_seconds": receipt["heartbeat_timeout_seconds"],
+        }
+
     def call(self, command: str, payload: dict[str, object]) -> dict[str, object]:
         if command == "arm" and payload.get("heartbeat_timeout_seconds") != self.config.heartbeat_timeout_seconds:
             raise AzureGuardTransportError("Azure guard arm request differs from the configured heartbeat timeout")

@@ -377,6 +377,10 @@ class DynamicAzureGuard:
             hard_deadline,
             heartbeat_timeout_seconds=self.config.heartbeat_timeout_seconds,
         )
+        # Retain the independently authenticated arm immediately. A later
+        # preflight failure must block paid creation without erasing the
+        # channel needed to status/export a possibly live provider request.
+        self.arm_receipt = receipt
         attestation = self.client.preflight()
         validate_attestation(identity, attestation)
         if (
@@ -388,7 +392,7 @@ class DynamicAzureGuard:
             or not attestation.host_key_fingerprint
         ):
             raise LiveFactoryError("Azure guard did not return a bound ARMED receipt")
-        self.arm_receipt, self.attestation = receipt, attestation
+        self.attestation = attestation
         if self.on_armed is not None:
             self.on_armed(_bound_guard_receipt("azure", receipt, attestation))
         return attestation

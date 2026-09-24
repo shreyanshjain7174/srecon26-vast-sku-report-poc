@@ -316,6 +316,39 @@ def test_absence_confirmed_accepts_exactly_three_distinct_ordered_observations(t
     assert transport.call("status", {"nonce": NONCE})["absence_observations"] == observations
 
 
+def test_deferred_resume_restores_binding_without_rearming(tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+
+    def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        calls.append(json.loads(request))
+        response = {
+            "status": "ABSENCE_CONFIRMED",
+            "root_hash": "b" * 64,
+            "nonce": NONCE,
+            "label": LABEL,
+            "hard_deadline": "2026-09-24T04:00:00Z",
+            "teardown_authority_at": "2026-09-24T04:00:00Z",
+            "absence_observations": [
+                "2026-09-24T04:01:00Z",
+                "2026-09-24T04:02:00Z",
+                "2026-09-24T04:03:00Z",
+            ],
+        }
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(response), stderr="")
+
+    transport = _transport(tmp_path, runner)
+    transport.resume_arm_binding(
+        {
+            **_arm_receipt(),
+            "run_id": "run-1",
+            "host_key_fingerprint": transport.host_key_fingerprint,
+        }
+    )
+
+    assert transport.call("status", {"nonce": NONCE})["status"] == "ABSENCE_CONFIRMED"
+    assert [request["command"] for request in calls] == ["status"]
+
+
 def test_evidence_export_is_bounded_and_hash_verified(tmp_path: Path) -> None:
     journal = '{"event":"armed","root_hash":"' + ROOT + '"}\n'
     journal_sha256 = hashlib.sha256(journal.encode()).hexdigest()

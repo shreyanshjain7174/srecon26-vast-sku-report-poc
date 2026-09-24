@@ -411,6 +411,28 @@ def test_dynamic_azure_guard_emits_only_a_bound_armed_receipt() -> None:
     assert guard.status()["status"] == "ABSENCE_CONFIRMED"
 
 
+def test_dynamic_azure_guard_retains_arm_when_later_preflight_fails() -> None:
+    class PreflightFailureTransport(AzureBoundTransport):
+        def call(self, command: str, payload: dict[str, object]) -> dict[str, object]:
+            if command == "preflight":
+                raise LiveFactoryError("remote identity attestation failed")
+            return super().call(command, payload)
+
+    transport = PreflightFailureTransport()
+    guard = DynamicAzureGuard(
+        AzureGuardSshConfig("guard.example.test", "guardrpc", Path("unused-key"), Path("unused-known-hosts")),
+        transport_factory=lambda _config: transport,
+    )
+
+    with pytest.raises(LiveFactoryError, match="identity attestation"):
+        guard.arm(RunIdentity("live-run", LABEL, NOW), NOW + timedelta(minutes=20))
+
+    assert guard.arm_receipt is not None
+    assert guard.arm_receipt.status == "ARMED"
+    assert guard.attestation is None
+    assert guard.status()["status"] == "ABSENCE_CONFIRMED"
+
+
 def test_ssh_resolver_rejects_an_instance_record_that_does_not_preserve_exact_label() -> None:
     instance = InstanceContract(417, "RTX 3090", 1, 24576, "8.6", 99, Decimal("0.30"), LABEL)
 

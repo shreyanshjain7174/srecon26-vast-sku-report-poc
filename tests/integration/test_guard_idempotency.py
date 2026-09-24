@@ -68,6 +68,22 @@ def test_reopening_worker_reads_durable_state_and_never_repeats_destroy(tmp_path
     )
 
 
+def test_reopened_timer_uses_immutable_armed_heartbeat_timeout(tmp_path) -> None:
+    provider = FakeProvider()
+    armed = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=120), require_root_owner=False)
+    receipt = armed.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(minutes=10), now=NOW)
+    assert receipt.heartbeat_timeout_seconds == 120
+
+    reopened = GuardWorker(tmp_path, provider, heartbeat_timeout=timedelta(seconds=1), require_root_owner=False)
+    still_armed = reopened.tick(NONCE, now=NOW + timedelta(seconds=2))
+
+    assert still_armed.status == "ARMED"
+    assert still_armed.heartbeat_timeout_seconds == 120
+    assert provider.destroy_calls == []
+    with pytest.raises(GuardSafetyError, match="immutable"):
+        reopened.arm(INSTANCE_ID, LABEL, NONCE, NOW + timedelta(minutes=10), now=NOW)
+
+
 def test_same_nonce_cannot_change_target_or_deadline(tmp_path) -> None:
     provider = FakeProvider()
     worker = GuardWorker(tmp_path, provider, require_root_owner=False)

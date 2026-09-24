@@ -111,13 +111,18 @@ class FakeArmedGuard:
         self.arm_receipt = SimpleNamespace(
             root_hash="a" * 64,
             nonce="nonce-12345678",
+            label="guard-label",
             hard_deadline=datetime(2099, 1, 1, tzinfo=UTC),
+            heartbeat_timeout_seconds=120,
         )
         self.config = SimpleNamespace(
             host="guard.example.test", user="guardrpc", port=22,
+            timeout_seconds=20,
             identity_file=Path("/secure/key"), known_hosts_file=Path("/secure/known-hosts"),
             heartbeat_timeout_seconds=120,
         )
+        self.attestation = None
+        self.transport = SimpleNamespace(host_key_fingerprint="SHA256:" + "A" * 43)
         self.response = {"status": status, "root_hash": "a" * 64}
         self.status_error = status_error
         self.status_calls = 0

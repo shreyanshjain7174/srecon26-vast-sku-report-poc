@@ -340,6 +340,13 @@ class GuardWorker:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise GuardSafetyError("guard state is corrupt") from exc
         root, count, records = self._journal_root(directory)
+        heartbeat_timeout_seconds = state.get("heartbeat_timeout_seconds")
+        if (
+            isinstance(heartbeat_timeout_seconds, bool)
+            or not isinstance(heartbeat_timeout_seconds, int)
+            or not 1 <= heartbeat_timeout_seconds <= 600
+        ):
+            raise GuardSafetyError("guard state heartbeat timeout is invalid")
         state["root_hash"] = root
         state["event_count"] = count
         # Rebuild proof state from the hash-chained journal so a crash after an
@@ -400,7 +407,7 @@ class GuardWorker:
             absence_observations=tuple(_parse_stamp(value) for value in state.get("absence_observations", [])),
             root_hash=str(state["root_hash"]),
             event_count=int(state["event_count"]),
-            heartbeat_timeout_seconds=int(self.heartbeat_timeout.total_seconds()),
+            heartbeat_timeout_seconds=int(state["heartbeat_timeout_seconds"]),
         )
 
     def _persist(self, directory: Path, state: dict[str, object]) -> GuardReceipt:
@@ -443,8 +450,13 @@ class GuardWorker:
         with self._locked(nonce) as directory:
             if (directory / "state.json").exists():
                 state = self._load(directory)
-                immutable = (state["instance_id"], state["label"], state["nonce"], state["hard_deadline"])
-                supplied = (instance_id, label, nonce, _stamp(deadline))
+                immutable = (
+                    state["instance_id"], state["label"], state["nonce"], state["hard_deadline"],
+                    state["heartbeat_timeout_seconds"],
+                )
+                supplied = (
+                    instance_id, label, nonce, _stamp(deadline), int(self.heartbeat_timeout.total_seconds()),
+                )
                 if immutable != supplied:
                     raise GuardSafetyError("guard target and deadline are immutable")
                 return self._receipt(state)
@@ -459,6 +471,7 @@ class GuardWorker:
                 "absence_observations": [],
                 "root_hash": _GENESIS_HASH,
                 "event_count": 0,
+                "heartbeat_timeout_seconds": int(self.heartbeat_timeout.total_seconds()),
             }
             self._persist(directory, state)
             self._append_event(directory, state, "armed", now, {"instance_id": instance_id, "label": label})
@@ -635,7 +648,7 @@ class GuardWorker:
             deadline = _parse_stamp(state["hard_deadline"])
             last_heartbeat = _parse_stamp(state["last_heartbeat"])
             deadline_reached = now >= deadline
-            heartbeat_missed = now - last_heartbeat > self.heartbeat_timeout
+            heartbeat_missed = now - last_heartbeat > timedelta(seconds=int(state["heartbeat_timeout_seconds"]))
             if state.get("teardown_authority_at") is None and (deadline_reached or heartbeat_missed):
                 reason = "deadline" if deadline_reached else "heartbeat_loss"
                 self._activate_teardown_authority(directory, state, now, reason)

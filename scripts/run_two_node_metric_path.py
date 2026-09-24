@@ -314,10 +314,25 @@ def finalize_azure_guard_channels(
                         "host": guard.config.host,
                         "user": guard.config.user,
                         "port": guard.config.port,
+                        "timeout_seconds": guard.config.timeout_seconds,
                         "identity_file": str(guard.config.identity_file),
                         "known_hosts_file": str(guard.config.known_hosts_file),
                     },
                     "expected_heartbeat_timeout_seconds": guard.config.heartbeat_timeout_seconds,
+                    "arm_receipt": {
+                        "backend": "azure",
+                        "status": "ARMED",
+                        "run_id": f"two-node-{role}-{getattr(guard.arm_receipt, 'nonce', '')}",
+                        "root_hash": getattr(guard.arm_receipt, "root_hash", None),
+                        "nonce": getattr(guard.arm_receipt, "nonce", None),
+                        "label": getattr(guard.arm_receipt, "label", None),
+                        "hard_deadline": arm_deadline.isoformat() if isinstance(arm_deadline, datetime) else None,
+                        "heartbeat_timeout_seconds": getattr(guard.arm_receipt, "heartbeat_timeout_seconds", None),
+                        "host_key_fingerprint": (
+                            getattr(guard.attestation, "host_key_fingerprint", None)
+                            or getattr(guard.transport, "host_key_fingerprint", None)
+                        ),
+                    },
                     "latest_status": last_status,
                 }
                 role_evidence["deferred_finalizer_artifact"] = "deferred-azure-guard-finalizer.json"
@@ -340,6 +355,7 @@ def finalize_azure_guard_channels(
                 "credential_material_included": False,
                 "required_terminal_status": "ABSENCE_CONFIRMED",
                 "required_post_deadline_absence_reads": 3,
+                "manifest_artifact": "run-manifest.json",
                 "roles": deferred_roles,
             },
         )
