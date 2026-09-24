@@ -11,7 +11,7 @@ refuse() { echo 'Azure guard installation refused: unsafe prerequisite or permis
 import pathlib
 import sys
 release = dict(line.split('=', 1) for line in pathlib.Path('/etc/os-release').read_text().splitlines() if '=' in line)
-if release.get('ID', '').strip('"') != 'ubuntu' or sys.version_info < (3, 11):
+if release.get('ID', '').strip('"') != 'ubuntu' or sys.version_info < (3, 10):
     raise SystemExit(2)
 PY
 command -v systemctl >/dev/null || refuse

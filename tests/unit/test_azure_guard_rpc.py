@@ -9,7 +9,7 @@ import sys
 import textwrap
 import time
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -17,6 +17,9 @@ import pytest
 from guard import ssh_rpc
 from guard.guard_worker import GuardSafetyError, GuardWorker, GuardedInstance
 from srecon26_poc.azure_guard_transport import _validate_response
+
+
+UTC = timezone.utc
 
 
 NOW = datetime(2026, 9, 24, 10, 0, tzinfo=UTC)
@@ -407,7 +410,7 @@ def test_installer_and_templates_use_ubuntu_paths_and_private_minimal_environmen
     subprocess.run(["sh", "-n", str(root / "guard/guardctl.template")], check=True, capture_output=True)
     content = installer.read_text()
     assert "stat -f" not in content and "stat -c" in content
-    assert "sys.version_info < (3, 11)" in content
+    assert "sys.version_info < (3, 10)" in content
     assert "safe_path" in content and "[[ ! -L ${candidate} ]]" in content
     assert "600" in content and "700" in content
     timer = (root / "guard/srecon26-azure-guard.timer.template").read_text()
@@ -548,10 +551,11 @@ def test_serve_does_not_handle_process_deadline(monkeypatch):
 def test_direct_timer_process_deadline_cannot_be_swallowed_by_worker(tmp_path):
     source = textwrap.dedent('''
         import functools, os, signal, sys, time
-        from datetime import UTC, datetime, timedelta
+        from datetime import datetime, timedelta, timezone
         from pathlib import Path
         from guard import ssh_rpc
         from guard.guard_worker import GuardWorker, GuardedInstance
+        UTC = timezone.utc
         os.umask(0o077)
         class Provider:
             def instance_inventory_count(self): return 0

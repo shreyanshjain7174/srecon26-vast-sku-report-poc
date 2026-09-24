@@ -10,8 +10,9 @@ returns a nonce-bound arm receipt.
 
 The deployable server is `guard/ssh_rpc.py`; its launcher is installed as
 `/usr/local/sbin/guardctl`. `guard/install_azure_guard.sh` supports Ubuntu with
-Python 3.11 or later (Ubuntu 24.04 supplies a suitable system Python). It does
-not provision Azure resources, install packages, modify SSH authorization, or
+Python 3.10 or later (Ubuntu 22.04 and 24.04 supply suitable system Python
+versions). The installer does not provision Azure resources, install packages,
+modify SSH authorization, or
 accept provider credentials. Prepare systemd, OpenSSH with an Ed25519 host key,
 and an audited Vast CLI installation under `/opt` or `/usr` first. The CLI,
 its interpreter, and its dependencies must be root-owned and not writable by

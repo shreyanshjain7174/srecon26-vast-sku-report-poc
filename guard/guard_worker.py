@@ -12,9 +12,12 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Protocol
+
+
+UTC = timezone.utc
 
 
 _GENESIS_HASH = "0" * 64

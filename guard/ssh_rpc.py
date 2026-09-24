@@ -19,10 +19,13 @@ import subprocess
 import sys
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import asdict
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterator, Mapping
 from uuid import UUID
+
+
+UTC = timezone.utc
 
 if __package__:
     from .guard_worker import GuardSafetyError, GuardWorker, VastCliGuardProvider, label_binds_nonce

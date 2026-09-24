@@ -10,10 +10,13 @@ import os
 import shutil
 import subprocess
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+
+
+UTC = timezone.utc
 
 
 pytestmark = pytest.mark.skipif(
