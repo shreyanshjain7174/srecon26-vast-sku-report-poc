@@ -84,6 +84,11 @@ def goto(url: str) -> None:
     if parsed.scheme != "https" or parsed.netloc != "cloud.vast.ai" or parsed.query or parsed.fragment:
         raise AdapterError("refusing non-Vast navigation")
     select_vast_tab()
+    # The authenticated console is a SPA.  Reloading its already-correct
+    # route can interrupt an in-flight rendered session, so only navigate
+    # when the selected session is on a different allowed Vast route.
+    if current_url() == url:
+        return
     apple('''
 on run argv
   tell application "Google Chrome"
