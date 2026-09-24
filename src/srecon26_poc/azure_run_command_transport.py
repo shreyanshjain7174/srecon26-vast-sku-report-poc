@@ -179,9 +179,22 @@ class AzureRunCommandGuardTransport(GuardTransport):
             "--resource-group", self.config.resource_group,
             "--vm-name", self.config.vm_name,
             "--name", name,
-            "--command-id", "RunShellScript",
-            "--scripts", script,
+            "--script", script,
             "--only-show-errors", "--output", "json",
+        )
+
+    def delete_command(self, name: str) -> tuple[str, ...]:
+        """Build the synchronous deletion of one temporary managed command."""
+
+        if not _COMMAND_NAME.fullmatch(name):
+            raise AzureRunCommandTransportError("Azure Run Command name is invalid")
+        return (
+            str(self.config.az_path), "vm", "run-command", "delete",
+            "--subscription", self.config.subscription_id,
+            "--resource-group", self.config.resource_group,
+            "--vm-name", self.config.vm_name,
+            "--run-command-name", name,
+            "--yes", "--only-show-errors", "--output", "json",
         )
 
     def instance_view_command(self, name: str) -> tuple[str, ...]:
@@ -226,21 +239,60 @@ class AzureRunCommandGuardTransport(GuardTransport):
         serialized = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False) + "\n"
         encoded = base64.b64encode(serialized.encode("ascii")).decode("ascii")
         name = self._command_name()
-        self._invoke(self.create_command(name, self._script(encoded)))
-        output = _instance_view_output(self._invoke(self.instance_view_command(name)).stdout)
+        response: dict[str, object] | None = None
+        binding: dict[str, object] | None = None
+        failure: Exception | None = None
         try:
-            response = _validate_response(command, payload, output, self._arm_binding)
+            # A create failure can happen after Azure accepts the request, so
+            # always attempt cleanup once create has been invoked.
+            self._invoke(self.create_command(name, self._script(encoded)))
+            output = _instance_view_output(self._invoke(self.instance_view_command(name)).stdout)
+            try:
+                response = _validate_response(command, payload, output, self._arm_binding)
+            except AzureGuardTransportError as error:
+                failure = AzureRunCommandTransportError("Azure guard returned an invalid response")
+                failure.__cause__ = error
+        except AzureRunCommandTransportError as error:
+            failure = error
         except AzureGuardTransportError as error:
-            raise AzureRunCommandTransportError("Azure guard returned an invalid response") from error
-        if command == "arm":
-            self._arm_binding = {
+            # Kept separate so a future helper from the SSH transport cannot
+            # bypass cleanup by raising its shared base type.
+            failure = AzureRunCommandTransportError("Azure guard returned an invalid response")
+            failure.__cause__ = error
+        except Exception as error:
+            failure = error
+
+        if failure is None and response is not None and command == "arm":
+            binding = {
                 "nonce": response["nonce"],
                 "label": response["label"],
                 "hard_deadline": response["hard_deadline"],
                 "heartbeat_timeout_seconds": response["heartbeat_timeout_seconds"],
             }
-        elif command == "preflight" and str(response["azure_resource_id"]).casefold() != self._expected_resource_id().casefold():
-            raise AzureRunCommandTransportError("Azure guard attested a different managed VM")
+        elif (
+            failure is None
+            and response is not None
+            and command == "preflight"
+            and str(response["azure_resource_id"]).casefold() != self._expected_resource_id().casefold()
+        ):
+            failure = AzureRunCommandTransportError("Azure guard attested a different managed VM")
+
+        try:
+            self._invoke(self.delete_command(name))
+        except AzureRunCommandTransportError as error:
+            # Do not return a receipt when Azure has not confirmed removal of
+            # the per-RPC resource.  A failed RPC is already fail-closed; this
+            # preserves that property while preventing silent quota exhaustion.
+            raise AzureRunCommandTransportError(
+                "Azure Run Command cleanup failed safely and could not be confirmed"
+            ) from error
+
+        if failure is not None:
+            raise failure
+        if response is None:  # Defensive: a successful path must validate a response.
+            raise AzureRunCommandTransportError("Azure Run Command returned an invalid response")
+        if binding is not None:
+            self._arm_binding = binding
         return response
 
     def resume_arm_binding(self, receipt: Mapping[str, object]) -> None:

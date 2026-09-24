@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from scripts.finalize_deferred_azure_guards import (
     _post_deadline_absence,
     finalize_deferred,
 )
+from srecon26_poc.azure_run_command_transport import AzureRunCommandGuardConfig
 
 
 DEADLINE = "2026-09-24T12:00:00+00:00"
@@ -165,6 +167,40 @@ def test_deferred_finalizer_resumes_exports_and_updates_bound_manifest(scenario)
     assert "finalization_errors" not in manifest
     assert manifest["evidence_pack"]["status"] == "REBUILT"
     assert scenario.rebuilds == [True]
+
+
+def test_deferred_finalizer_rebuilds_managed_run_command_channel(scenario) -> None:
+    descriptor = json.loads(scenario.descriptor.read_text())
+    endpoint = descriptor["roles"]["server"]["endpoint"]
+    endpoint.clear()
+    endpoint.update({
+        "transport": "azure-run-command",
+        "subscription_id": "11111111-1111-1111-1111-111111111111",
+        "resource_group": "SRECON26-GUARD-EASTUS-V2-RG",
+        "vm_name": "srecon26-guard-eastus-primary-b",
+        "az_path": sys.executable,
+        "timeout_seconds": 20,
+    })
+    scenario.descriptor.write_text(json.dumps(descriptor))
+    received = []
+
+    class RunCommandTransport(FakeTransport):
+        def __init__(self, config) -> None:
+            assert isinstance(config, AzureRunCommandGuardConfig)
+            assert config.vm_name == "srecon26-guard-eastus-primary-b"
+            received.append(config)
+            super().__init__(config)
+
+    finalize(scenario, transport_factory=RunCommandTransport)
+    assert len(received) == 1
+
+
+def test_deferred_finalizer_refuses_unknown_serialized_transport(scenario) -> None:
+    descriptor = json.loads(scenario.descriptor.read_text())
+    descriptor["roles"]["server"]["endpoint"]["transport"] = "unsupported"
+    scenario.descriptor.write_text(json.dumps(descriptor))
+    with pytest.raises(DeferredFinalizerError, match="transport is invalid"):
+        finalize(scenario)
 
 
 def test_heartbeat_loss_before_deadline_accepts_later_durable_absence(scenario, monkeypatch) -> None:

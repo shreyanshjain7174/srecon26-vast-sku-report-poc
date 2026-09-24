@@ -83,12 +83,15 @@ def test_uses_fixed_run_command_and_base64_stdin_gateway() -> None:
     response = _transport(runner).call("arm", _arm())
 
     assert response["status"] == "ARMED"
-    create, status = calls
-    assert create[1] == status[1] == ""
-    assert create[2] == status[2] == 20
+    create, status, delete = calls
+    assert create[1] == status[1] == delete[1] == ""
+    assert create[2] == status[2] == delete[2] == 20
     assert create[0][1:4] == ["vm", "run-command", "create"]
-    assert "RunShellScript" in create[0]
-    script = create[0][create[0].index("--scripts") + 1]
+    assert "--command-id" not in create[0]
+    assert "RunShellScript" not in create[0]
+    assert "--script" in create[0]
+    assert "--scripts" not in create[0]
+    script = create[0][create[0].index("--script") + 1]
     assert "SSH_ORIGINAL_COMMAND=guardctl" in script
     assert "/usr/local/libexec/srecon26-guard/ssh_rpc.py" in script
     encoded = script.split("'")[3]
@@ -99,6 +102,9 @@ def test_uses_fixed_run_command_and_base64_stdin_gateway() -> None:
     url = status[0][status[0].index("--url") + 1]
     assert "$expand=instanceView" in url
     assert "guard-rg" in url and "guard-vm" in url
+    assert delete[0][1:4] == ["vm", "run-command", "delete"]
+    assert delete[0][delete[0].index("--run-command-name") + 1].startswith("srecon26-rpc-")
+    assert "--yes" in delete[0]
 
 
 @pytest.mark.parametrize(
@@ -106,12 +112,16 @@ def test_uses_fixed_run_command_and_base64_stdin_gateway() -> None:
     ["not-json\n", json.dumps({"status": "ARMED", "root_hash": ROOT}) + "\n{}\n"],
 )
 def test_rejects_malformed_guard_response(output: str) -> None:
+    calls: list[list[str]] = []
+
     def runner(arguments, stdin: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        calls.append(list(arguments))
         stdout = "{}" if "create" in arguments else _view(output)
         return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
     with pytest.raises(AzureRunCommandTransportError, match="invalid response"):
         _transport(runner).call("arm", _arm())
+    assert [call[3] for call in calls] == ["create", "get", "delete"]
 
 
 def test_rejects_nonzero_cli_and_run_command_exit() -> None:
@@ -131,14 +141,30 @@ def test_rejects_nonzero_cli_and_run_command_exit() -> None:
 
 def test_rejects_oversized_azure_or_guard_response() -> None:
     def huge_azure(arguments, stdin: str, timeout: int) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(arguments, 0, stdout="x" * (64 * 1024 + 1), stderr="")
+        stdout = "{}" if "delete" in arguments else "x" * (64 * 1024 + 1)
+        return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
     with pytest.raises(AzureRunCommandTransportError, match="size limit"):
         _transport(huge_azure).call("arm", _arm())
 
     def huge_guard(arguments, stdin: str, timeout: int) -> subprocess.CompletedProcess[str]:
-        stdout = "{}" if "create" in arguments else _view("x" * (64 * 1024 + 1))
+        stdout = "{}" if "create" in arguments or "delete" in arguments else _view("x" * (64 * 1024 + 1))
         return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
 
     with pytest.raises(AzureRunCommandTransportError, match="size limit"):
         _transport(huge_guard).call("arm", _arm())
+
+
+def test_cleanup_failure_never_returns_a_guard_receipt() -> None:
+    calls: list[list[str]] = []
+
+    def runner(arguments, stdin: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        calls.append(list(arguments))
+        if "delete" in arguments:
+            return subprocess.CompletedProcess(arguments, 1, stdout="", stderr="")
+        stdout = "{}" if "create" in arguments else _view(json.dumps(_receipt()) + "\n")
+        return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr="")
+
+    with pytest.raises(AzureRunCommandTransportError, match="cleanup failed safely and could not be confirmed"):
+        _transport(runner).call("arm", _arm())
+    assert [call[3] for call in calls] == ["create", "get", "delete"]

@@ -22,10 +22,52 @@ from scripts.build_evidence_pack import (
     validate_deferred_guard_evidence,
 )
 from srecon26_poc.azure_guard_transport import AzureGuardSshConfig, AzureSshGuardTransport
+from srecon26_poc.azure_run_command_transport import AzureRunCommandGuardConfig, AzureRunCommandGuardTransport
 
 
 class DeferredFinalizerError(RuntimeError):
     """Deferred evidence cannot yet be finalized safely."""
+
+
+def _transport_for_endpoint(
+    role: str,
+    endpoint: Mapping[str, object],
+    record: Mapping[str, object],
+    transport_factory: Callable[[object], object] | None,
+) -> object:
+    """Rebuild exactly the transport serialized with a deferred arm receipt."""
+
+    heartbeat_timeout_seconds = _integer(
+        record.get("expected_heartbeat_timeout_seconds"),
+        f"{role} expected heartbeat timeout",
+        minimum=1,
+        maximum=600,
+    )
+    transport_kind = endpoint.get("transport", "ssh")
+    if transport_kind == "ssh":
+        config: object = AzureGuardSshConfig(
+            host=str(endpoint.get("host", "")),
+            user=str(endpoint.get("user", "")),
+            identity_file=Path(str(endpoint.get("identity_file", ""))),
+            known_hosts_file=Path(str(endpoint.get("known_hosts_file", ""))),
+            port=_integer(endpoint.get("port"), f"{role} SSH port", minimum=1, maximum=65535),
+            timeout_seconds=_integer(endpoint.get("timeout_seconds"), f"{role} SSH timeout", minimum=1, maximum=60),
+            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+        )
+        return transport_factory(config) if transport_factory else AzureSshGuardTransport(config)
+    if transport_kind == "azure-run-command":
+        config = AzureRunCommandGuardConfig(
+            subscription_id=str(endpoint.get("subscription_id", "")),
+            resource_group=str(endpoint.get("resource_group", "")),
+            vm_name=str(endpoint.get("vm_name", "")),
+            az_path=Path(str(endpoint.get("az_path", ""))),
+            timeout_seconds=_integer(
+                endpoint.get("timeout_seconds"), f"{role} Azure Run Command timeout", minimum=1, maximum=60,
+            ),
+            heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+        ).validated()
+        return transport_factory(config) if transport_factory else AzureRunCommandGuardTransport(config)
+    raise DeferredFinalizerError(f"{role} deferred guard transport is invalid")
 
 
 def _time(value: object) -> datetime:
@@ -147,7 +189,7 @@ def finalize_deferred(
     *,
     timeout_seconds: int = 600,
     poll_seconds: float = 5,
-    transport_factory: Callable[[AzureGuardSshConfig], AzureSshGuardTransport] = AzureSshGuardTransport,
+    transport_factory: Callable[[object], object] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
@@ -202,21 +244,7 @@ def finalize_deferred(
                 raise DeferredFinalizerError(f"{role} saved guard evidence is invalid")
             completed[role] = dict(proof)
             continue
-        config = AzureGuardSshConfig(
-            host=str(endpoint.get("host", "")),
-            user=str(endpoint.get("user", "")),
-            identity_file=Path(str(endpoint.get("identity_file", ""))),
-            known_hosts_file=Path(str(endpoint.get("known_hosts_file", ""))),
-            port=_integer(endpoint.get("port"), f"{role} SSH port", minimum=1, maximum=65535),
-            timeout_seconds=_integer(endpoint.get("timeout_seconds"), f"{role} SSH timeout", minimum=1, maximum=60),
-            heartbeat_timeout_seconds=_integer(
-                record.get("expected_heartbeat_timeout_seconds"),
-                f"{role} expected heartbeat timeout",
-                minimum=1,
-                maximum=600,
-            ),
-        )
-        transport = transport_factory(config)
+        transport = _transport_for_endpoint(role, endpoint, record, transport_factory)
         transport.resume_arm_binding(arm_receipt)
         stop_at = monotonic() + timeout_seconds
         status: dict[str, object] | None = None
