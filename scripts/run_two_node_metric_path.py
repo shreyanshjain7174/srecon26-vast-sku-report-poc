@@ -705,6 +705,7 @@ def main() -> int:
     finalization_errors = finalize_provider_evidence()
     finalization_errors.extend(finalize_azure_guards())
     manifest["finished_at"] = datetime.now(UTC).isoformat()
+    manifest["evidence_status"] = "incomplete" if run_error is not None or finalization_errors else "complete"
     if result is not None:
         manifest["workload_completed"] = result.workload_completed
         manifest["absence_reads"] = result.absence_reads
