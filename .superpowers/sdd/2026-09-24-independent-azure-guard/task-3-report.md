@@ -117,3 +117,53 @@ Observed fix-round results:
   performed. The real run remains contingent on two separately hosted Azure
   controllers producing exact bound receipts; this code change is not live
   guard, billing, Kubernetes, vLLM, or HPA evidence.
+
+## Fix round 2: attested independence and deferred ambiguity finalization
+
+Status: DONE_WITH_CONCERNS. Commit `766b203` addresses the second re-review.
+
+- Azure arm receipts now bind the heartbeat timeout requested by the client,
+  and the guard worker emits its actual configured timeout. Arm and preflight
+  reject an absent or mismatched value. The paid runner passes the same value
+  into both guard transports and `SshWorkloadConfig`.
+- Azure preflight receipts must include a structurally valid Azure VM resource
+  ID, Azure VM UUID, remote host identity, and SSH host-key fingerprint. The
+  client computes the fingerprint of the single key in each dedicated pinned
+  known-hosts file and rejects a remote fingerprint mismatch.
+- Before the second arm callback can preflight Report or unlock the first paid
+  create, the runner rejects equality across the two attested host identities,
+  Azure resource IDs, Azure VM IDs, or pinned host-key fingerprints. DNS
+  aliases, copied known-hosts files, and duplicated controllers therefore fail
+  closed even when their CLI path strings differ.
+- A no-local-instance ambiguous create no longer treats `AWAITING_INSTANCE` or
+  another nonterminal export as final. It writes
+  `deferred-azure-guard-finalizer.json`, marks finalization incomplete, and
+  requires the independent Azure timer to produce `ABSENCE_CONFIRMED` with
+  three observations after the immutable deadline. A terminal response with
+  future timestamps is not accepted before the local deadline is reached.
+- The two direct hostname SSH calls now use the workload's heartbeat/deadline
+  streaming runner. Network `ssh-keyscan` was removed; the server bridge reuses
+  the already pinned host entry from the controller known-hosts file. All SSH
+  and SCP operations in the paid path now run through the heartbeat-aware
+  wrapper.
+- Evidence-pack receipt validation now also checks the attested Azure
+  identities, host-key fingerprints, heartbeat timeout, and pairwise
+  independence before presenting a bound-receipt or completed claim.
+
+Fix-round verification one-liner:
+
+```sh
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q && semgrep scan --config auto --error --json --output /var/tmp/srecon26-task3-fix2-semgrep.json guard/guard_worker.py scripts/build_evidence_pack.py scripts/run_two_node_metric_path.py src/srecon26_poc/azure_guard_transport.py src/srecon26_poc/guard.py src/srecon26_poc/guard_client.py src/srecon26_poc/live_factory.py tests/unit/test_azure_guard_transport.py tests/unit/test_build_evidence_pack.py tests/unit/test_live_factory.py tests/unit/test_two_node_runner.py && python3 -c 'import json; d=json.load(open("/var/tmp/srecon26-task3-fix2-semgrep.json")); assert not d.get("results") and not d.get("errors")' && git diff --check
+```
+
+Observed fix-round results:
+
+- Pytest: `392 passed in 4.92s`.
+- Focused Azure transport/factory/runner/evidence tests: `94 passed in 0.21s`.
+- Semgrep: 290 rules over eleven changed Python files, zero findings and zero
+  errors.
+- Python compilation and `git diff --check`: passed.
+- No cloud or provider mutation was performed. The external `guardctl`
+  deployment must implement the new attestation fields from its real Azure and
+  SSH configuration before any real run can arm; until that live contract is
+  proven on two controllers, paid creation remains blocked.
