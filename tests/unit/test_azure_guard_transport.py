@@ -19,6 +19,10 @@ from srecon26_poc.azure_guard_transport import (
 NONCE = "nonce_12345678"
 LABEL = f"srecon26-run-1--nonce-{NONCE}"
 ROOT = "a" * 64
+HEARTBEAT_TIMEOUT = 120
+HOST_KEY_FINGERPRINT = "SHA256:V/wGqHTHSNb4BFrleEaT0jG2C+WQ+j9+BcxG9WeR+6I"
+AZURE_RESOURCE_ID = "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/guard-rg/providers/Microsoft.Compute/virtualMachines/guard-vm"
+AZURE_VM_ID = "22222222-2222-2222-2222-222222222222"
 
 
 def _arm_receipt() -> dict[str, object]:
@@ -28,6 +32,17 @@ def _arm_receipt() -> dict[str, object]:
         "nonce": NONCE,
         "label": LABEL,
         "hard_deadline": "2026-09-24T04:00:00Z",
+        "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
+    }
+
+
+def _arm_payload() -> dict[str, object]:
+    return {
+        "run_id": "run-1",
+        "label": LABEL,
+        "nonce": NONCE,
+        "hard_deadline": "2026-09-24T04:00:00Z",
+        "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
     }
 
 
@@ -36,7 +51,7 @@ def _transport(tmp_path: Path, runner) -> AzureSshGuardTransport:
     identity.write_text("test-private-key-placeholder", encoding="utf-8")
     identity.chmod(0o600)
     known_hosts = tmp_path / "known_hosts"
-    known_hosts.write_text("guard.example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest\n", encoding="utf-8")
+    known_hosts.write_text("guard.example.test ssh-ed25519 dGVzdC1ob3N0LWtleQ==\n", encoding="utf-8")
     known_hosts.chmod(0o600)
     return AzureSshGuardTransport(
         AzureGuardSshConfig(
@@ -65,6 +80,7 @@ def test_transport_uses_pinned_noninteractive_fixed_command_and_one_json_request
                     "nonce": NONCE,
                     "label": LABEL,
                     "hard_deadline": "2026-09-24T04:00:00Z",
+                    "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
                 }
             )
             + "\n",
@@ -73,7 +89,7 @@ def test_transport_uses_pinned_noninteractive_fixed_command_and_one_json_request
 
     response = _transport(tmp_path, runner).call(
         "arm",
-        {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "hard_deadline": "2026-09-24T04:00:00Z"},
+        _arm_payload(),
     )
 
     assert response["status"] == "ARMED"
@@ -88,7 +104,13 @@ def test_transport_uses_pinned_noninteractive_fixed_command_and_one_json_request
     assert all(item not in arguments for item in ("-L", "-R", "-D", "-A", "-t"))
     assert json.loads(request) == {
         "command": "arm",
-        "payload": {"hard_deadline": "2026-09-24T04:00:00Z", "label": LABEL, "nonce": NONCE, "run_id": "run-1"},
+        "payload": {
+            "hard_deadline": "2026-09-24T04:00:00Z",
+            "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
+            "label": LABEL,
+            "nonce": NONCE,
+            "run_id": "run-1",
+        },
         "protocol": "srecon26-guard-v1",
     }
     assert request.count("\n") == 1 and request.endswith("\n")
@@ -159,6 +181,7 @@ def test_arm_response_must_be_armed_and_exactly_bound_to_the_request(tmp_path: P
         "nonce": NONCE,
         "label": LABEL,
         "hard_deadline": "2026-09-24T04:00:00Z",
+        "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
     }
     response.update(response_override)
 
@@ -168,7 +191,7 @@ def test_arm_response_must_be_armed_and_exactly_bound_to_the_request(tmp_path: P
     with pytest.raises(AzureGuardTransportError):
         _transport(tmp_path, runner).call(
             "arm",
-            {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "hard_deadline": "2026-09-24T04:00:00Z"},
+            _arm_payload(),
         )
 
 
@@ -181,6 +204,7 @@ def test_preflight_must_restate_the_validated_arm_binding(tmp_path: Path) -> Non
                 "nonce": NONCE,
                 "label": LABEL,
                 "hard_deadline": "2026-09-24T04:00:00Z",
+                "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
             },
             {
                 "status": "ARMED",
@@ -190,6 +214,10 @@ def test_preflight_must_restate_the_validated_arm_binding(tmp_path: Path) -> Non
                 "hard_deadline": "2026-09-24T04:00:00Z",
                 "host_identity": "azure-guard-01",
                 "script_hash": "c" * 64,
+                "azure_resource_id": AZURE_RESOURCE_ID,
+                "azure_vm_id": AZURE_VM_ID,
+                "host_key_fingerprint": HOST_KEY_FINGERPRINT,
+                "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
             },
         ]
     )
@@ -200,9 +228,39 @@ def test_preflight_must_restate_the_validated_arm_binding(tmp_path: Path) -> Non
     transport = _transport(tmp_path, runner)
     transport.call(
         "arm",
-        {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "hard_deadline": "2026-09-24T04:00:00Z"},
+        _arm_payload(),
     )
     assert transport.call("preflight", {})["host_identity"] == "azure-guard-01"
+
+
+def test_preflight_rejects_a_host_key_fingerprint_not_in_the_pinned_file(tmp_path: Path) -> None:
+    preflight = {
+        **_arm_receipt(),
+        "host_identity": "azure-guard-01",
+        "script_hash": "c" * 64,
+        "azure_resource_id": AZURE_RESOURCE_ID,
+        "azure_vm_id": AZURE_VM_ID,
+        "host_key_fingerprint": "SHA256:" + "A" * 43,
+    }
+    responses = iter((_arm_receipt(), preflight))
+
+    def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(next(responses)), stderr="")
+
+    transport = _transport(tmp_path, runner)
+    transport.call("arm", _arm_payload())
+    with pytest.raises(AzureGuardTransportError, match="pinned host-key"):
+        transport.call("preflight", {})
+
+
+def test_arm_rejects_the_remote_workers_actual_heartbeat_timeout_mismatch(tmp_path: Path) -> None:
+    response = {**_arm_receipt(), "heartbeat_timeout_seconds": 60}
+
+    def runner(arguments, request: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(response), stderr="")
+
+    with pytest.raises(AzureGuardTransportError, match="heartbeat timeout"):
+        _transport(tmp_path, runner).call("arm", _arm_payload())
 
 
 @pytest.mark.parametrize(
@@ -253,7 +311,7 @@ def test_absence_confirmed_accepts_exactly_three_distinct_ordered_observations(t
     transport = _transport(tmp_path, runner)
     transport.call(
         "arm",
-        {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "hard_deadline": "2026-09-24T04:00:00Z"},
+        _arm_payload(),
     )
     assert transport.call("status", {"nonce": NONCE})["absence_observations"] == observations
 
@@ -329,7 +387,7 @@ def test_post_arm_rpcs_reject_foreign_run_receipts(tmp_path: Path, command: str,
     transport = _transport(tmp_path, runner)
     transport.call(
         "arm",
-        {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "hard_deadline": "2026-09-24T04:00:00Z"},
+        _arm_payload(),
     )
     payloads = {
         "heartbeat": {"run_id": "run-1", "label": LABEL, "nonce": NONCE, "monotonic_ns": 1},

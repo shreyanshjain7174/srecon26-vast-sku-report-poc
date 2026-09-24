@@ -372,10 +372,21 @@ class DynamicAzureGuard:
         nonce = self._nonce(identity)
         self.transport = self.transport_factory(self.config)
         self.client = GuardClient(self.transport, nonce=nonce)
-        receipt = self.client.arm(identity, hard_deadline)
+        receipt = self.client.arm(
+            identity,
+            hard_deadline,
+            heartbeat_timeout_seconds=self.config.heartbeat_timeout_seconds,
+        )
         attestation = self.client.preflight()
         validate_attestation(identity, attestation)
-        if receipt.status != "ARMED" or attestation.nonce != nonce:
+        if (
+            receipt.status != "ARMED"
+            or attestation.nonce != nonce
+            or attestation.heartbeat_timeout_seconds != self.config.heartbeat_timeout_seconds
+            or not attestation.azure_resource_id
+            or not attestation.azure_vm_id
+            or not attestation.host_key_fingerprint
+        ):
             raise LiveFactoryError("Azure guard did not return a bound ARMED receipt")
         self.arm_receipt, self.attestation = receipt, attestation
         if self.on_armed is not None:
@@ -416,7 +427,7 @@ class DynamicAzureGuard:
 def _bound_guard_receipt(backend: str, receipt: GuardRemoteReceipt, attestation: GuardAttestation) -> dict[str, object]:
     """Return the safe, exact receipt fields suitable for run evidence."""
 
-    return {
+    bound: dict[str, object] = {
         "backend": backend,
         "status": receipt.status,
         "root_hash": receipt.root_hash,
@@ -427,6 +438,16 @@ def _bound_guard_receipt(backend: str, receipt: GuardRemoteReceipt, attestation:
         "host_identity": attestation.host_identity,
         "script_hash": attestation.script_hash,
     }
+    if backend == "azure":
+        bound.update(
+            {
+                "azure_resource_id": attestation.azure_resource_id,
+                "azure_vm_id": attestation.azure_vm_id,
+                "host_key_fingerprint": attestation.host_key_fingerprint,
+                "heartbeat_timeout_seconds": attestation.heartbeat_timeout_seconds,
+            }
+        )
+    return bound
 
 
 def _receipt_mapping(receipt: GuardRemoteReceipt) -> dict[str, object]:
@@ -861,7 +882,7 @@ class SshRemoteWorkload:
             raise LiveFactoryError("remote workload reached immutable teardown margin")
         return min(remaining, 1800)
 
-    def _stream(self, arguments: Sequence[str], *, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> None:
+    def _stream(self, arguments: Sequence[str], *, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> str:
         heartbeat()
         process = self.popen(list(arguments), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         chunks: list[str] = []
@@ -888,11 +909,12 @@ class SshRemoteWorkload:
                 chunks.append(output or "")
             log.parent.mkdir(parents=True, exist_ok=True)
             log.write_text("".join(chunks), encoding="utf-8")
+        return "".join(chunks)
 
-    def _remote(self, endpoint: SshEndpoint, command: Sequence[str], *, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> None:
+    def _remote(self, endpoint: SshEndpoint, command: Sequence[str], *, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> str:
         seconds = self._deadline_seconds(hard_deadline)
         remote = shlex.join(["timeout", "--foreground", str(seconds), *command])
-        self._stream([*self._ssh_prefix(endpoint), remote], hard_deadline=hard_deadline, heartbeat=heartbeat, log=log)
+        return self._stream([*self._ssh_prefix(endpoint), remote], hard_deadline=hard_deadline, heartbeat=heartbeat, log=log)
 
     def _wait_for_ssh(self, endpoint: SshEndpoint, *, hard_deadline: datetime, heartbeat: Callable[[], None], transport: Path) -> None:
         for attempt in range(1, 37):

@@ -163,6 +163,7 @@ def build_guards(
         known_hosts_file=args.server_azure_guard_known_hosts,
         port=args.server_azure_guard_port,
         timeout_seconds=args.azure_guard_timeout_seconds,
+        heartbeat_timeout_seconds=args.guard_heartbeat_timeout_seconds,
     )
     worker_config = AzureGuardSshConfig(
         host=args.worker_azure_guard_host,
@@ -171,6 +172,7 @@ def build_guards(
         known_hosts_file=args.worker_azure_guard_known_hosts,
         port=args.worker_azure_guard_port,
         timeout_seconds=args.azure_guard_timeout_seconds,
+        heartbeat_timeout_seconds=args.guard_heartbeat_timeout_seconds,
     )
     # Each transport permanently binds later RPCs to one nonce receipt and a
     # different pinned controller host, key, and known-hosts trust root.
@@ -178,6 +180,40 @@ def build_guards(
         DynamicAzureGuard(server_config, on_armed=on_server_armed),
         DynamicAzureGuard(worker_config, on_armed=on_worker_armed),
     )
+
+
+def validate_armed_guard_independence(
+    *,
+    role: str,
+    receipt: Mapping[str, object],
+    existing: Mapping[str, object],
+    expected_heartbeat_timeout_seconds: int,
+) -> None:
+    """Refuse paid work unless remote Azure and SSH identities are distinct."""
+
+    required_strings = (
+        "host_identity", "azure_resource_id", "azure_vm_id", "host_key_fingerprint",
+    )
+    if any(not isinstance(receipt.get(field), str) or not receipt.get(field) for field in required_strings):
+        raise LiveFactoryError(f"{role} Azure guard receipt lacks attested infrastructure identity")
+    if receipt.get("heartbeat_timeout_seconds") != expected_heartbeat_timeout_seconds:
+        raise LiveFactoryError(f"{role} Azure guard receipt attests a different heartbeat timeout")
+    for other_role, other in existing.items():
+        if other_role == role or not isinstance(other, Mapping) or other.get("status") == "PENDING":
+            continue
+        for field in required_strings:
+            if str(receipt[field]).casefold() == str(other.get(field, "")).casefold():
+                raise LiveFactoryError(f"{role} and {other_role} Azure guards share attested {field}")
+
+
+def _parse_guard_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
 
 
 def finalize_azure_guard_channels(
@@ -189,11 +225,13 @@ def finalize_azure_guard_channels(
     absence_timeout_seconds: int,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> tuple[dict[str, object], list[str]]:
     """Status and export every armed channel, polling absence when needed."""
 
     evidence: dict[str, object] = {}
     errors: list[str] = []
+    deferred_roles: dict[str, object] = {}
     unsafe = {"OWNERSHIP_MISMATCH", "TEARDOWN_RETRIES_EXHAUSTED", "DISARMED"}
     for role in ("server", "worker"):
         guard = guards[role]
@@ -208,6 +246,9 @@ def finalize_azure_guard_channels(
             continue
 
         last_status: dict[str, object] | None = None
+        arm_deadline = getattr(guard.arm_receipt, "hard_deadline", None)
+        deadline_reached = isinstance(arm_deadline, datetime) and now() >= arm_deadline
+        absence_required_now = observed or deadline_reached
         stop_at = monotonic() + absence_timeout_seconds
         while True:
             try:
@@ -216,7 +257,7 @@ def finalize_azure_guard_channels(
                 errors.append(f"{role} Azure guard status failed: {error}")
                 break
             status = last_status.get("status")
-            if not observed or status == "ABSENCE_CONFIRMED" or status in unsafe or monotonic() >= stop_at:
+            if not absence_required_now or status == "ABSENCE_CONFIRMED" or status in unsafe or monotonic() >= stop_at:
                 if status in unsafe:
                     errors.append(f"{role} Azure guard reached unsafe terminal status {status}")
                 break
@@ -225,7 +266,7 @@ def finalize_azure_guard_channels(
         role_evidence: dict[str, object] = {
             **(last_status or {"status": "STATUS_UNAVAILABLE"}),
             "instance_observed_locally": observed,
-            "absence_required": observed,
+            "absence_required": True,
         }
         export_root = last_status.get("root_hash") if last_status is not None else getattr(guard.arm_receipt, "root_hash", None)
         if isinstance(export_root, str):
@@ -245,9 +286,63 @@ def finalize_azure_guard_channels(
                 role_evidence["export_error"] = str(error)
         else:
             errors.append(f"{role} Azure guard evidence export lacked a bound root")
-        if observed and (last_status is None or last_status.get("status") != "ABSENCE_CONFIRMED"):
-            errors.append(f"{role} Azure guard did not publish three-read ABSENCE_CONFIRMED")
+        terminal_absence = last_status is not None and last_status.get("status") == "ABSENCE_CONFIRMED"
+        if terminal_absence and not observed:
+            authority = _parse_guard_time(last_status.get("teardown_authority_at"))
+            observations = last_status.get("absence_observations")
+            terminal_absence = (
+                isinstance(arm_deadline, datetime)
+                and deadline_reached
+                and authority is not None
+                and authority >= arm_deadline
+                and isinstance(observations, list)
+                and len(observations) == 3
+                and all(
+                    (stamp := _parse_guard_time(value)) is not None and stamp > arm_deadline
+                    for value in observations
+                )
+            )
+        if not terminal_absence:
+            if not observed:
+                deferred_roles[role] = {
+                    "run_id": f"two-node-{role}-{getattr(guard.arm_receipt, 'nonce', '')}",
+                    "nonce": getattr(guard.arm_receipt, "nonce", None),
+                    "label": label,
+                    "hard_deadline": arm_deadline.isoformat() if isinstance(arm_deadline, datetime) else None,
+                    "finalize_after": arm_deadline.isoformat() if isinstance(arm_deadline, datetime) else None,
+                    "endpoint": {
+                        "host": guard.config.host,
+                        "user": guard.config.user,
+                        "port": guard.config.port,
+                        "identity_file": str(guard.config.identity_file),
+                        "known_hosts_file": str(guard.config.known_hosts_file),
+                    },
+                    "expected_heartbeat_timeout_seconds": guard.config.heartbeat_timeout_seconds,
+                    "latest_status": last_status,
+                }
+                role_evidence["deferred_finalizer_artifact"] = "deferred-azure-guard-finalizer.json"
+                errors.append(f"{role} Azure guard requires deferred post-deadline ABSENCE_CONFIRMED finalization")
+            else:
+                errors.append(f"{role} Azure guard did not publish three-read ABSENCE_CONFIRMED")
+        if observed and not terminal_absence:
+            role_evidence["absence_proof_valid"] = False
+        else:
+            role_evidence["absence_proof_valid"] = terminal_absence
         evidence[role] = role_evidence
+    if deferred_roles:
+        write_json(
+            output / "deferred-azure-guard-finalizer.json",
+            {
+                "schema": "srecon26.azure-guard-deferred-finalizer.v1",
+                "status": "PENDING_POST_DEADLINE_ABSENCE",
+                "strategy": "INDEPENDENT_AZURE_GUARD_TIMER",
+                "created_at": now().isoformat(),
+                "credential_material_included": False,
+                "required_terminal_status": "ABSENCE_CONFIRMED",
+                "required_post_deadline_absence_reads": 3,
+                "roles": deferred_roles,
+            },
+        )
     return evidence, errors
 
 
@@ -340,7 +435,14 @@ def main() -> int:
     def record_guard(role: str, receipt: Mapping[str, object]) -> None:
         guards = manifest["guards"]
         assert isinstance(guards, dict)
-        guards[role] = {**receipt, "role": role}
+        candidate = {**receipt, "role": role}
+        validate_armed_guard_independence(
+            role=role,
+            receipt=candidate,
+            existing=guards,
+            expected_heartbeat_timeout_seconds=args.guard_heartbeat_timeout_seconds,
+        )
+        guards[role] = candidate
         armed_roles.add(role)
         manifest["status"] = "guards-arming" if len(armed_roles) == 1 else "guards-armed"
         write_json(args.output / "run-manifest.json", manifest)
@@ -391,8 +493,8 @@ def main() -> int:
         server_guard.record_heartbeat(RunIdentity(controller.server.run_id, server_label, datetime.now(UTC)), tick)
         worker_guard.record_heartbeat(RunIdentity(controller.worker.run_id, worker_label, datetime.now(UTC)), tick)
 
-    def remote(endpoint, command: list[str], log: str) -> None:
-        work._remote(endpoint, command, hard_deadline=deadline, heartbeat=heartbeat, log=args.output / log)
+    def remote(endpoint, command: list[str], log: str) -> str:
+        return work._remote(endpoint, command, hard_deadline=deadline, heartbeat=heartbeat, log=args.output / log)
 
     def stage(endpoint, root: str, role: str) -> None:
         remote(endpoint, ["install", "-d", "-m", "0700", root], f"{role}-mkdir.log")
@@ -493,17 +595,28 @@ def main() -> int:
         stage(server_ep, server_root, "server")
         stage(worker_ep, worker_root, "worker")
         remote(server_ep, ["env", f"K3S_BINARY_PATH={server_root}/k3s", f"NVIDIA_RUNTIME_TEMPLATE={server_root}/nvidia-runtime.toml", "bash", f"{server_root}/remote_host_canary.sh", "install"], "server-install.log")
-        server_name = subprocess.check_output([*work._ssh_prefix(server_ep), "hostname"], text=True).strip()
-        worker_name = subprocess.check_output([*work._ssh_prefix(worker_ep), "hostname"], text=True).strip()
+        server_name = remote(server_ep, ["hostname"], "server-hostname.log").strip()
+        worker_name = remote(worker_ep, ["hostname"], "worker-hostname.log").strip()
+        if not server_name or not worker_name:
+            raise LiveFactoryError("heartbeat-aware hostname lookup returned an empty node name")
         work._copy(server_ep, work.config.local_manifest_dir, f"{server_root}/manifests", recursive=True, hard_deadline=deadline, heartbeat=heartbeat, log=args.output / "server-manifests-copy.log")
         with tempfile.TemporaryDirectory(prefix="srecon26-two-node-") as temporary:
             staging = Path(temporary)
             bridge = staging / "server-bridge"
             subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(bridge)], check=True)
             known_hosts = staging / "server-known-hosts"
-            known_hosts.write_bytes(subprocess.check_output(["ssh-keyscan", "-p", str(server_ep.port), server_ep.host], stderr=subprocess.DEVNULL))
-            if not known_hosts.read_bytes():
-                raise RuntimeError("server SSH host key scan returned no key")
+            lookup = server_ep.host if server_ep.port == 22 else f"[{server_ep.host}]:{server_ep.port}"
+            pinned = subprocess.run(
+                ["ssh-keygen", "-F", lookup, "-f", str(work.config.known_hosts_file)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout
+            entries = [line for line in pinned.splitlines() if line and not line.startswith("#")]
+            if not entries:
+                raise LiveFactoryError("server SSH host key is absent from the controller's pinned known-hosts file")
+            known_hosts.write_text("\n".join(entries) + "\n", encoding="utf-8")
             work._copy(server_ep, bridge.with_suffix(".pub"), f"{server_root}/bridge.pub", recursive=False, hard_deadline=deadline, heartbeat=heartbeat, log=args.output / "bridge-public-copy.log")
             remote(server_ep, ["sh", "-ceu", f"install -d -m 0700 /root/.ssh; cat {server_root}/bridge.pub >> /root/.ssh/authorized_keys; chmod 0600 /root/.ssh/authorized_keys; rm -f {server_root}/bridge.pub"], "bridge-authorize.log")
             work._copy(worker_ep, bridge, f"{worker_root}/server-bridge.key", recursive=False, hard_deadline=deadline, heartbeat=heartbeat, log=args.output / "bridge-key-copy.log")

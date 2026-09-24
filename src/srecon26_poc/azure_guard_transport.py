@@ -7,6 +7,7 @@ each direction.
 """
 from __future__ import annotations
 
+import base64
 import json
 import hashlib
 import os
@@ -18,6 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+from uuid import UUID
 
 from .guard_client import GuardClientError, GuardTransport
 
@@ -29,6 +31,11 @@ _LABEL = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_FINGERPRINT = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
+_AZURE_RESOURCE_ID = re.compile(
+    r"^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.Compute/virtualMachines/[^/]+$",
+    re.IGNORECASE,
+)
 _MAX_RESPONSE_BYTES = 64 * 1024
 _MAX_STDERR_BYTES = 4 * 1024
 _RECEIPT_STATUSES = frozenset(
@@ -138,6 +145,28 @@ def _regular_private_file(path: Path, description: str, *, private: bool = False
     return resolved
 
 
+def _known_hosts_fingerprint(path: Path) -> str:
+    fingerprints: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.split()
+        if fields[0].startswith("@"):
+            fields = fields[1:]
+        if len(fields) < 3 or not fields[1].startswith(("ssh-", "ecdsa-")):
+            raise AzureGuardTransportError("Azure guard known-hosts entry is invalid")
+        try:
+            key_blob = base64.b64decode(fields[2], validate=True)
+        except (ValueError, base64.binascii.Error) as error:
+            raise AzureGuardTransportError("Azure guard known-hosts key is invalid") from error
+        digest = base64.b64encode(hashlib.sha256(key_blob).digest()).decode("ascii").rstrip("=")
+        fingerprints.add(f"SHA256:{digest}")
+    if len(fingerprints) != 1:
+        raise AzureGuardTransportError("Azure guard known-hosts file must pin exactly one host key")
+    return fingerprints.pop()
+
+
 @dataclass(frozen=True, slots=True)
 class AzureGuardSshConfig:
     host: str
@@ -146,6 +175,7 @@ class AzureGuardSshConfig:
     known_hosts_file: Path
     port: int = 22
     timeout_seconds: int = 20
+    heartbeat_timeout_seconds: int = 120
 
     def validated(self) -> "AzureGuardSshConfig":
         if not _HOST.fullmatch(self.host) or ".." in self.host:
@@ -156,6 +186,8 @@ class AzureGuardSshConfig:
             raise AzureGuardTransportError("Azure guard SSH port is invalid")
         if not 1 <= self.timeout_seconds <= 60:
             raise AzureGuardTransportError("Azure guard timeout must be 1-60 seconds")
+        if not 1 <= self.heartbeat_timeout_seconds <= 600:
+            raise AzureGuardTransportError("Azure guard heartbeat timeout must be 1-600 seconds")
         identity = _regular_private_file(self.identity_file, "Azure guard SSH identity", private=True)
         known_hosts = _regular_private_file(self.known_hosts_file, "Azure guard known-hosts file")
         if not known_hosts.read_bytes().strip():
@@ -167,6 +199,7 @@ class AzureGuardSshConfig:
             known_hosts_file=known_hosts,
             port=self.port,
             timeout_seconds=self.timeout_seconds,
+            heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
         )
 
 
@@ -187,7 +220,7 @@ def _validate_request(command: str, payload: Mapping[str, object]) -> dict[str, 
         raise AzureGuardTransportError("unsupported Azure guard RPC verb")
     expected = {
         "preflight": frozenset(),
-        "arm": frozenset({"run_id", "label", "nonce", "hard_deadline"}),
+        "arm": frozenset({"run_id", "label", "nonce", "hard_deadline", "heartbeat_timeout_seconds"}),
         "heartbeat": frozenset({"run_id", "label", "nonce", "monotonic_ns"}),
         "status": frozenset({"nonce"}),
         "anchor": frozenset({"nonce", "root_hash"}),
@@ -208,6 +241,9 @@ def _validate_request(command: str, payload: Mapping[str, object]) -> dict[str, 
             raise AzureGuardTransportError("Azure guard request label is not nonce-bound")
     if command == "arm":
         _timestamp(request["hard_deadline"], "hard_deadline")
+        timeout_seconds = request["heartbeat_timeout_seconds"]
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 1 <= timeout_seconds <= 600:
+            raise AzureGuardTransportError("Azure guard heartbeat timeout is invalid")
     elif command == "heartbeat":
         monotonic_ns = request["monotonic_ns"]
         if isinstance(monotonic_ns, bool) or not isinstance(monotonic_ns, int) or monotonic_ns < 0:
@@ -267,7 +303,10 @@ def _validate_response(
         raise AzureGuardTransportError("Azure guard response status is invalid")
     if not isinstance(root_hash, str) or not _HEX.fullmatch(root_hash):
         raise AzureGuardTransportError("Azure guard response root hash is invalid")
-    for field in ("nonce", "label", "host_identity", "script_hash"):
+    for field in (
+        "nonce", "label", "host_identity", "script_hash", "azure_resource_id",
+        "azure_vm_id", "host_key_fingerprint",
+    ):
         if field in response and not isinstance(response[field], str):
             raise AzureGuardTransportError(f"Azure guard response {field} is invalid")
     if "nonce" in response and not _NONCE.fullmatch(str(response["nonce"])):
@@ -278,6 +317,19 @@ def _validate_response(
         raise AzureGuardTransportError("Azure guard response label is not nonce-bound")
     if "script_hash" in response and not _HEX.fullmatch(str(response["script_hash"])):
         raise AzureGuardTransportError("Azure guard response script hash is invalid")
+    if "heartbeat_timeout_seconds" in response:
+        heartbeat_timeout = response["heartbeat_timeout_seconds"]
+        if isinstance(heartbeat_timeout, bool) or not isinstance(heartbeat_timeout, int) or not 1 <= heartbeat_timeout <= 600:
+            raise AzureGuardTransportError("Azure guard response heartbeat timeout is invalid")
+    if "azure_resource_id" in response and not _AZURE_RESOURCE_ID.fullmatch(str(response["azure_resource_id"])):
+        raise AzureGuardTransportError("Azure guard response Azure resource ID is invalid")
+    if "azure_vm_id" in response:
+        try:
+            UUID(str(response["azure_vm_id"]))
+        except ValueError as error:
+            raise AzureGuardTransportError("Azure guard response Azure VM ID is invalid") from error
+    if "host_key_fingerprint" in response and not _FINGERPRINT.fullmatch(str(response["host_key_fingerprint"])):
+        raise AzureGuardTransportError("Azure guard response host-key fingerprint is invalid")
     for field in ("hard_deadline", "last_heartbeat", "teardown_authority_at"):
         if response.get(field) is not None:
             _timestamp(response[field], field)
@@ -285,19 +337,24 @@ def _validate_response(
 
     binding = payload if command == "arm" else arm_binding
     if command == "arm":
-        _required(response, frozenset({"status", "root_hash", "nonce", "label", "hard_deadline"}), command)
+        _required(response, frozenset({"status", "root_hash", "nonce", "label", "hard_deadline", "heartbeat_timeout_seconds"}), command)
         if status != "ARMED":
             raise AzureGuardTransportError("Azure guard arm did not return ARMED")
         if response["nonce"] != payload["nonce"] or response["label"] != payload["label"]:
             raise AzureGuardTransportError("Azure guard arm response changed ownership")
         if not _same_timestamp(response["hard_deadline"], payload["hard_deadline"], "hard_deadline"):
             raise AzureGuardTransportError("Azure guard arm response changed the deadline")
+        if response["heartbeat_timeout_seconds"] != payload["heartbeat_timeout_seconds"]:
+            raise AzureGuardTransportError("Azure guard arm response changed the heartbeat timeout")
     elif command == "preflight":
         if binding is None:
             raise AzureGuardTransportError("Azure guard preflight requires a validated arm receipt")
         _required(
             response,
-            frozenset({"status", "root_hash", "nonce", "label", "hard_deadline", "host_identity", "script_hash"}),
+            frozenset({
+                "status", "root_hash", "nonce", "label", "hard_deadline", "host_identity", "script_hash",
+                "azure_resource_id", "azure_vm_id", "host_key_fingerprint", "heartbeat_timeout_seconds",
+            }),
             command,
         )
         if status != "ARMED" or response["nonce"] != binding["nonce"] or response["label"] != binding["label"]:
@@ -306,6 +363,8 @@ def _validate_response(
             raise AzureGuardTransportError("Azure guard preflight changed the deadline")
         if not response["host_identity"]:
             raise AzureGuardTransportError("Azure guard preflight lacks the remote host identity")
+        if response["heartbeat_timeout_seconds"] != binding["heartbeat_timeout_seconds"]:
+            raise AzureGuardTransportError("Azure guard preflight changed the heartbeat timeout")
     elif command == "heartbeat":
         if binding is None:
             raise AzureGuardTransportError("Azure guard heartbeat requires a validated arm receipt")
@@ -380,6 +439,7 @@ class AzureSshGuardTransport(GuardTransport):
 
     def __init__(self, config: AzureGuardSshConfig, *, runner: Runner | None = None) -> None:
         self.config = config.validated()
+        self.host_key_fingerprint = _known_hosts_fingerprint(self.config.known_hosts_file)
         self.runner = runner or _run
         self._arm_binding: dict[str, object] | None = None
 
@@ -408,6 +468,8 @@ class AzureSshGuardTransport(GuardTransport):
         )
 
     def call(self, command: str, payload: dict[str, object]) -> dict[str, object]:
+        if command == "arm" and payload.get("heartbeat_timeout_seconds") != self.config.heartbeat_timeout_seconds:
+            raise AzureGuardTransportError("Azure guard arm request differs from the configured heartbeat timeout")
         request = _validate_request(command, payload)
         serialized = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False) + "\n"
         try:
@@ -424,7 +486,10 @@ class AzureSshGuardTransport(GuardTransport):
                 "nonce": response["nonce"],
                 "label": response["label"],
                 "hard_deadline": response["hard_deadline"],
+                "heartbeat_timeout_seconds": response["heartbeat_timeout_seconds"],
             }
+        elif command == "preflight" and response["host_key_fingerprint"] != self.host_key_fingerprint:
+            raise AzureGuardTransportError("Azure guard attested a different pinned host-key fingerprint")
         return response
 
     def export_evidence(self, *, nonce: str, root_hash: str) -> GuardEvidenceExport:

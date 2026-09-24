@@ -344,6 +344,7 @@ class AzureBoundTransport:
                 "nonce": payload["nonce"],
                 "label": payload["label"],
                 "hard_deadline": payload["hard_deadline"],
+                "heartbeat_timeout_seconds": payload["heartbeat_timeout_seconds"],
             }
         assert self.binding is not None
         if command == "preflight":
@@ -355,6 +356,10 @@ class AzureBoundTransport:
                 "hard_deadline": self.binding["hard_deadline"],
                 "host_identity": "azure-guard-vm",
                 "script_hash": "3" * 64,
+                "azure_resource_id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/guard-rg/providers/Microsoft.Compute/virtualMachines/guard-vm",
+                "azure_vm_id": "22222222-2222-2222-2222-222222222222",
+                "host_key_fingerprint": "SHA256:V/wGqHTHSNb4BFrleEaT0jG2C+WQ+j9+BcxG9WeR+6I",
+                "heartbeat_timeout_seconds": self.binding["heartbeat_timeout_seconds"],
             }
         if command == "status":
             return {
@@ -397,6 +402,10 @@ def test_dynamic_azure_guard_emits_only_a_bound_armed_receipt() -> None:
             "last_heartbeat": None,
             "host_identity": "azure-guard-vm",
             "script_hash": "3" * 64,
+            "azure_resource_id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/guard-rg/providers/Microsoft.Compute/virtualMachines/guard-vm",
+            "azure_vm_id": "22222222-2222-2222-2222-222222222222",
+            "host_key_fingerprint": "SHA256:V/wGqHTHSNb4BFrleEaT0jG2C+WQ+j9+BcxG9WeR+6I",
+            "heartbeat_timeout_seconds": 120,
         }
     ]
     assert guard.status()["status"] == "ABSENCE_CONFIRMED"

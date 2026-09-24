@@ -22,6 +22,7 @@ def manifest_fixture() -> dict[str, object]:
     manifest: dict[str, object] = {
         "guard_backend": "azure",
         "hard_deadline": DEADLINE,
+        "guard_heartbeat_timeout_seconds": 120,
         "guards": {},
     }
     guards = manifest["guards"]
@@ -45,6 +46,10 @@ def manifest_fixture() -> dict[str, object]:
             "last_heartbeat": "2026-09-24T11:00:00Z",
             "host_identity": host,
             "script_hash": "b" * 64,
+            "azure_resource_id": f"/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/{role}-rg/providers/Microsoft.Compute/virtualMachines/{role}-guard",
+            "azure_vm_id": "22222222-2222-2222-2222-222222222221" if role == "server" else "22222222-2222-2222-2222-222222222222",
+            "host_key_fingerprint": "SHA256:" + ("A" if role == "server" else "B") * 43,
+            "heartbeat_timeout_seconds": 120,
         }
     return manifest
 
@@ -79,7 +84,7 @@ def test_bound_guard_receipts_require_independent_host_identities() -> None:
     valid, errors = validate_bound_guard_receipts(manifest)
 
     assert valid is False
-    assert "independence" in errors
+    assert "independence_host_identity" in errors
 
 
 def write_artifact(path: Path, payload: dict[str, object]) -> dict[str, object]:

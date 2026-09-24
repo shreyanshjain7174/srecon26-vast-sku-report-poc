@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping
+from uuid import UUID
 from xml.sax.saxutils import escape
 
 
@@ -22,6 +23,11 @@ VERDICT = Path("/var/tmp/srecon26-verdict.json")
 COLORS = {"ink": "#152238", "blue": "#155EEF", "orange": "#D97600", "green": "#0C8B6B", "muted": "#52616B", "grid": "#D8DEE4"}
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 NONCE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+HOST_KEY_FINGERPRINT = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
+AZURE_RESOURCE_ID = re.compile(
+    r"^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.Compute/virtualMachines/[^/]+$",
+    re.IGNORECASE,
+)
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -42,6 +48,14 @@ def _remote_host(value: object) -> bool:
     except ValueError:
         return True
     return not (address.is_loopback or address.is_unspecified or address.is_multicast)
+
+
+def _uuid(value: object) -> bool:
+    try:
+        UUID(str(value))
+    except ValueError:
+        return False
+    return isinstance(value, str)
 
 
 def _safe_artifact(run_dir: Path, record: Mapping[str, object]) -> tuple[Path, bytes] | None:
@@ -74,7 +88,10 @@ def validate_bound_guard_receipts(manifest: Mapping[str, object]) -> tuple[bool,
     deadline = _timestamp(manifest.get("hard_deadline"))
     if manifest.get("guard_backend") != "azure" or not isinstance(guards, Mapping) or deadline is None:
         return False, {"manifest": "missing exact Azure guard binding context"}
-    hosts: list[str] = []
+    independent: dict[str, list[str]] = {
+        "host_identity": [], "azure_resource_id": [], "azure_vm_id": [], "host_key_fingerprint": [],
+    }
+    heartbeat_timeout = manifest.get("guard_heartbeat_timeout_seconds")
     for role in ("server", "worker"):
         target = manifest.get(role)
         receipt = guards.get(role)
@@ -99,14 +116,24 @@ def validate_bound_guard_receipts(manifest: Mapping[str, object]) -> tuple[bool,
             and SHA256.fullmatch(str(receipt.get("script_hash"))) is not None
             and _remote_host(receipt.get("host_identity"))
             and _timestamp(receipt.get("last_heartbeat")) is not None
+            and isinstance(receipt.get("azure_resource_id"), str)
+            and AZURE_RESOURCE_ID.fullmatch(str(receipt.get("azure_resource_id"))) is not None
+            and isinstance(receipt.get("azure_vm_id"), str)
+            and _uuid(receipt.get("azure_vm_id"))
+            and isinstance(receipt.get("host_key_fingerprint"), str)
+            and HOST_KEY_FINGERPRINT.fullmatch(str(receipt.get("host_key_fingerprint"))) is not None
+            and isinstance(heartbeat_timeout, int)
+            and receipt.get("heartbeat_timeout_seconds") == heartbeat_timeout
         )
         if not valid:
             errors[role] = "receipt is not bound to the exact Azure role, nonce, label, deadline, host, and script"
         else:
             assert isinstance(receipt, Mapping)
-            hosts.append(str(receipt["host_identity"]).casefold())
-    if len(hosts) == 2 and hosts[0] == hosts[1]:
-        errors["independence"] = "guard receipts use the same controller host identity"
+            for field in independent:
+                independent[field].append(str(receipt[field]).casefold())
+    for field, values in independent.items():
+        if len(values) == 2 and values[0] == values[1]:
+            errors[f"independence_{field}"] = f"guard receipts use the same attested {field}"
     return not errors, errors
 
 

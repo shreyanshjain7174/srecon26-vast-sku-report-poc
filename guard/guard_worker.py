@@ -53,6 +53,7 @@ class GuardReceipt:
     absence_observations: tuple[datetime, ...]
     root_hash: str
     event_count: int
+    heartbeat_timeout_seconds: int
 
 
 def _utc(value: datetime) -> datetime:
@@ -387,8 +388,7 @@ class GuardWorker:
         state["status"] = recovered_status
         return state
 
-    @staticmethod
-    def _receipt(state: Mapping[str, object]) -> GuardReceipt:
+    def _receipt(self, state: Mapping[str, object]) -> GuardReceipt:
         return GuardReceipt(
             nonce=str(state["nonce"]),
             label=str(state["label"]),
@@ -400,6 +400,7 @@ class GuardWorker:
             absence_observations=tuple(_parse_stamp(value) for value in state.get("absence_observations", [])),
             root_hash=str(state["root_hash"]),
             event_count=int(state["event_count"]),
+            heartbeat_timeout_seconds=int(self.heartbeat_timeout.total_seconds()),
         )
 
     def _persist(self, directory: Path, state: dict[str, object]) -> GuardReceipt:
@@ -409,9 +410,15 @@ class GuardWorker:
         self._durable_replace(directory / "state.json", state)
         return self._receipt(state)
 
-    def preflight(self) -> dict[str, str]:
+    def preflight(self) -> dict[str, object]:
         script_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-        return {"host_identity": os.uname().nodename, "script_hash": script_hash, "root_hash": _GENESIS_HASH, "status": "READY"}
+        return {
+            "host_identity": os.uname().nodename,
+            "script_hash": script_hash,
+            "root_hash": _GENESIS_HASH,
+            "status": "READY",
+            "heartbeat_timeout_seconds": int(self.heartbeat_timeout.total_seconds()),
+        }
 
     def provider_preflight(self) -> dict[str, object]:
         """Fail closed unless the credential can list a completely empty account.
