@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -13,7 +14,13 @@ from typing import Callable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
+from scripts.build_evidence_pack import (
+    post_deadline_absence,
+    validate_bound_guard_receipts,
+    validate_deferred_guard_evidence,
+)
 from srecon26_poc.azure_guard_transport import AzureGuardSshConfig, AzureSshGuardTransport
 
 
@@ -82,6 +89,10 @@ def _validate_record_binding(
         or offer.get("label") != label
     ):
         raise DeferredFinalizerError(f"{role} deferred arm is not bound to the run manifest")
+    guards = _object(manifest.get("guards"), "bound manifest guard attestations")
+    original = _object(guards.get(role), f"bound manifest {role} guard attestation")
+    if {field: value for field, value in receipt.items() if field != "run_id"} != original:
+        raise DeferredFinalizerError(f"{role} deferred arm differs from the original manifest attestation")
 
 
 def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
@@ -91,23 +102,44 @@ def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
 
 
 def _post_deadline_absence(status: Mapping[str, object], deadline: datetime, current: datetime) -> bool:
-    if status.get("status") != "ABSENCE_CONFIRMED" or current.astimezone(UTC) < deadline:
-        return False
-    authority = _time(status.get("teardown_authority_at"))
-    observations = status.get("absence_observations")
-    if authority < deadline or not isinstance(observations, list) or len(observations) != 3:
-        return False
-    parsed = [_time(value) for value in observations]
-    return parsed == sorted(set(parsed)) and all(value > deadline for value in parsed)
+    return post_deadline_absence(status, deadline, current.astimezone(UTC))
 
 
-def _default_rebuild() -> None:
+def _default_rebuild() -> Mapping[str, object]:
     subprocess.run(
         [sys.executable, str(ROOT / "scripts/build_evidence_pack.py")],
         cwd=ROOT,
         check=True,
         timeout=90,
     )
+    return _object(
+        json.loads((ROOT / "artifacts/evidence-pack/evidence-summary.json").read_text(encoding="utf-8")),
+        "rebuilt evidence summary",
+    )
+
+
+def _validate_rebuild(
+    summary: Mapping[str, object], manifest_path: Path, roles: Mapping[str, object], *, require_complete_run: bool,
+) -> None:
+    canary = _object(summary.get("two_node_canary"), "rebuilt two-node evidence")
+    attempts = canary.get("attempts")
+    matches = [
+        item for item in attempts if isinstance(item, Mapping) and item.get("run") == manifest_path.parent.name
+    ] if isinstance(attempts, list) else []
+    if len(matches) != 1:
+        raise DeferredFinalizerError("rebuilt evidence lacks the exact deferred run")
+    attempt = matches[0]
+    checks = _object(attempt.get("deferred_guard_evidence_validated"), "rebuilt deferred guard validation")
+    if (
+        attempt.get("manifest_sha256") != hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        or attempt.get("both_bound_arm_receipts") is not True
+        or attempt.get("both_guard_journals_hash_chain_verified") is not True
+        or any(checks.get(role) is not True for role in roles)
+        or (require_complete_run and any(attempt.get(field) is not True for field in (
+            "kubernetes_completed", "three_read_absence_proved_for_both", "authoritative_billing_captured_for_both",
+        )))
+    ):
+        raise DeferredFinalizerError("rebuilt evidence semantic validation failed")
 
 
 def finalize_deferred(
@@ -119,7 +151,7 @@ def finalize_deferred(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
-    rebuild: Callable[[], None] = _default_rebuild,
+    rebuild: Callable[[], Mapping[str, object]] = _default_rebuild,
 ) -> dict[str, object]:
     """Complete every deferred channel and update its original run evidence."""
 
@@ -133,7 +165,7 @@ def finalize_deferred(
     descriptor = json.loads(resolved.read_text(encoding="utf-8"))
     if not isinstance(descriptor, dict) or descriptor.get("schema") != "srecon26.azure-guard-deferred-finalizer.v1":
         raise DeferredFinalizerError("deferred finalizer descriptor schema is invalid")
-    if descriptor.get("status") != "PENDING_POST_DEADLINE_ABSENCE":
+    if descriptor.get("status") not in {"PENDING_POST_DEADLINE_ABSENCE", "PENDING_EVIDENCE_REBUILD"}:
         raise DeferredFinalizerError("deferred finalizer is not pending")
     roles = _object(descriptor.get("roles"), "deferred roles")
     if not roles or not set(roles).issubset({"server", "worker"}):
@@ -148,8 +180,15 @@ def finalize_deferred(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise DeferredFinalizerError("bound run manifest is invalid")
+    guards_valid, _errors = validate_bound_guard_receipts(manifest)
+    if not guards_valid:
+        raise DeferredFinalizerError("bound run manifest guard attestations are invalid")
+    for role, value in roles.items():
+        record = _object(value, f"{role} deferred record")
+        _validate_record_binding(role, record, _object(record.get("arm_receipt"), f"{role} arm receipt"), manifest)
 
     completed: dict[str, object] = {}
+    saved = _object(descriptor.get("evidence", {}), "saved deferred evidence")
     for role in sorted(roles):
         record = _object(roles[role], f"{role} deferred record")
         deadline = _time(record.get("hard_deadline"))
@@ -157,7 +196,12 @@ def finalize_deferred(
             raise DeferredFinalizerError(f"{role} immutable deadline has not arrived")
         endpoint = _object(record.get("endpoint"), f"{role} endpoint")
         arm_receipt = _object(record.get("arm_receipt"), f"{role} arm receipt")
-        _validate_record_binding(role, record, arm_receipt, manifest)
+        if role in saved:
+            proof = _object(saved[role], f"{role} saved guard evidence")
+            if not validate_deferred_guard_evidence(run_dir, role, arm_receipt, proof, current=now()):
+                raise DeferredFinalizerError(f"{role} saved guard evidence is invalid")
+            completed[role] = dict(proof)
+            continue
         config = AzureGuardSshConfig(
             host=str(endpoint.get("host", "")),
             user=str(endpoint.get("user", "")),
@@ -202,6 +246,10 @@ def finalize_deferred(
             "journal_artifact": journal.name,
             "journal_sha256": exported.journal_sha256,
         }
+        if not validate_deferred_guard_evidence(run_dir, role, arm_receipt, completed[role], current=now()):
+            raise DeferredFinalizerError(f"{role} exported guard evidence semantic validation failed")
+        descriptor["evidence"] = {**saved, **completed}
+        _atomic_json(resolved, descriptor)
 
     finalization = manifest.get("azure_guard_finalization")
     if not isinstance(finalization, dict):
@@ -216,30 +264,33 @@ def finalize_deferred(
         manifest["finalization_errors"] = remaining
     else:
         manifest.pop("finalization_errors", None)
-    manifest["azure_guard_evidence_status"] = "complete"
+    manifest["azure_guard_evidence_status"] = "pending-evidence-rebuild"
     manifest["deferred_finalizer"] = {
-        "status": "COMPLETED",
+        "status": "PENDING_EVIDENCE_REBUILD",
         "artifact": resolved.name,
-        "completed_at": now().isoformat(),
     }
-    manifest["evidence_status"] = (
-        "complete"
-        if not remaining and manifest.get("status") == "completed" and "failure" not in manifest
-        else "incomplete"
-    )
+    manifest["evidence_status"] = "incomplete"
+    manifest["evidence_pack"] = {"status": "PENDING_REBUILD"}
     _atomic_json(manifest_path, manifest)
 
-    descriptor.update({"status": "COMPLETED", "completed_at": now().isoformat(), "evidence": completed})
+    descriptor.update({"status": "PENDING_EVIDENCE_REBUILD", "evidence": completed})
     _atomic_json(resolved, descriptor)
+    complete_run = not remaining and manifest.get("status") == "completed" and "failure" not in manifest
     try:
-        rebuild()
-        manifest["evidence_pack"] = {"status": "REBUILT", "summary": "artifacts/evidence-pack/evidence-summary.json"}
-    except (OSError, subprocess.SubprocessError) as error:
+        summary = _object(rebuild(), "rebuilt evidence summary")
+        _validate_rebuild(summary, manifest_path, roles, require_complete_run=complete_run)
+    except Exception as error:
         manifest["evidence_pack"] = {"status": "FAILED", "error_type": type(error).__name__}
-        manifest["evidence_status"] = "incomplete"
         _atomic_json(manifest_path, manifest)
         raise DeferredFinalizerError("guard finalized but evidence-pack rebuild failed") from error
+    completed_at = now().isoformat()
+    manifest["azure_guard_evidence_status"] = "complete"
+    manifest["deferred_finalizer"].update({"status": "COMPLETED", "completed_at": completed_at})
+    manifest["evidence_pack"] = {"status": "REBUILT", "summary": "artifacts/evidence-pack/evidence-summary.json"}
+    manifest["evidence_status"] = "complete" if complete_run else "incomplete"
     _atomic_json(manifest_path, manifest)
+    descriptor.update({"status": "COMPLETED", "completed_at": completed_at})
+    _atomic_json(resolved, descriptor)
     return completed
 
 

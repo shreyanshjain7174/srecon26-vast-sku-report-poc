@@ -23,7 +23,9 @@ from typing import Callable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
+from scripts.build_evidence_pack import post_deadline_absence
 from srecon26_poc.azure_guard_transport import AzureGuardSshConfig
 from srecon26_poc.contracts import InstanceContract, OfferContract, ProbeOutcome, classify_fault
 from srecon26_poc.live_dispatch import REPORT_MARGIN, ProviderFaultEvidence
@@ -206,19 +208,10 @@ def validate_armed_guard_independence(
                 raise LiveFactoryError(f"{role} and {other_role} Azure guards share attested {field}")
 
 
-def _parse_guard_time(value: object) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
-
-
 def finalize_azure_guard_channels(
     *,
     guards: Mapping[str, DynamicAzureGuard],
+    guard_receipts: Mapping[str, object],
     labels: Mapping[str, str],
     observed_labels: set[str],
     output: Path,
@@ -288,19 +281,9 @@ def finalize_azure_guard_channels(
             errors.append(f"{role} Azure guard evidence export lacked a bound root")
         terminal_absence = last_status is not None and last_status.get("status") == "ABSENCE_CONFIRMED"
         if terminal_absence and not observed:
-            authority = _parse_guard_time(last_status.get("teardown_authority_at"))
-            observations = last_status.get("absence_observations")
             terminal_absence = (
                 isinstance(arm_deadline, datetime)
-                and deadline_reached
-                and authority is not None
-                and authority >= arm_deadline
-                and isinstance(observations, list)
-                and len(observations) == 3
-                and all(
-                    (stamp := _parse_guard_time(value)) is not None and stamp > arm_deadline
-                    for value in observations
-                )
+                and post_deadline_absence(last_status, arm_deadline, now())
             )
         if not terminal_absence:
             if not observed:
@@ -320,18 +303,8 @@ def finalize_azure_guard_channels(
                     },
                     "expected_heartbeat_timeout_seconds": guard.config.heartbeat_timeout_seconds,
                     "arm_receipt": {
-                        "backend": "azure",
-                        "status": "ARMED",
+                        **guard_receipts.get(role, {}),
                         "run_id": f"two-node-{role}-{getattr(guard.arm_receipt, 'nonce', '')}",
-                        "root_hash": getattr(guard.arm_receipt, "root_hash", None),
-                        "nonce": getattr(guard.arm_receipt, "nonce", None),
-                        "label": getattr(guard.arm_receipt, "label", None),
-                        "hard_deadline": arm_deadline.isoformat() if isinstance(arm_deadline, datetime) else None,
-                        "heartbeat_timeout_seconds": getattr(guard.arm_receipt, "heartbeat_timeout_seconds", None),
-                        "host_key_fingerprint": (
-                            getattr(guard.attestation, "host_key_fingerprint", None)
-                            or getattr(guard.transport, "host_key_fingerprint", None)
-                        ),
                     },
                     "latest_status": last_status,
                 }
@@ -701,6 +674,7 @@ def main() -> int:
     def finalize_azure_guards() -> list[str]:
         guard_evidence, errors = finalize_azure_guard_channels(
             guards={"server": server_guard, "worker": worker_guard},
+            guard_receipts=manifest["guards"],
             labels={"server": server_label, "worker": worker_label},
             observed_labels=set(observed_instances),
             output=args.output,

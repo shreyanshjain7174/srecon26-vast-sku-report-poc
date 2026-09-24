@@ -147,6 +147,7 @@ def test_every_armed_guard_is_statused_and_exported_without_local_instance(tmp_p
 
     evidence, errors = finalize_azure_guard_channels(
         guards={"server": server, "worker": worker},  # type: ignore[arg-type]
+        guard_receipts={"server": {"role": "server", "script_hash": "c" * 64}, "worker": {"role": "worker"}},
         labels={"server": "server-label", "worker": "worker-label"},
         observed_labels=set(), output=tmp_path, absence_timeout_seconds=30,
         sleep=lambda _seconds: None,
@@ -161,6 +162,8 @@ def test_every_armed_guard_is_statused_and_exported_without_local_instance(tmp_p
     deferred = json.loads((tmp_path / "deferred-azure-guard-finalizer.json").read_text())
     assert deferred["status"] == "PENDING_POST_DEADLINE_ABSENCE"
     assert set(deferred["roles"]) == {"server", "worker"}
+    assert deferred["roles"]["server"]["arm_receipt"]["script_hash"] == "c" * 64
+    assert deferred["roles"]["server"]["arm_receipt"]["role"] == "server"
 
 
 def test_armed_guard_export_is_attempted_even_when_status_fails(tmp_path: Path) -> None:
@@ -169,6 +172,7 @@ def test_armed_guard_export_is_attempted_even_when_status_fails(tmp_path: Path) 
 
     _evidence, errors = finalize_azure_guard_channels(
         guards={"server": server, "worker": worker},  # type: ignore[arg-type]
+        guard_receipts={},
         labels={"server": "server-label", "worker": "worker-label"},
         observed_labels=set(), output=tmp_path, absence_timeout_seconds=30,
         sleep=lambda _seconds: None,
@@ -179,13 +183,14 @@ def test_armed_guard_export_is_attempted_even_when_status_fails(tmp_path: Path) 
     assert any("server Azure guard status failed" in error for error in errors)
 
 
-def test_ambiguous_create_accepts_only_post_deadline_terminal_absence(tmp_path: Path) -> None:
+@pytest.mark.parametrize("authority", ["2026-09-24T11:59:00Z", "2026-09-24T12:00:00Z"])
+def test_ambiguous_create_accepts_only_post_deadline_terminal_absence(tmp_path: Path, authority: str) -> None:
     deadline = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     server = FakeArmedGuard(status="ABSENCE_CONFIRMED")
     server.arm_receipt.hard_deadline = deadline
     server.response.update(
         {
-            "teardown_authority_at": "2026-09-24T12:00:00Z",
+            "teardown_authority_at": authority,
             "absence_observations": [
                 "2026-09-24T12:01:00Z", "2026-09-24T12:02:00Z", "2026-09-24T12:03:00Z",
             ],
@@ -196,6 +201,7 @@ def test_ambiguous_create_accepts_only_post_deadline_terminal_absence(tmp_path: 
 
     evidence, errors = finalize_azure_guard_channels(
         guards={"server": server, "worker": worker},  # type: ignore[arg-type]
+        guard_receipts={},
         labels={"server": "server-label", "worker": "worker-label"},
         observed_labels=set(), output=tmp_path, absence_timeout_seconds=30,
         sleep=lambda _seconds: None,

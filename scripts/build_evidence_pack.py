@@ -184,6 +184,77 @@ def validate_guard_journal(
     return role in {"server", "worker"} and isinstance(first_payload, Mapping) and first_payload.get("label") == label
 
 
+def post_deadline_absence(status: Mapping[str, object], deadline: datetime, current: datetime) -> bool:
+    """Require three later reads, even if heartbeat loss authorized teardown early."""
+
+    authority = _timestamp(status.get("teardown_authority_at"))
+    observations = status.get("absence_observations")
+    if (
+        status.get("status") != "ABSENCE_CONFIRMED"
+        or current < deadline
+        or authority is None
+        or not isinstance(observations, list)
+        or len(observations) != 3
+    ):
+        return False
+    stamps = [_timestamp(value) for value in observations]
+    return (
+        all(stamp is not None and max(deadline, authority) < stamp <= current for stamp in stamps)
+        and stamps == sorted(set(stamps))
+    )
+
+
+def validate_deferred_guard_evidence(
+    run_dir: Path, role: str, receipt: Mapping[str, object], finalization: Mapping[str, object],
+    *, current: datetime | None = None,
+) -> bool:
+    """Bind deferred absence to its original arm and durable journal events."""
+
+    deadline = _timestamp(receipt.get("hard_deadline"))
+    if (
+        deadline is None
+        or not post_deadline_absence(finalization, deadline, current or datetime.now(UTC))
+        or any(finalization.get(field) != receipt.get(field) for field in ("nonce", "label"))
+        or _timestamp(finalization.get("hard_deadline")) != deadline
+        or not validate_guard_journal(run_dir, role=role, receipt=receipt, finalization=finalization)
+    ):
+        return False
+    artifact = _safe_artifact(run_dir, {
+        "artifact": finalization.get("journal_artifact"), "sha256": finalization.get("journal_sha256"),
+    })
+    assert artifact is not None
+    records = [json.loads(line) for line in artifact[1].decode("utf-8").splitlines()]
+    authority = None
+    observations: list[datetime] = []
+    for record in records:
+        event, payload = record.get("event"), record.get("payload")
+        if not isinstance(payload, Mapping):
+            return False
+        if event == "teardown_authority_activated":
+            if authority is not None:
+                return False
+            authority = _timestamp(payload.get("authority_at"))
+            if authority is None:
+                return False
+        elif event == "absence_quorum_reset":
+            observations = []
+        elif event == "absence_observation":
+            stamp = _timestamp(payload.get("observed_at"))
+            if (
+                authority is None or stamp is None or stamp <= authority
+                or (observations and stamp <= observations[-1])
+                or payload.get("label") != receipt.get("label")
+                or payload.get("observation_number") != len(observations) + 1
+            ):
+                return False
+            observations.append(stamp)
+    return (
+        records[-1].get("event") in {"absence_observation", "absence_confirmed"}
+        and authority == _timestamp(finalization.get("teardown_authority_at"))
+        and observations == [_timestamp(value) for value in finalization["absence_observations"]]
+    )
+
+
 def validate_absence_artifact(run_dir: Path, role: str, target: Mapping[str, object], record: Mapping[str, object]) -> bool:
     instance = target.get("instance")
     if not isinstance(instance, Mapping) or record.get("status") != "THREE_READS_CONFIRMED":
@@ -313,7 +384,7 @@ def hpa_signal_chart(verdict: dict[str, object]) -> None:
     (OUT / "local-hpa-signal-plumbing.svg").write_text(svg_chart("Local Kubernetes HPA signal plumbing", "Each isolated signal produced a 1 to 2 desired-and-ready replica transition. KV source was synthetic.", panels))
 
 
-def two_node_startup_chart() -> dict[str, object]:
+def two_node_startup_chart(*, current: datetime | None = None) -> dict[str, object]:
     """Summarize actual two-node provider attempts without inflating them to K8s results."""
     runs = sorted((ROOT / "artifacts" / "runs").glob("two-node-*/run-manifest.json"))
     attempts: list[dict[str, object]] = []
@@ -374,12 +445,19 @@ def two_node_startup_chart() -> dict[str, object]:
         counts["completed"] += int(completed)
         attempts.append({
             "run": run_dir.name,
+            "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
             "template": manifest.get("vm_template", "ubuntu-cli"),
             "created": created,
             "guard_backend": manifest.get("guard_backend", "github-legacy"),
             "both_bound_arm_receipts": guards_armed,
             "guard_receipt_validation_errors": guard_errors,
             "both_guard_journals_hash_chain_verified": guard_journals_verified,
+            "deferred_guard_evidence_validated": {
+                role: isinstance(guards.get(role), Mapping)
+                and isinstance(azure_finalization.get(role), Mapping)
+                and validate_deferred_guard_evidence(run_dir, role, guards[role], azure_finalization[role], current=current)
+                for role in ("server", "worker")
+            },
             "provider_running_observed": running,
             "kubernetes_completed": completed,
             "three_read_absence_proved_for_both": absence_proved,
