@@ -120,7 +120,8 @@ Observed fix-round results:
 
 ## Fix round 2: attested independence and deferred ambiguity finalization
 
-Status: DONE_WITH_CONCERNS. Commit `766b203` addresses the second re-review.
+Status: DONE_WITH_CONCERNS. Commits `766b203` and `bb797a3` address the second
+re-review.
 
 - Azure arm receipts now bind the heartbeat timeout requested by the client,
   and the guard worker emits its actual configured timeout. Arm and preflight
