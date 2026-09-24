@@ -10,7 +10,10 @@ Group=root
 ExecStart=/usr/local/sbin/guardctl tick-all
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
+# The root-owned Vast CLI resolves its installed package metadata below /root.
+# Hide is incompatible with ProtectSystem=strict; read-only preserves the
+# service sandbox while allowing that immutable lookup.
+ProtectHome=read-only
 ProtectSystem=strict
 ReadWritePaths=/var/lib/srecon26-guard
 ProtectKernelTunables=true
