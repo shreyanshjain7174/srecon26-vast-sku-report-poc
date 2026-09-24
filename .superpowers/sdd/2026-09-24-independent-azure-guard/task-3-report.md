@@ -219,3 +219,80 @@ Observed fix-round results:
   current evidence. The real run remains blocked until two deployed Azure
   controllers return the complete new receipts and pass all independence
   checks.
+
+## Fix round 4: durable authority, resumable rebuild, and full attestation binding
+
+Status: DONE_WITH_CONCERNS. Implementation commit `4543534`
+(`fix: resume deferred guard proof with full attestation binding`) is signed
+off using `git commit -s`, with no coauthor trailer. The existing feature
+branch remains `feat/live-canary-factory`.
+
+### Reviewer findings addressed
+
+1. Post-deadline absence now accepts durable teardown authority established
+   before the deadline, including heartbeat-loss authority. Both the paid
+   runner and the deferred finalizer use the same rule: exactly three distinct,
+   increasing observations must follow both the authority and the immutable
+   deadline, and cannot be later than the verifier's current time. The exported
+   hash-chained journal must contain the matching authority and observation
+   events in order; a status string alone cannot establish the proof.
+2. Validated proof and the exported journal are checkpointed per role. If a
+   later role fails, the already validated channel is retained for retry. Once
+   all roles are proved, the descriptor and manifest enter
+   `PENDING_EVIDENCE_REBUILD`, with overall evidence still incomplete. A failed
+   rebuild or failed semantic validation keeps that state retryable. Retries
+   revalidate the saved journal against the original attestation and can reuse
+   it without contacting or rearming the Azure guard. `COMPLETED` and the
+   completion timestamp are written only after a successful, validated rebuild.
+3. Descriptor generation copies each role's complete original manifest arm
+   attestation. Before any connection, resume validates both original manifest
+   receipts and requires exact equality of the saved per-role attestation,
+   including role, remote host, Azure resource ID, Azure VM ID, script hash,
+   original root, deadline, last heartbeat, heartbeat timeout, and pinned
+   host-key fingerprint. The transport still checks the local pinned host key
+   when a channel is opened. The rebuilt evidence summary must identify the
+   exact run and the manifest snapshot it read, validate both bound receipts
+   and journal chains, and pass deferred absence validation for every resumed
+   role. A claim of globally complete run evidence additionally requires the
+   rebuilt provider absence, billing, and completion checks to pass.
+
+### Regression coverage
+
+- Pre-deadline heartbeat-loss authority with valid post-deadline durable reads.
+- Rejection of authority at/after a read, pre-deadline reads, duplicate reads,
+  reversed reads, future reads, and execution before the deadline.
+- Substitution of each saved identity/binding field, rejected before transport.
+- Rebuild subprocess failures and other runtime failures, followed by successful
+  offline proof reuse on retry.
+- Partial two-role failure, retaining the successful role for the next attempt.
+- Successful process execution with rejected semantic evidence, stale manifest
+  snapshot digest, tampered saved journal, and a valid hash chain lacking
+  durable authority.
+- A nominal completed-run status with missing provider evidence cannot become
+  globally complete through the deferred finalizer.
+
+### Verification
+
+```sh
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q && semgrep scan --config auto --error --json --output /var/tmp/srecon26-task3-fix4-semgrep.json scripts/build_evidence_pack.py scripts/finalize_deferred_azure_guards.py scripts/run_two_node_metric_path.py tests/unit/test_deferred_azure_finalizer.py tests/unit/test_two_node_runner.py && python3 -c 'import json; d=json.load(open("/var/tmp/srecon26-task3-fix4-semgrep.json")); assert not d.get("results") and not d.get("errors")' && git diff --check
+```
+
+- Full pytest suite: `424 passed in 8.35s`.
+- Focused guard/transport/factory/runner/finalizer/evidence tests:
+  `149 passed in 0.46s`.
+- Semgrep: 290 rules over five changed Python files, zero findings and zero
+  errors; JSON output was independently checked for empty results/errors.
+- Compilation of the three changed scripts and `git diff --check`: passed.
+
+### Concerns and boundaries
+
+- This is local implementation and fixture validation. No live Vast create,
+  Report action, Azure deployment, SSH connection, or cloud mutation occurred.
+- Descriptors created before this round lack the complete attestation and are
+  intentionally rejected; they cannot be promoted by trusting their partial
+  saved receipt. Original complete manifest evidence remains necessary.
+- A failed original workload remains globally evidence-incomplete after its
+  guard channels are finalized. Completing guard proof does not establish a
+  successful GPU, Kubernetes, vLLM, HPA, or billing experiment.
+- Unrelated existing `.gitignore`, planning-document, and `node_modules`
+  changes were preserved and excluded from the implementation commit.
