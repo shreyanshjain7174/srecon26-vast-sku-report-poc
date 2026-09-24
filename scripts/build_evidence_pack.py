@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import ipaddress
 import json
@@ -524,6 +525,24 @@ def _prometheus_metric_maximum(path: Path, fragments: tuple[str, ...]) -> float 
     return max(values) if values else None
 
 
+def _gpu_utilization_maximum(path: Path) -> float | None:
+    """Read the vLLM pod's raw nvidia-smi utilization field (column five)."""
+
+    try:
+        rows = list(csv.reader(path.read_text(encoding="utf-8").splitlines()))
+    except OSError:
+        return None
+    values: list[float] = []
+    for row in rows:
+        if len(row) != 5:
+            continue
+        try:
+            values.append(float(row[4].strip().removesuffix(" %")))
+        except ValueError:
+            pass
+    return max(values) if values else None
+
+
 def two_node_metric_path_chart(run_dir: Path) -> dict[str, object]:
     """Create a chart only from a completed run's raw K8s/vLLM snapshots.
 
@@ -554,11 +573,20 @@ def two_node_metric_path_chart(run_dir: Path) -> dict[str, object]:
         )
         for phase in phases
     }
-    if any(queues[phase] is None for phase in phases) or any(kv[phase] is None for phase in phases):
-        raise SystemExit("two-node queue/KV Prometheus evidence is incomplete; refusing to chart an unmeasured metric path")
+    gpu_utilization = {
+        phase: _gpu_utilization_maximum(evidence / f"pressure-{phase}-gpu.csv")
+        for phase in phases
+    }
+    if (
+        any(queues[phase] is None for phase in phases)
+        or any(kv[phase] is None for phase in phases)
+        or any(gpu_utilization[phase] is None for phase in phases)
+    ):
+        raise SystemExit("two-node queue/KV/GPU evidence is incomplete; refusing to chart an unmeasured metric path")
     ttft = [percentile([float(record["ttft_seconds"]) * 1000 for record in timings[phase]], 0.5) for phase in phases]
     queue_values = [float(queues[phase]) for phase in phases]
     kv_values = [float(kv[phase]) * 100 for phase in phases]
+    gpu_values = [float(gpu_utilization[phase]) for phase in phases]
     manifest = json.loads((run_dir / "run-manifest.json").read_text(encoding="utf-8"))
     workload = manifest.get("workload") if isinstance(manifest, Mapping) else None
     model = workload.get("model_id") if isinstance(workload, Mapping) else "frozen model"
@@ -569,6 +597,7 @@ def two_node_metric_path_chart(run_dir: Path) -> dict[str, object]:
             ("p50 TTFT", labels, ttft, COLORS["orange"], "milliseconds; curl first response byte"),
             ("Max queued requests", labels, queue_values, COLORS["blue"], "vLLM waiting requests"),
             ("Max KV cache use", labels, kv_values, COLORS["green"], "percent"),
+            ("GPU utilization", labels, gpu_values, COLORS["ink"], "percent; inside serving pod"),
         ],
     ), encoding="utf-8")
     return {
@@ -578,6 +607,7 @@ def two_node_metric_path_chart(run_dir: Path) -> dict[str, object]:
         "p50_ttft_ms": dict(zip(phases, ttft, strict=True)),
         "max_queue_depth": dict(zip(phases, queue_values, strict=True)),
         "max_kv_cache_percent": dict(zip(phases, kv_values, strict=True)),
+        "max_gpu_utilization_percent": dict(zip(phases, gpu_values, strict=True)),
     }
 
 
