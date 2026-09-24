@@ -1,0 +1,9 @@
+#!/bin/sh
+# No caller-controlled Python path, startup files, provider environment, or PATH.
+if [ "${SSH_ORIGINAL_COMMAND+x}" = x ]; then
+    exec /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin \
+        SSH_ORIGINAL_COMMAND="$SSH_ORIGINAL_COMMAND" \
+        /usr/bin/python3 -I /usr/local/libexec/srecon26-guard/ssh_rpc.py "$@"
+fi
+exec /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin \
+    /usr/bin/python3 -I /usr/local/libexec/srecon26-guard/ssh_rpc.py "$@"

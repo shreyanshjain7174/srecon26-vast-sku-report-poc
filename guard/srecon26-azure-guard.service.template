@@ -1,0 +1,27 @@
+[Unit]
+Description=SRECon26 independent Azure guard for persisted Vast arms
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/sbin/guardctl tick-all
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/srecon26-guard
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+TimeoutStartSec=130s
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
