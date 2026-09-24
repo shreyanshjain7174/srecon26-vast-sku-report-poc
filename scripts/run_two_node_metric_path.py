@@ -29,6 +29,11 @@ from scripts.build_evidence_pack import post_deadline_absence
 from srecon26_poc.azure_guard_transport import AzureGuardSshConfig
 from srecon26_poc.contracts import InstanceContract, OfferContract, ProbeOutcome, classify_fault
 from srecon26_poc.live_dispatch import REPORT_MARGIN, ProviderFaultEvidence
+from srecon26_poc.live_dispatch import (
+    FROZEN_MODEL_ID,
+    FROZEN_MODEL_REVISION,
+    VLLM_IMAGE_DIGEST,
+)
 from srecon26_poc.live_factory import (
     DynamicAzureGuard,
     LiveFactoryError,
@@ -411,6 +416,11 @@ def main() -> int:
         "guard_heartbeat_timeout_seconds": args.guard_heartbeat_timeout_seconds,
         "vm_template": args.vm_template,
         "launch": launch.to_json(),
+        "workload": {
+            "model_id": FROZEN_MODEL_ID,
+            "model_revision": FROZEN_MODEL_REVISION,
+            "vllm_image": f"docker.io/vllm/vllm-openai@{VLLM_IMAGE_DIGEST}",
+        },
         "status": "preflighted",
         "guards": {"server": {"status": "PENDING"}, "worker": {"status": "PENDING"}},
         "report": {"session_preflighted_after_both_guards": False, "attempted": False, "confirmed": False},
@@ -616,7 +626,17 @@ def main() -> int:
             remote(worker_ep, ["env", f"K3S_BINARY_PATH={worker_root}/k3s", f"NVIDIA_RUNTIME_TEMPLATE={worker_root}/nvidia-runtime.toml", "CANARY_K3S_SERVER_URL=https://127.0.0.1:6443", f"CANARY_K3S_RUN_ROOT={worker_root}/run", f"CANARY_K3S_TOKEN_FILE={worker_root}/run/node-token", "bash", f"{worker_root}/remote_host_canary.sh", "install-agent"], "worker-install-agent.log")
         manifest_hash = work._manifest_hash(work.config.local_manifest_dir)
         remote(server_ep, ["env", f"CANARY_EVIDENCE_DIR={server_root}/evidence", f"CANARY_EXPECTED_NODE_NAMES={server_name},{worker_name}", "bash", f"{server_root}/remote_host_canary.sh", "verify-two-node"], "two-node-verify.log")
-        remote(server_ep, ["env", f"CANARY_EVIDENCE_DIR={server_root}/evidence", f"CANARY_MANIFEST_DIR={server_root}/manifests", f"CANARY_MANIFEST_SHA256={manifest_hash}", "bash", f"{server_root}/remote_host_canary.sh", "deploy"], "deploy.log")
+        # The remote script refuses mutable model/image inputs.  Keep this
+        # contract beside the run manifest and explicitly carry it over SSH;
+        # environment in this controller process is intentionally irrelevant.
+        workload_env = [
+            f"CANARY_VLLM_IMAGE=docker.io/vllm/vllm-openai@{VLLM_IMAGE_DIGEST}",
+            f"CANARY_MODEL={FROZEN_MODEL_ID}",
+            f"CANARY_MODEL_REVISION={FROZEN_MODEL_REVISION}",
+            f"CANARY_HARD_DEADLINE={deadline.isoformat()}",
+            f"CANARY_HARD_DEADLINE_MARGIN_SECONDS={int(REPORT_MARGIN.total_seconds())}",
+        ]
+        remote(server_ep, ["env", f"CANARY_EVIDENCE_DIR={server_root}/evidence", f"CANARY_MANIFEST_DIR={server_root}/manifests", f"CANARY_MANIFEST_SHA256={manifest_hash}", *workload_env, "bash", f"{server_root}/remote_host_canary.sh", "deploy"], "deploy.log")
         remote(server_ep, ["env", f"CANARY_EVIDENCE_DIR={server_root}/evidence", "bash", f"{server_root}/remote_host_canary.sh", "collect"], "collect.log")
         work._fetch(server_ep, f"{server_root}/evidence", args.output / "server-evidence", hard_deadline=deadline, heartbeat=heartbeat, log=args.output / "evidence-fetch.log")
         remote(server_ep, ["env", f"CANARY_EVIDENCE_DIR={server_root}/evidence", f"CANARY_MANIFEST_DIR={server_root}/manifests", f"CANARY_MANIFEST_SHA256={manifest_hash}", "bash", f"{server_root}/remote_host_canary.sh", "cleanup"], "cleanup.log")
