@@ -168,3 +168,54 @@ Observed fix-round results:
   deployment must implement the new attestation fields from its real Azure and
   SSH configuration before any real run can arm; until that live contract is
   proven on two controllers, paid creation remains blocked.
+
+## Fix round 3: immutable heartbeat state and executable deferred finalizer
+
+Status: DONE_WITH_CONCERNS. Commit `b526f2f` addresses the third re-review.
+
+- The guard worker now persists `heartbeat_timeout_seconds` in immutable arm
+  state, validates it whenever state is reopened, emits it from that state in
+  every receipt, and uses that same persisted value for heartbeat-loss timer
+  decisions. Reopening a worker with a different CLI timeout cannot silently
+  shorten an existing arm; a re-arm with the changed timeout is rejected.
+- `DynamicAzureGuard` retains the authenticated arm receipt immediately after
+  arm succeeds. A subsequent identity/preflight failure still blocks the arm
+  callback and therefore blocks paid creation, while leaving the channel
+  available for status and evidence export during normal finalization.
+- The deferred descriptor now retains the validated immutable arm fields,
+  pinned endpoint paths, SSH timeout, heartbeat timeout, and pinned host-key
+  fingerprint without embedding credential material. Its resume path requires
+  exact role, run ID, nonce, label, deadline, heartbeat timeout, manifest
+  target, and local pinned-host-key agreement before restoring the channel; it
+  never issues a second arm RPC.
+- `scripts/finalize_deferred_azure_guards.py` implements the post-deadline
+  lifecycle end to end. It refuses early execution, polls each saved channel,
+  accepts only three-read post-deadline `ABSENCE_CONFIRMED`, exports the final
+  journal, atomically updates the bound manifest and deferred descriptor, and
+  rebuilds the evidence pack. Failed original runs remain globally
+  evidence-incomplete even after their independently armed channels are fully
+  finalized.
+- The finalizer accepts only the exact `server` and `worker` role names and an
+  exact `run-manifest.json` binding, preventing descriptor-controlled artifact
+  path traversal or cross-run evidence completion.
+
+Fix-round verification one-liner:
+
+```sh
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q && semgrep scan --config auto --error --json --output /var/tmp/srecon26-task3-fix3-semgrep.json guard/guard_worker.py scripts/run_two_node_metric_path.py scripts/finalize_deferred_azure_guards.py src/srecon26_poc/azure_guard_transport.py src/srecon26_poc/live_factory.py tests/integration/test_guard_idempotency.py tests/unit/test_azure_guard_transport.py tests/unit/test_deferred_azure_finalizer.py tests/unit/test_live_factory.py tests/unit/test_two_node_runner.py && python3 -c 'import json; d=json.load(open("/var/tmp/srecon26-task3-fix3-semgrep.json")); assert not d.get("results") and not d.get("errors")' && git diff --check
+```
+
+Observed fix-round results:
+
+- Pytest: `398 passed in 6.91s`.
+- Focused guard/transport/factory/runner/finalizer/evidence tests: `123 passed
+  in 0.33s`.
+- Semgrep: 290 rules over ten changed Python files, zero findings and zero
+  errors.
+- Python compilation and `git diff --check`: passed.
+- No live Vast create, Report action, Azure deployment, SSH connection, or
+  cloud mutation was performed. Existing arm state created before the new
+  immutable timeout field fails closed and must not be migrated or treated as
+  current evidence. The real run remains blocked until two deployed Azure
+  controllers return the complete new receipts and pass all independence
+  checks.
