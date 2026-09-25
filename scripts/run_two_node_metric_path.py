@@ -507,8 +507,12 @@ def main() -> int:
     server_nonce, worker_nonce = secrets.token_urlsafe(18), secrets.token_urlsafe(18)
     server_label = f"srecon26-two-node-server--nonce-{server_nonce}"
     worker_label = f"srecon26-two-node-worker--nonce-{worker_nonce}"
-    server_offer = provider.get_vms_enabled_offer(args.server_offer, machine_id=args.server_machine, label=server_label)
-    worker_offer = provider.get_vms_enabled_offer(args.worker_offer, machine_id=args.worker_machine, label=worker_label)
+    server_offer = provider.get_vms_enabled_offer(
+        args.server_offer, machine_id=args.server_machine, label=server_label, allow_offer_rollover=True,
+    )
+    worker_offer = provider.get_vms_enabled_offer(
+        args.worker_offer, machine_id=args.worker_machine, label=worker_label, allow_offer_rollover=True,
+    )
     work = SshRemoteWorkload(VastSshResolver(args.vast_cli), workload_config(args))
     template = (
         (OFFICIAL_UBUNTU_DESKTOP_TEMPLATE_HASH, OFFICIAL_UBUNTU_DESKTOP_IMAGE)
@@ -521,6 +525,7 @@ def main() -> int:
         "started_at": datetime.now(UTC).isoformat(),
         "hard_deadline": deadline.isoformat(),
         "real_run_contingent": True,
+        "offer_refreeze_policy": "exact-id-or-single-current-machine-offer-on-provider-id-rollover",
         "guard_backend": args.guard_backend,
         "azure_guard_transport": args.azure_guard_transport,
         "heartbeat_seconds": args.heartbeat_seconds,

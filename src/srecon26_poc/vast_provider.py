@@ -269,8 +269,20 @@ class VastCliProvider:
             raise VastProviderError("current offer contract is not uniquely available")
         return self._offer(matches[0], label)
 
-    def get_vms_enabled_offer(self, offer_id: int, *, machine_id: int, label: str) -> OfferContract:
-        """Read and freeze one current KVM-capable offer before a paid create."""
+    def get_vms_enabled_offer(
+        self,
+        offer_id: int,
+        *,
+        machine_id: int,
+        label: str,
+        allow_offer_rollover: bool = False,
+    ) -> OfferContract:
+        """Read and freeze one current KVM-capable offer before a paid create.
+
+        Vast can rotate offer IDs while repricing the same machine. The
+        two-node controller may explicitly accept that rollover only when the
+        machine query still returns exactly one current VM-enabled offer.
+        """
 
         # Vast's current offer search documents an ``id`` field, but its live
         # endpoint can return an empty result for an otherwise visible offer-ID
@@ -278,6 +290,10 @@ class VastCliProvider:
         # still selected and required uniquely from that machine's records.
         records = self._records(self._run_json(["search", "offers", f"machine_id=={machine_id}", "--storage", "130", "--limit", "25"]))
         matches = [record for record in records if self._integer(record.get("id", record.get("offer_id")), "offer id") == offer_id]
+        if not matches and allow_offer_rollover:
+            current = [record for record in records if record.get("vms_enabled") is True]
+            if len(current) == 1:
+                matches = current
         if len(matches) != 1:
             raise VastProviderError("current KVM offer contract is not uniquely available")
         if self._integer(matches[0].get("machine_id"), "machine_id") != machine_id:
