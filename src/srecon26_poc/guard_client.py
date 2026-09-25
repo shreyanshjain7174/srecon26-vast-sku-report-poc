@@ -48,12 +48,23 @@ class GuardRemoteReceipt:
     last_heartbeat: datetime | None = None
     host_identity: str | None = None
     script_hash: str | None = None
+    azure_resource_id: str | None = None
+    azure_vm_id: str | None = None
+    host_key_fingerprint: str | None = None
+    heartbeat_timeout_seconds: int | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "GuardRemoteReceipt":
         root_hash = str(payload.get("root_hash", ""))
         if not re.fullmatch(r"[0-9a-f]{64}", root_hash):
             raise GuardClientError("guard receipt lacks a sha256 root hash")
+        heartbeat_timeout = payload.get("heartbeat_timeout_seconds")
+        if heartbeat_timeout is not None and (
+            isinstance(heartbeat_timeout, bool)
+            or not isinstance(heartbeat_timeout, int)
+            or not 1 <= heartbeat_timeout <= 600
+        ):
+            raise GuardClientError("guard receipt has an invalid heartbeat timeout")
         return cls(
             status=str(payload.get("status", "")),
             root_hash=root_hash,
@@ -63,6 +74,10 @@ class GuardRemoteReceipt:
             last_heartbeat=_parse(payload["last_heartbeat"]) if payload.get("last_heartbeat") else None,
             host_identity=str(payload["host_identity"]) if "host_identity" in payload else None,
             script_hash=str(payload["script_hash"]) if "script_hash" in payload else None,
+            azure_resource_id=str(payload["azure_resource_id"]) if "azure_resource_id" in payload else None,
+            azure_vm_id=str(payload["azure_vm_id"]) if "azure_vm_id" in payload else None,
+            host_key_fingerprint=str(payload["host_key_fingerprint"]) if "host_key_fingerprint" in payload else None,
+            heartbeat_timeout_seconds=heartbeat_timeout,
         )
 
 
@@ -81,19 +96,41 @@ class GuardClient:
         armed = self._arm_receipt
         if not receipt.host_identity or not receipt.script_hash or armed is None or armed.label is None or armed.hard_deadline is None:
             raise GuardClientError("guard preflight receipt is incomplete")
-        return GuardAttestation(receipt.host_identity, receipt.script_hash, self.nonce, armed.label, armed.hard_deadline, armed.last_heartbeat)
+        return GuardAttestation(
+            receipt.host_identity,
+            receipt.script_hash,
+            self.nonce,
+            armed.label,
+            armed.hard_deadline,
+            armed.last_heartbeat,
+            receipt.azure_resource_id,
+            receipt.azure_vm_id,
+            receipt.host_key_fingerprint,
+            receipt.heartbeat_timeout_seconds,
+        )
 
-    def arm(self, identity: RunIdentity, hard_deadline: datetime) -> GuardRemoteReceipt:
+    def arm(
+        self,
+        identity: RunIdentity,
+        hard_deadline: datetime,
+        *,
+        heartbeat_timeout_seconds: int | None = None,
+    ) -> GuardRemoteReceipt:
         if not _label_binds_nonce(identity.label, self.nonce):
             raise GuardClientError("run label does not use the exact nonce-bound provider label protocol")
-        receipt = GuardRemoteReceipt.from_mapping(
-            self.transport.call(
-                "arm",
-                {"run_id": identity.run_id, "label": identity.label, "nonce": self.nonce, "hard_deadline": _stamp(hard_deadline)},
-            )
-        )
+        payload: dict[str, object] = {
+            "run_id": identity.run_id,
+            "label": identity.label,
+            "nonce": self.nonce,
+            "hard_deadline": _stamp(hard_deadline),
+        }
+        if heartbeat_timeout_seconds is not None:
+            payload["heartbeat_timeout_seconds"] = heartbeat_timeout_seconds
+        receipt = GuardRemoteReceipt.from_mapping(self.transport.call("arm", payload))
         if receipt.nonce != self.nonce or receipt.label != identity.label or receipt.hard_deadline != hard_deadline.astimezone(UTC):
             raise GuardClientError("guard arm receipt does not bind the requested nonce, label, and deadline")
+        if heartbeat_timeout_seconds is not None and receipt.heartbeat_timeout_seconds != heartbeat_timeout_seconds:
+            raise GuardClientError("guard arm receipt does not attest the configured heartbeat timeout")
         self._arm_receipt = receipt
         return receipt
 

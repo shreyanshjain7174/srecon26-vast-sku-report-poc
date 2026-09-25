@@ -1,0 +1,45 @@
+name: Two-node Kubernetes compatibility
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/two-node-metric-contract
+    paths:
+      - .github/workflows/two-node-compatibility.yml
+      - infra/kind/two-node.yaml
+      - k8s/live/**
+      - mock-vllm/**
+      - scripts/run_live_local_rehearsal.sh
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    name: x86 two-node metric-path rehearsal
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Verify runner prerequisites
+        run: |
+          command -v docker
+          command -v kind
+          command -v kubectl
+          command -v helm
+          command -v jq
+          docker info
+          kind version
+          helm version
+      - name: Run generic two-node compatibility rehearsal
+        env:
+          SRECON26_KIND_NODES: "2"
+        run: bash scripts/run_live_local_rehearsal.sh all
+      - name: Upload raw Kubernetes evidence
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: two-node-kind-compatibility-evidence
+          path: local-evidence/
+          if-no-files-found: error

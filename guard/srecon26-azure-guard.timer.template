@@ -1,0 +1,13 @@
+[Unit]
+Description=Persistent 15-second independent Azure guard timer
+
+[Timer]
+OnBootSec=5s
+OnCalendar=*-*-* *:*:00,15,30,45
+Persistent=true
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=srecon26-azure-guard.service
+
+[Install]
+WantedBy=timers.target

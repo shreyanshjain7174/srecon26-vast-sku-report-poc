@@ -48,7 +48,7 @@ spec:
           args:
             - >-
               exec vllm serve "$MODEL_ID" --revision "$MODEL_REVISION"
-              --served-model-name srecon26-canary --host 0.0.0.0 --port 8000
+              --served-model-name "$MODEL_ID" --host 0.0.0.0 --port 8000
           env:
             - name: HOME
               value: /tmp

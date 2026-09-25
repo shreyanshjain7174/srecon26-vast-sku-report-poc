@@ -22,10 +22,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Mapping, Protocol, Sequence
 
+from .azure_guard_transport import AzureGuardSshConfig, AzureSshGuardTransport, GuardEvidenceExport
 from .budget import ExposureLedger
 from .canary import CanarySnapshot, KvmFacts, MetricSample
 from .contracts import InstanceContract, ProbeOutcome
-from .guard import GuardAttestation
+from .guard import GuardAttestation, validate_attestation
 from .guard_client import GuardClient, GuardClientError, GuardRemoteReceipt, GuardTransport
 from .live_dispatch import (
     REPORT_MARGIN,
@@ -68,6 +69,9 @@ class LiveFactoryError(LiveDispatchError):
 
 class CommandRunner(Protocol):
     def __call__(self, arguments: Sequence[str], *, timeout: int) -> str: ...
+
+
+ArmObserver = Callable[[Mapping[str, object]], None]
 
 
 def _utc(value: datetime) -> datetime:
@@ -294,9 +298,12 @@ class DynamicGitHubGuard:
     source of truth.  This wrapper makes the dispatcher request authoritative.
     """
 
-    def __init__(self, config: GitHubGuardConfig) -> None:
+    def __init__(self, config: GitHubGuardConfig, *, on_armed: ArmObserver | None = None) -> None:
         self.config = config
+        self.on_armed = on_armed
         self.client: GuardClient | None = None
+        self.arm_receipt: GuardRemoteReceipt | None = None
+        self.attestation: GuardAttestation | None = None
 
     def arm(self, identity: RunIdentity, hard_deadline: datetime) -> GuardAttestation:
         suffix = "--nonce-"
@@ -304,8 +311,15 @@ class DynamicGitHubGuard:
             raise LiveFactoryError("run label lacks a nonce-bound suffix")
         nonce = identity.label.rsplit(suffix, 1)[1]
         self.client = GuardClient(GitHubGuardTransport(self.config), nonce=nonce)
-        self.client.arm(identity, hard_deadline)
-        return self.client.preflight()
+        receipt = self.client.arm(identity, hard_deadline)
+        attestation = self.client.preflight()
+        validate_attestation(identity, attestation)
+        if receipt.status != "ARMED" or attestation.nonce != nonce:
+            raise LiveFactoryError("GitHub guard did not return a bound ARMED receipt")
+        self.arm_receipt, self.attestation = receipt, attestation
+        if self.on_armed is not None:
+            self.on_armed(_bound_guard_receipt("github", receipt, attestation))
+        return attestation
 
     def preflight(self) -> GuardAttestation:
         if self.client is None:
@@ -321,6 +335,123 @@ class DynamicGitHubGuard:
         if self.client is None:
             raise LiveFactoryError("GitHub guard is not armed")
         return self.client.anchor(root_hash)
+
+
+class DynamicAzureGuard:
+    """Bind one Azure SSH transport to the nonce supplied at arm time.
+
+    Each instance owns a distinct transport object because the transport pins
+    every later RPC to its validated arm receipt.  The observer receives only
+    non-secret receipt material and runs before the caller may perform a paid
+    create.
+    """
+
+    def __init__(
+        self,
+        config: AzureGuardSshConfig,
+        *,
+        on_armed: ArmObserver | None = None,
+        transport_factory: Callable[[AzureGuardSshConfig], GuardTransport] = AzureSshGuardTransport,
+    ) -> None:
+        self.config = config
+        self.on_armed = on_armed
+        self.transport_factory = transport_factory
+        self.transport: GuardTransport | None = None
+        self.client: GuardClient | None = None
+        self.arm_receipt: GuardRemoteReceipt | None = None
+        self.attestation: GuardAttestation | None = None
+
+    @staticmethod
+    def _nonce(identity: RunIdentity) -> str:
+        suffix = "--nonce-"
+        if suffix not in identity.label:
+            raise LiveFactoryError("run label lacks a nonce-bound suffix")
+        return identity.label.rsplit(suffix, 1)[1]
+
+    def arm(self, identity: RunIdentity, hard_deadline: datetime) -> GuardAttestation:
+        nonce = self._nonce(identity)
+        self.transport = self.transport_factory(self.config)
+        self.client = GuardClient(self.transport, nonce=nonce)
+        receipt = self.client.arm(
+            identity,
+            hard_deadline,
+            heartbeat_timeout_seconds=self.config.heartbeat_timeout_seconds,
+        )
+        # Retain the independently authenticated arm immediately. A later
+        # preflight failure must block paid creation without erasing the
+        # channel needed to status/export a possibly live provider request.
+        self.arm_receipt = receipt
+        attestation = self.client.preflight()
+        validate_attestation(identity, attestation)
+        if (
+            receipt.status != "ARMED"
+            or attestation.nonce != nonce
+            or attestation.heartbeat_timeout_seconds != self.config.heartbeat_timeout_seconds
+            or not attestation.azure_resource_id
+            or not attestation.azure_vm_id
+            or not attestation.host_key_fingerprint
+        ):
+            raise LiveFactoryError("Azure guard did not return a bound ARMED receipt")
+        self.attestation = attestation
+        if self.on_armed is not None:
+            self.on_armed(_bound_guard_receipt("azure", receipt, attestation))
+        return attestation
+
+    def preflight(self) -> GuardAttestation:
+        if self.client is None:
+            raise LiveFactoryError("Azure guard is not armed")
+        return self.client.preflight()
+
+    def record_heartbeat(self, identity: RunIdentity, monotonic_ns: int) -> None:
+        if self.client is None:
+            raise LiveFactoryError("Azure guard is not armed")
+        self.client.record_heartbeat(identity, monotonic_ns)
+
+    def anchor(self, root_hash: str) -> str:
+        if self.client is None:
+            raise LiveFactoryError("Azure guard is not armed")
+        return self.client.anchor(root_hash)
+
+    def status(self) -> dict[str, object]:
+        if self.transport is None or self.arm_receipt is None or self.arm_receipt.nonce is None:
+            raise LiveFactoryError("Azure guard is not armed")
+        return self.transport.call("status", {"nonce": self.arm_receipt.nonce})
+
+    def export_evidence(self, root_hash: str) -> GuardEvidenceExport:
+        if not isinstance(self.transport, AzureSshGuardTransport):
+            exporter = getattr(self.transport, "export_evidence", None)
+            if not callable(exporter):
+                raise LiveFactoryError("Azure guard transport cannot export evidence")
+            return exporter(nonce=self.arm_receipt.nonce if self.arm_receipt else "", root_hash=root_hash)
+        if self.arm_receipt is None or self.arm_receipt.nonce is None:
+            raise LiveFactoryError("Azure guard is not armed")
+        return self.transport.export_evidence(nonce=self.arm_receipt.nonce, root_hash=root_hash)
+
+
+def _bound_guard_receipt(backend: str, receipt: GuardRemoteReceipt, attestation: GuardAttestation) -> dict[str, object]:
+    """Return the safe, exact receipt fields suitable for run evidence."""
+
+    bound: dict[str, object] = {
+        "backend": backend,
+        "status": receipt.status,
+        "root_hash": receipt.root_hash,
+        "nonce": attestation.nonce,
+        "label": attestation.label,
+        "hard_deadline": _stamp(attestation.hard_deadline),
+        "last_heartbeat": _stamp(attestation.last_heartbeat) if attestation.last_heartbeat else None,
+        "host_identity": attestation.host_identity,
+        "script_hash": attestation.script_hash,
+    }
+    if backend == "azure":
+        bound.update(
+            {
+                "azure_resource_id": attestation.azure_resource_id,
+                "azure_vm_id": attestation.azure_vm_id,
+                "host_key_fingerprint": attestation.host_key_fingerprint,
+                "heartbeat_timeout_seconds": attestation.heartbeat_timeout_seconds,
+            }
+        )
+    return bound
 
 
 def _receipt_mapping(receipt: GuardRemoteReceipt) -> dict[str, object]:
@@ -755,7 +886,7 @@ class SshRemoteWorkload:
             raise LiveFactoryError("remote workload reached immutable teardown margin")
         return min(remaining, 1800)
 
-    def _stream(self, arguments: Sequence[str], *, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> None:
+    def _stream(self, arguments: Sequence[str], *, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> str:
         heartbeat()
         process = self.popen(list(arguments), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         chunks: list[str] = []
@@ -782,11 +913,12 @@ class SshRemoteWorkload:
                 chunks.append(output or "")
             log.parent.mkdir(parents=True, exist_ok=True)
             log.write_text("".join(chunks), encoding="utf-8")
+        return "".join(chunks)
 
-    def _remote(self, endpoint: SshEndpoint, command: Sequence[str], *, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> None:
+    def _remote(self, endpoint: SshEndpoint, command: Sequence[str], *, hard_deadline: datetime, heartbeat: Callable[[], None], log: Path) -> str:
         seconds = self._deadline_seconds(hard_deadline)
         remote = shlex.join(["timeout", "--foreground", str(seconds), *command])
-        self._stream([*self._ssh_prefix(endpoint), remote], hard_deadline=hard_deadline, heartbeat=heartbeat, log=log)
+        return self._stream([*self._ssh_prefix(endpoint), remote], hard_deadline=hard_deadline, heartbeat=heartbeat, log=log)
 
     def _wait_for_ssh(self, endpoint: SshEndpoint, *, hard_deadline: datetime, heartbeat: Callable[[], None], transport: Path) -> None:
         for attempt in range(1, 37):
@@ -1209,22 +1341,44 @@ def create_dispatcher() -> LiveCanaryDispatcher:
     root = Path(__file__).resolve().parents[2]
     output_root = Path(_required_env("SRECON26_LIVE_OUTPUT_ROOT")).expanduser().resolve()
     cli = _required_env("SRECON26_VAST_CLI")
-    github = GitHubGuardConfig(
-        repository=_required_env("SRECON26_GITHUB_REPOSITORY"), ref=_required_env("SRECON26_GITHUB_REF"),
-        issue_number=_integer(_required_env("SRECON26_GUARD_ISSUE"), "GitHub guard issue", minimum=1),
-        trusted_author=_required_env("SRECON26_GUARD_TRUSTED_AUTHOR"),
-        heartbeat_seconds=_integer(os.environ.get("SRECON26_GUARD_HEARTBEAT_SECONDS", "120"), "GitHub heartbeat", minimum=30, maximum=600),
-        dispatch_on_arm=os.environ.get("SRECON26_GUARD_ADOPT_EXISTING", "false").lower() != "true",
+    heartbeat_seconds = _integer(
+        os.environ.get("SRECON26_GUARD_HEARTBEAT_SECONDS", "120"),
+        "guard heartbeat",
+        minimum=30,
+        maximum=600,
     )
+    backend = os.environ.get("SRECON26_GUARD_BACKEND", "github").strip().lower()
+    if backend == "github":
+        github = GitHubGuardConfig(
+            repository=_required_env("SRECON26_GITHUB_REPOSITORY"), ref=_required_env("SRECON26_GITHUB_REF"),
+            issue_number=_integer(_required_env("SRECON26_GUARD_ISSUE"), "GitHub guard issue", minimum=1),
+            trusted_author=_required_env("SRECON26_GUARD_TRUSTED_AUTHOR"),
+            heartbeat_seconds=heartbeat_seconds,
+            dispatch_on_arm=os.environ.get("SRECON26_GUARD_ADOPT_EXISTING", "false").lower() != "true",
+        )
+        guard = DynamicGitHubGuard(github)
+    elif backend == "azure":
+        guard = DynamicAzureGuard(
+            AzureGuardSshConfig(
+                host=_required_env("SRECON26_AZURE_GUARD_HOST"),
+                user=_required_env("SRECON26_AZURE_GUARD_USER"),
+                identity_file=Path(_required_env("SRECON26_AZURE_GUARD_IDENTITY_FILE")).expanduser(),
+                known_hosts_file=Path(_required_env("SRECON26_AZURE_GUARD_KNOWN_HOSTS_FILE")).expanduser(),
+                port=_integer(os.environ.get("SRECON26_AZURE_GUARD_PORT", "22"), "Azure guard SSH port", minimum=1, maximum=65535),
+                timeout_seconds=_integer(os.environ.get("SRECON26_AZURE_GUARD_TIMEOUT_SECONDS", "20"), "Azure guard SSH timeout", minimum=1, maximum=60),
+            )
+        )
+    else:
+        raise LiveFactoryError("SRECON26_GUARD_BACKEND must be github or azure")
     ssh = SshWorkloadConfig(
         user=_required_env("SRECON26_SSH_USER"), identity_file=Path(_required_env("SRECON26_SSH_IDENTITY_FILE")).expanduser(), public_key_file=Path(_required_env("SRECON26_SSH_PUBLIC_KEY_FILE")).expanduser(),
         known_hosts_file=Path(_required_env("SRECON26_SSH_KNOWN_HOSTS_FILE")).expanduser(),
         k3s_binary=Path(_required_env("SRECON26_K3S_BINARY")).expanduser(),
         nvidia_runtime_template=root / "infra/k3s/nvidia-runtime.toml", local_script=root / "scripts/remote_host_canary.sh",
-        local_manifest_dir=root / "infra/k3s", heartbeat_seconds=github.heartbeat_seconds,
+        local_manifest_dir=root / "infra/k3s", heartbeat_seconds=heartbeat_seconds,
     )
     return LiveCanaryDispatcher(
-        provider=VastCliProvider(cli, reconcile_attempts=24, reconcile_interval_seconds=5), guard=DynamicGitHubGuard(github),
+        provider=VastCliProvider(cli, reconcile_attempts=24, reconcile_interval_seconds=5), guard=guard,
         report_gate=_load_report_gate(_required_env("SRECON26_REPORT_ADAPTER_FACTORY")),
         workload=SshRemoteWorkload(VastSshResolver(cli), ssh), ledger=ExposureLedger(output_root / "exposure-ledger.json"), output_root=output_root,
     )

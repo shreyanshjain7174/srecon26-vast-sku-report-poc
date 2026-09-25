@@ -2,9 +2,18 @@
 """Create reproducible, claim-bounded visuals for the lightning-talk design handoff."""
 from __future__ import annotations
 
+import argparse
+import csv
+import hashlib
+import ipaddress
 import json
 import math
+import re
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Mapping, Sequence
+from uuid import UUID
 from xml.sax.saxutils import escape
 
 
@@ -14,6 +23,297 @@ OUT = ROOT / "artifacts" / "evidence-pack"
 VERDICT = Path("/var/tmp/srecon26-verdict.json")
 
 COLORS = {"ink": "#152238", "blue": "#155EEF", "orange": "#D97600", "green": "#0C8B6B", "muted": "#52616B", "grid": "#D8DEE4"}
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+NONCE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+HOST_KEY_FINGERPRINT = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
+AZURE_RESOURCE_ID = re.compile(
+    r"^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.Compute/virtualMachines/[^/]+$",
+    re.IGNORECASE,
+)
+
+
+def _timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
+
+
+def _remote_host(value: object) -> bool:
+    if not isinstance(value, str) or not value or value.casefold() in {"localhost", "localhost.localdomain"}:
+        return False
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return True
+    return not (address.is_loopback or address.is_unspecified or address.is_multicast)
+
+
+def _uuid(value: object) -> bool:
+    try:
+        UUID(str(value))
+    except ValueError:
+        return False
+    return isinstance(value, str)
+
+
+def _safe_artifact(run_dir: Path, record: Mapping[str, object]) -> tuple[Path, bytes] | None:
+    name, digest = record.get("artifact"), record.get("sha256")
+    if not isinstance(name, str) or Path(name).name != name or not isinstance(digest, str) or not SHA256.fullmatch(digest):
+        return None
+    path = run_dir / name
+    if not path.is_file() or path.is_symlink():
+        return None
+    raw = path.read_bytes()
+    return (path, raw) if hashlib.sha256(raw).hexdigest() == digest else None
+
+
+def _json_artifact(run_dir: Path, record: Mapping[str, object]) -> Mapping[str, object] | None:
+    artifact = _safe_artifact(run_dir, record)
+    if artifact is None:
+        return None
+    try:
+        payload = json.loads(artifact[1])
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, Mapping) else None
+
+
+def validate_bound_guard_receipts(manifest: Mapping[str, object]) -> tuple[bool, dict[str, str]]:
+    """Validate both exact Azure arm bindings, never just their status text."""
+
+    errors: dict[str, str] = {}
+    guards = manifest.get("guards")
+    deadline = _timestamp(manifest.get("hard_deadline"))
+    if manifest.get("guard_backend") != "azure" or not isinstance(guards, Mapping) or deadline is None:
+        return False, {"manifest": "missing exact Azure guard binding context"}
+    independent: dict[str, list[str]] = {
+        "host_identity": [], "azure_resource_id": [], "azure_vm_id": [], "host_key_fingerprint": [],
+    }
+    heartbeat_timeout = manifest.get("guard_heartbeat_timeout_seconds")
+    for role in ("server", "worker"):
+        target = manifest.get(role)
+        receipt = guards.get(role)
+        offer = target.get("offer") if isinstance(target, Mapping) else None
+        nonce = target.get("nonce") if isinstance(target, Mapping) else None
+        label = offer.get("label") if isinstance(offer, Mapping) else None
+        valid = (
+            isinstance(receipt, Mapping)
+            and receipt.get("backend") == "azure"
+            and receipt.get("role") == role
+            and receipt.get("status") == "ARMED"
+            and isinstance(nonce, str)
+            and NONCE.fullmatch(nonce) is not None
+            and receipt.get("nonce") == nonce
+            and isinstance(label, str)
+            and label == f"srecon26-two-node-{role}--nonce-{nonce}"
+            and receipt.get("label") == label
+            and _timestamp(receipt.get("hard_deadline")) == deadline
+            and isinstance(receipt.get("root_hash"), str)
+            and SHA256.fullmatch(str(receipt.get("root_hash"))) is not None
+            and isinstance(receipt.get("script_hash"), str)
+            and SHA256.fullmatch(str(receipt.get("script_hash"))) is not None
+            and _remote_host(receipt.get("host_identity"))
+            and _timestamp(receipt.get("last_heartbeat")) is not None
+            and isinstance(receipt.get("azure_resource_id"), str)
+            and AZURE_RESOURCE_ID.fullmatch(str(receipt.get("azure_resource_id"))) is not None
+            and isinstance(receipt.get("azure_vm_id"), str)
+            and _uuid(receipt.get("azure_vm_id"))
+            and isinstance(receipt.get("host_key_fingerprint"), str)
+            and HOST_KEY_FINGERPRINT.fullmatch(str(receipt.get("host_key_fingerprint"))) is not None
+            and isinstance(heartbeat_timeout, int)
+            and receipt.get("heartbeat_timeout_seconds") == heartbeat_timeout
+        )
+        if not valid:
+            errors[role] = "receipt is not bound to the exact Azure role, nonce, label, deadline, host, and script"
+        else:
+            assert isinstance(receipt, Mapping)
+            for field in independent:
+                independent[field].append(str(receipt[field]).casefold())
+    for field, values in independent.items():
+        if len(values) == 2 and values[0] == values[1]:
+            errors[f"independence_{field}"] = f"guard receipts use the same attested {field}"
+    return not errors, errors
+
+
+def validate_guard_journal(
+    run_dir: Path,
+    *,
+    role: str,
+    receipt: Mapping[str, object],
+    finalization: Mapping[str, object],
+) -> bool:
+    """Verify the exported guard journal's file hash and event hash chain."""
+
+    record = {
+        "artifact": finalization.get("journal_artifact"),
+        "sha256": finalization.get("journal_sha256"),
+    }
+    artifact = _safe_artifact(run_dir, record)
+    nonce, label = receipt.get("nonce"), receipt.get("label")
+    final_root = finalization.get("root_hash")
+    if (
+        artifact is None
+        or not isinstance(nonce, str)
+        or not isinstance(label, str)
+        or not isinstance(final_root, str)
+        or not SHA256.fullmatch(final_root)
+    ):
+        return False
+    root = "0" * 64
+    records: list[Mapping[str, object]] = []
+    try:
+        lines = artifact[1].decode("utf-8").splitlines()
+        for sequence, line in enumerate(lines, start=1):
+            event = json.loads(line)
+            if not isinstance(event, Mapping):
+                return False
+            unsigned = {key: value for key, value in event.items() if key != "event_hash"}
+            encoded = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
+            event_hash = hashlib.sha256(encoded).hexdigest()
+            if event.get("sequence") != sequence or event.get("previous_hash") != root or event.get("event_hash") != event_hash or event.get("nonce") != nonce:
+                return False
+            root = event_hash
+            records.append(event)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not records or root != final_root or records[0].get("event") != "armed" or records[0].get("event_hash") != receipt.get("root_hash"):
+        return False
+    first_payload = records[0].get("payload")
+    return role in {"server", "worker"} and isinstance(first_payload, Mapping) and first_payload.get("label") == label
+
+
+def post_deadline_absence(status: Mapping[str, object], deadline: datetime, current: datetime) -> bool:
+    """Require three later reads, even if heartbeat loss authorized teardown early."""
+
+    authority = _timestamp(status.get("teardown_authority_at"))
+    observations = status.get("absence_observations")
+    if (
+        status.get("status") != "ABSENCE_CONFIRMED"
+        or current < deadline
+        or authority is None
+        or not isinstance(observations, list)
+        or len(observations) != 3
+    ):
+        return False
+    stamps = [_timestamp(value) for value in observations]
+    return (
+        all(stamp is not None and max(deadline, authority) < stamp <= current for stamp in stamps)
+        and stamps == sorted(set(stamps))
+    )
+
+
+def validate_deferred_guard_evidence(
+    run_dir: Path, role: str, receipt: Mapping[str, object], finalization: Mapping[str, object],
+    *, current: datetime | None = None,
+) -> bool:
+    """Bind deferred absence to its original arm and durable journal events."""
+
+    deadline = _timestamp(receipt.get("hard_deadline"))
+    if (
+        deadline is None
+        or not post_deadline_absence(finalization, deadline, current or datetime.now(UTC))
+        or any(finalization.get(field) != receipt.get(field) for field in ("nonce", "label"))
+        or _timestamp(finalization.get("hard_deadline")) != deadline
+        or not validate_guard_journal(run_dir, role=role, receipt=receipt, finalization=finalization)
+    ):
+        return False
+    artifact = _safe_artifact(run_dir, {
+        "artifact": finalization.get("journal_artifact"), "sha256": finalization.get("journal_sha256"),
+    })
+    assert artifact is not None
+    records = [json.loads(line) for line in artifact[1].decode("utf-8").splitlines()]
+    authority = None
+    observations: list[datetime] = []
+    for record in records:
+        event, payload = record.get("event"), record.get("payload")
+        if not isinstance(payload, Mapping):
+            return False
+        if event == "teardown_authority_activated":
+            if authority is not None:
+                return False
+            authority = _timestamp(payload.get("authority_at"))
+            if authority is None:
+                return False
+        elif event == "absence_quorum_reset":
+            observations = []
+        elif event == "absence_observation":
+            stamp = _timestamp(payload.get("observed_at"))
+            if (
+                authority is None or stamp is None or stamp <= authority
+                or (observations and stamp <= observations[-1])
+                or payload.get("label") != receipt.get("label")
+                or payload.get("observation_number") != len(observations) + 1
+            ):
+                return False
+            observations.append(stamp)
+    return (
+        records[-1].get("event") in {"absence_observation", "absence_confirmed"}
+        and authority == _timestamp(finalization.get("teardown_authority_at"))
+        and observations == [_timestamp(value) for value in finalization["absence_observations"]]
+    )
+
+
+def validate_absence_artifact(run_dir: Path, role: str, target: Mapping[str, object], record: Mapping[str, object]) -> bool:
+    instance = target.get("instance")
+    if not isinstance(instance, Mapping) or record.get("status") != "THREE_READS_CONFIRMED":
+        return False
+    instance_id, label, nonce = instance.get("instance_id"), instance.get("label"), target.get("nonce")
+    payload = _json_artifact(run_dir, record)
+    reads = payload.get("reads") if isinstance(payload, Mapping) else None
+    stamps = [_timestamp(read.get("observed_at")) for read in reads] if isinstance(reads, list) and all(isinstance(read, Mapping) for read in reads) else []
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("schema") == "srecon26-vast-absence-evidence/v1"
+        and payload.get("source") == "VastCliProvider.capture_absence_evidence/v1"
+        and payload.get("run_id") == f"two-node-{role}-{nonce}"
+        and payload.get("instance_id") == instance_id
+        and payload.get("label") == label
+        and isinstance(reads, list)
+        and len(reads) == 3
+        and all(read.get("matching_instances") == 0 for read in reads)
+        and all(stamp is not None for stamp in stamps)
+        and stamps == sorted(set(stamps))
+    )
+
+
+def _money(value: object) -> Decimal | None:
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return amount if amount.is_finite() and amount >= 0 else None
+
+
+def validate_billing_artifact(run_dir: Path, role: str, target: Mapping[str, object], record: Mapping[str, object]) -> bool:
+    instance = target.get("instance")
+    if not isinstance(instance, Mapping) or record.get("status") != "AUTHORITATIVE_INVOICE_CAPTURED":
+        return False
+    instance_id, label, nonce = instance.get("instance_id"), instance.get("label"), target.get("nonce")
+    payload = _json_artifact(run_dir, record)
+    charge = payload.get("provider_charge") if isinstance(payload, Mapping) else None
+    metadata = charge.get("metadata") if isinstance(charge, Mapping) else None
+    amount = _money(payload.get("amount_usd")) if isinstance(payload, Mapping) else None
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("schema") == "srecon26-vast-invoice-evidence/v1"
+        and payload.get("source") == "VastCliProvider.capture_invoice_charge/v1"
+        and payload.get("run_id") == f"two-node-{role}-{nonce}"
+        and payload.get("instance_id") == instance_id
+        and payload.get("label") == label
+        and amount is not None
+        and _money(record.get("amount_usd")) == amount
+        and isinstance(charge, Mapping)
+        and charge.get("type") == "instance"
+        and charge.get("source") == f"instance-{instance_id}"
+        and _money(charge.get("amount")) == amount
+        and isinstance(metadata, Mapping)
+        and metadata.get("label") == label
+        and _timestamp(payload.get("observed_at")) is not None
+    )
 
 
 def percentile(values: list[float], quantile: float) -> float:
@@ -86,7 +386,7 @@ def hpa_signal_chart(verdict: dict[str, object]) -> None:
     (OUT / "local-hpa-signal-plumbing.svg").write_text(svg_chart("Local Kubernetes HPA signal plumbing", "Each isolated signal produced a 1 to 2 desired-and-ready replica transition. KV source was synthetic.", panels))
 
 
-def two_node_startup_chart() -> dict[str, object]:
+def two_node_startup_chart(*, current: datetime | None = None) -> dict[str, object]:
     """Summarize actual two-node provider attempts without inflating them to K8s results."""
     runs = sorted((ROOT / "artifacts" / "runs").glob("two-node-*/run-manifest.json"))
     attempts: list[dict[str, object]] = []
@@ -105,16 +405,70 @@ def two_node_startup_chart() -> dict[str, object]:
                     statuses.append(status)
         created = bool(manifest.get("server", {}).get("instance") or manifest.get("worker", {}).get("instance"))
         running = "running" in statuses
-        completed = manifest.get("status") == "completed"
+        guards = manifest.get("guards") if isinstance(manifest.get("guards"), dict) else {}
+        guards_armed, guard_errors = validate_bound_guard_receipts(manifest)
+        finalization = manifest.get("provider_finalization") if isinstance(manifest.get("provider_finalization"), dict) else {}
+        azure_finalization = manifest.get("azure_guard_finalization") if isinstance(manifest.get("azure_guard_finalization"), dict) else {}
+        guard_journals_verified = guards_armed and all(
+            isinstance(guards.get(role), Mapping)
+            and isinstance(azure_finalization.get(role), Mapping)
+            and validate_guard_journal(
+                run_dir,
+                role=role,
+                receipt=guards[role],
+                finalization=azure_finalization[role],
+            )
+            for role in ("server", "worker")
+        )
+        absence_proved = all(
+            isinstance(manifest.get(role), Mapping)
+            and isinstance(finalization.get(role), Mapping)
+            and isinstance(finalization[role].get("absence"), Mapping)
+            and validate_absence_artifact(run_dir, role, manifest[role], finalization[role]["absence"])
+            for role in ("server", "worker")
+        )
+        billing_captured = all(
+            isinstance(manifest.get(role), Mapping)
+            and isinstance(finalization.get(role), Mapping)
+            and isinstance(finalization[role].get("billing"), Mapping)
+            and validate_billing_artifact(run_dir, role, manifest[role], finalization[role]["billing"])
+            for role in ("server", "worker")
+        )
+        completed = (
+            manifest.get("status") == "completed"
+            and guards_armed
+            and guard_journals_verified
+            and absence_proved
+            and billing_captured
+        )
+        report = manifest.get("report") if isinstance(manifest.get("report"), dict) else {}
         counts["created"] += int(created)
         counts["running"] += int(running)
         counts["completed"] += int(completed)
         attempts.append({
             "run": run_dir.name,
+            "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
             "template": manifest.get("vm_template", "ubuntu-cli"),
             "created": created,
+            "guard_backend": manifest.get("guard_backend", "github-legacy"),
+            "both_bound_arm_receipts": guards_armed,
+            "guard_receipt_validation_errors": guard_errors,
+            "both_guard_journals_hash_chain_verified": guard_journals_verified,
+            "deferred_guard_evidence_validated": {
+                role: isinstance(guards.get(role), Mapping)
+                and isinstance(azure_finalization.get(role), Mapping)
+                and validate_deferred_guard_evidence(run_dir, role, guards[role], azure_finalization[role], current=current)
+                for role in ("server", "worker")
+            },
             "provider_running_observed": running,
             "kubernetes_completed": completed,
+            "three_read_absence_proved_for_both": absence_proved,
+            "authoritative_billing_captured_for_both": billing_captured,
+            "report": {
+                "attempted": report.get("attempted") is True,
+                "confirmed": report.get("confirmed") is True,
+                "instance_id": report.get("instance_id"),
+            },
         })
     (OUT / "two-node-canary-startup.svg").write_text(svg_chart(
         "Two-node Vast canary: provider startup evidence",
@@ -124,7 +478,140 @@ def two_node_startup_chart() -> dict[str, object]:
     return {"attempts": attempts, "counts": counts}
 
 
-def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[str, object], two_node: dict[str, object]) -> None:
+def _timing_payloads(evidence: Path, phase: str) -> list[Mapping[str, object]]:
+    """Read only successful, raw curl timing records for one load phase."""
+
+    values: list[Mapping[str, object]] = []
+    for path in sorted(evidence.glob(f"pressure-{phase}-request-*-timing.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(payload, Mapping)
+            and payload.get("http_code") == 200
+            and isinstance(payload.get("ttft_seconds"), (int, float))
+            and isinstance(payload.get("latency_seconds"), (int, float))
+        ):
+            values.append(payload)
+    return values
+
+
+def _prometheus_metric_maximum(path: Path, fragments: tuple[str, ...]) -> float | None:
+    """Return a phase-local maximum only for the named raw Prometheus series."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    data = payload.get("data") if isinstance(payload, Mapping) else None
+    results = data.get("result") if isinstance(data, Mapping) else None
+    values: list[float] = []
+    if not isinstance(results, list):
+        return None
+    for result in results:
+        if not isinstance(result, Mapping):
+            continue
+        metric = result.get("metric")
+        name = metric.get("__name__") if isinstance(metric, Mapping) else None
+        sample = result.get("value")
+        if not isinstance(name, str) or not any(fragment in name for fragment in fragments):
+            continue
+        if isinstance(sample, list) and len(sample) == 2:
+            try:
+                values.append(float(sample[1]))
+            except (TypeError, ValueError):
+                pass
+    return max(values) if values else None
+
+
+def _gpu_utilization_maximum(path: Path) -> float | None:
+    """Read the vLLM pod's raw nvidia-smi utilization field (column five)."""
+
+    try:
+        rows = list(csv.reader(path.read_text(encoding="utf-8").splitlines()))
+    except OSError:
+        return None
+    values: list[float] = []
+    for row in rows:
+        if len(row) != 5:
+            continue
+        try:
+            values.append(float(row[4].strip().removesuffix(" %")))
+        except ValueError:
+            pass
+    return max(values) if values else None
+
+
+def two_node_metric_path_chart(run_dir: Path) -> dict[str, object]:
+    """Create a chart only from a completed run's raw K8s/vLLM snapshots.
+
+    This intentionally rejects absent queue/KV or timing series.  A rendered
+    chart must be evidence of the metric path, never a visually plausible
+    placeholder when a provider run merely created VMs.
+    """
+
+    evidence = run_dir / "server-evidence"
+    if not evidence.is_dir():
+        raise SystemExit(f"two-node evidence directory is missing: {evidence}")
+    phases = ("before", "during", "after")
+    labels = ["Baseline", "Pressure", "Recovery"]
+    timings = {phase: _timing_payloads(evidence, phase) for phase in phases}
+    if any(not timings[phase] for phase in phases):
+        raise SystemExit("two-node timing evidence is incomplete; refusing to chart an unmeasured metric path")
+    queues = {
+        phase: _prometheus_metric_maximum(
+            evidence / f"pressure-{phase}-queue-kv-ttft-prometheus.json",
+            ("num_requests_waiting",),
+        )
+        for phase in phases
+    }
+    kv = {
+        phase: _prometheus_metric_maximum(
+            evidence / f"pressure-{phase}-queue-kv-ttft-prometheus.json",
+            ("kv_cache_usage_perc", "gpu_cache_usage_perc"),
+        )
+        for phase in phases
+    }
+    gpu_utilization = {
+        phase: _gpu_utilization_maximum(evidence / f"pressure-{phase}-gpu.csv")
+        for phase in phases
+    }
+    if (
+        any(queues[phase] is None for phase in phases)
+        or any(kv[phase] is None for phase in phases)
+        or any(gpu_utilization[phase] is None for phase in phases)
+    ):
+        raise SystemExit("two-node queue/KV/GPU evidence is incomplete; refusing to chart an unmeasured metric path")
+    ttft = [percentile([float(record["ttft_seconds"]) * 1000 for record in timings[phase]], 0.5) for phase in phases]
+    queue_values = [float(queues[phase]) for phase in phases]
+    kv_values = [float(kv[phase]) * 100 for phase in phases]
+    gpu_values = [float(gpu_utilization[phase]) for phase in phases]
+    manifest = json.loads((run_dir / "run-manifest.json").read_text(encoding="utf-8"))
+    workload = manifest.get("workload") if isinstance(manifest, Mapping) else None
+    model = workload.get("model_id") if isinstance(workload, Mapping) else "frozen model"
+    (OUT / "two-node-vllm-metric-path.svg").write_text(svg_chart(
+        "Two-node Kubernetes vLLM metric path",
+        f"Raw stream timing + Prometheus snapshots from {run_dir.name}; {model}",
+        [
+            ("p50 TTFT", labels, ttft, COLORS["orange"], "milliseconds; curl first response byte"),
+            ("Max queued requests", labels, queue_values, COLORS["blue"], "vLLM waiting requests"),
+            ("Max KV cache use", labels, kv_values, COLORS["green"], "percent"),
+            ("GPU utilization", labels, gpu_values, COLORS["ink"], "percent; inside serving pod"),
+        ],
+    ), encoding="utf-8")
+    return {
+        "run": run_dir.name,
+        "artifact": "two-node-vllm-metric-path.svg",
+        "timing_samples": {phase: len(timings[phase]) for phase in phases},
+        "p50_ttft_ms": dict(zip(phases, ttft, strict=True)),
+        "max_queue_depth": dict(zip(phases, queue_values, strict=True)),
+        "max_kv_cache_percent": dict(zip(phases, kv_values, strict=True)),
+        "max_gpu_utilization_percent": dict(zip(phases, gpu_values, strict=True)),
+    }
+
+
+def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[str, object], two_node: dict[str, object], metric_path: dict[str, object] | None = None) -> None:
     def stats(arm: str) -> dict[str, float | int]:
         values = requests[arm]
         field = lambda name: [float(item[name]) for item in values]
@@ -142,17 +629,23 @@ def write_summary(requests: dict[str, list[dict[str, object]]], verdict: dict[st
         "gpu_measurements": {arm: stats(arm) for arm in ("c4", "c32")},
         "local_hpa_verdict": verdict["claims"]["local_hpa_signal_plumbing"],
         "two_node_canary": two_node,
+        "two_node_metric_path": metric_path,
         "boundaries": [
             "GPU measurements are standalone vLLM serving data from one rented VM, not a Kubernetes HPA experiment.",
             "Local HPA proof validates independent signal plumbing; the KV source is synthetic.",
             "No CPU-only versus queue/KV-aware HPA A/B result exists yet.",
             "Provider ‘running’ does not establish SSH, GPU, Kubernetes, vLLM, metrics, or HPA readiness.",
+            "A two-node result is complete only when both bound guard receipts, raw workload outputs, exact billing, and three-read absence artifacts are retained.",
+            "The website Report action is attempted only for a frozen exact-instance provider fault before normal teardown.",
         ],
     }
     (OUT / "evidence-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--two-node-run", type=Path, help="completed two-node run directory whose raw K8s/vLLM evidence must be charted")
+    args = parser.parse_args(argv)
     OUT.mkdir(parents=True, exist_ok=True)
     if not VERDICT.is_file():
         raise SystemExit("run scripts/analyze_evidence.py --output /var/tmp/srecon26-verdict.json first")
@@ -163,7 +656,8 @@ def main() -> None:
     gpu_latency_chart(requests)
     hpa_signal_chart(verdict)
     two_node = two_node_startup_chart()
-    write_summary(requests, verdict, two_node)
+    metric_path = two_node_metric_path_chart(args.two_node_run.resolve()) if args.two_node_run is not None else None
+    write_summary(requests, verdict, two_node, metric_path)
 
 
 if __name__ == "__main__":

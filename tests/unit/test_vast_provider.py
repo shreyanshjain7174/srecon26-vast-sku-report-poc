@@ -84,6 +84,19 @@ def test_kvm_offer_refreeze_uses_machine_query_then_exact_offer_id(fixture_cli: 
     assert contract.machine_id == 99
 
 
+def test_kvm_offer_refreeze_can_accept_one_current_offer_after_id_rollover() -> None:
+    response = json.dumps([{
+        "id": 202, "gpu_name": "RTX 3090", "num_gpus": 1, "gpu_ram": 24,
+        "compute_cap": 860, "machine_id": 99, "dph_total": 0.31,
+        "rentable": True, "verified": True, "vms_enabled": True,
+    }])
+    provider = VastCliProvider("fixture", runner=lambda _args, _timeout: response)
+
+    contract = provider.get_vms_enabled_offer(101, machine_id=99, label="rollover-label", allow_offer_rollover=True)
+
+    assert contract.offer_id == 202
+
+
 @pytest.mark.parametrize(
     "account_payload",
     [

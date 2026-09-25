@@ -19,6 +19,10 @@ class GuardAttestation:
     label: str
     hard_deadline: datetime
     last_heartbeat: datetime | None
+    azure_resource_id: str | None = None
+    azure_vm_id: str | None = None
+    host_key_fingerprint: str | None = None
+    heartbeat_timeout_seconds: int | None = None
 
 
 class Guard(Protocol):

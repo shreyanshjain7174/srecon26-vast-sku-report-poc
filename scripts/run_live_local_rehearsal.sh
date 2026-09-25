@@ -3,6 +3,8 @@
 set -euo pipefail
 ONLY_ARM="${1:-all}"
 case "$ONLY_ARM" in all|cpu|queue|kv) ;; *) echo "usage: $0 [all|cpu|queue|kv]" >&2; exit 2;; esac
+KIND_NODES="${SRECON26_KIND_NODES:-1}"
+case "$KIND_NODES" in 1|2) ;; *) echo "SRECON26_KIND_NODES must be 1 or 2" >&2; exit 2;; esac
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_ID="phase1-live-$(date -u +%Y%md%H%M%sz)"
@@ -34,12 +36,22 @@ cleanup() {
 trap cleanup EXIT
 
 printf '%s\n' "$OWNER" > "$STATE_DIR/owner"
-kind create cluster --name "$CLUSTER_NAME" --wait 120s --kubeconfig "$KUBECONFIG_FILE"
+if [ "$KIND_NODES" = 2 ]; then
+  kind create cluster --name "$CLUSTER_NAME" --config "$ROOT_DIR/infra/kind/two-node.yaml" --wait 120s --kubeconfig "$KUBECONFIG_FILE"
+else
+  kind create cluster --name "$CLUSTER_NAME" --wait 120s --kubeconfig "$KUBECONFIG_FILE"
+fi
 CREATED=1
 k get --raw=/readyz >/dev/null
+k wait --for=condition=Ready node --all --timeout=120s
+k get nodes -o json > "$STATE_DIR/nodes.json"
+test "$(jq '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length' "$STATE_DIR/nodes.json")" = "$KIND_NODES"
 docker build --label "org.srecon26.owner=$OWNER" -t "$IMAGE" "$ROOT_DIR/mock-vllm"
 kind load docker-image "$IMAGE" --name "$CLUSTER_NAME"
 k apply -f "$ROOT_DIR/k8s/live/base.yaml"
+if [ "$KIND_NODES" = 2 ]; then
+  k -n "$NAMESPACE" patch deployment hpa-target --type=strategic -p '{"spec":{"template":{"spec":{"affinity":{"podAntiAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":[{"labelSelector":{"matchExpressions":[{"key":"app","operator":"In","values":["hpa-target"]}]},"topologyKey":"kubernetes.io/hostname"}]}},"tolerations":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"}]}}}}'
+fi
 k label namespace "$NAMESPACE" "srecon26.io/owner=$OWNER" --overwrite
 k -n "$NAMESPACE" label deployment/hpa-target "srecon26.io/owner=$OWNER" --overwrite
 k apply -f "$ROOT_DIR/k8s/live/prometheus.yaml"
@@ -63,8 +75,15 @@ capture_cpu() { local target=$1 temporary="$1.tmp" end=$((SECONDS+60)); while tr
 wait_custom() { local metric=$1 value=$2 end=$((SECONDS+90)); while ! custom "$metric" | jq -e --arg value "$value" '.items[0].value == $value' >/dev/null 2>&1; do (( SECONDS < end )) || return 1; sleep 3; done; }
 wait_custom_api() { local end=$((SECONDS+120)); until k get --raw /apis/custom.metrics.k8s.io/v1beta1 >/dev/null 2>&1; do (( SECONDS < end )) || return 1; sleep 3; done; }
 wait_one() { local end=$((SECONDS+90)); until [ "$(k -n "$NAMESPACE" get hpa hpa-target -o jsonpath='{.status.desiredReplicas}')" = 1 ] && [ "$(k -n "$NAMESPACE" get deployment hpa-target -o jsonpath='{.status.readyReplicas}')" = 1 ]; do (( SECONDS < end )) || return 1; sleep 3; done; }
-wait_two() { local end=$((SECONDS+120)); while [ "$(k -n "$NAMESPACE" get deployment hpa-target -o jsonpath='{.status.readyReplicas}')" != 2 ]; do (( SECONDS < end )) || return 1; sleep 3; done; test "$(k -n "$NAMESPACE" get hpa hpa-target -o jsonpath='{.status.desiredReplicas}')" = 2; }
-capture() { local dir=$1 step=$2; mkdir -p "$dir"; date -u +%FT%TZ > "$dir/$step.timestamp"; source_metrics > "$dir/$step.source.prom"; capture_cpu "$dir/$step.cpu.json"; custom vllm_num_requests_waiting > "$dir/$step.queue.custom.json" || true; custom vllm_kv_cache_usage > "$dir/$step.kv.custom.json" || true; k -n "$NAMESPACE" get hpa hpa-target -o json > "$dir/$step.hpa.json"; k -n "$NAMESPACE" get deployment hpa-target -o json > "$dir/$step.deployment.json"; k -n "$NAMESPACE" get events --field-selector involvedObject.name=hpa-target -o json > "$dir/$step.events.json"; }
+wait_two() {
+  local end=$((SECONDS+120))
+  while [ "$(k -n "$NAMESPACE" get deployment hpa-target -o jsonpath='{.status.readyReplicas}')" != 2 ]; do (( SECONDS < end )) || return 1; sleep 3; done
+  test "$(k -n "$NAMESPACE" get hpa hpa-target -o jsonpath='{.status.desiredReplicas}')" = 2
+  if [ "$KIND_NODES" = 2 ]; then
+    test "$(k -n "$NAMESPACE" get pod -l app=hpa-target -o json | jq '[.items[] | select(.metadata.deletionTimestamp == null) | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) | .spec.nodeName] | unique | length')" = 2
+  fi
+}
+capture() { local dir=$1 step=$2; mkdir -p "$dir"; date -u +%FT%TZ > "$dir/$step.timestamp"; source_metrics > "$dir/$step.source.prom"; capture_cpu "$dir/$step.cpu.json"; custom vllm_num_requests_waiting > "$dir/$step.queue.custom.json" || true; custom vllm_kv_cache_usage > "$dir/$step.kv.custom.json" || true; k -n "$NAMESPACE" get hpa hpa-target -o json > "$dir/$step.hpa.json"; k -n "$NAMESPACE" get deployment hpa-target -o json > "$dir/$step.deployment.json"; k -n "$NAMESPACE" get pod -l app=hpa-target -o json > "$dir/$step.pods.json"; k -n "$NAMESPACE" get events --field-selector involvedObject.name=hpa-target -o json > "$dir/$step.events.json"; }
 wait_cpu_below() { local ceiling=$1 end=$((SECONDS+90)); while ! awk -v actual="$(cpu_millicores)" -v ceiling="$ceiling" 'BEGIN { exit !(actual <= ceiling) }'; do (( SECONDS < end )) || return 1; sleep 3; done; }
 reset() { k -n "$NAMESPACE" delete hpa hpa-target --ignore-not-found >/dev/null; k -n "$NAMESPACE" scale deployment/hpa-target --replicas=1 >/dev/null; k -n "$NAMESPACE" rollout restart deployment/hpa-target >/dev/null; k -n "$NAMESPACE" rollout status deployment/hpa-target --timeout=90s >/dev/null; control 0 0.2; }
 negative_control() { local dir=$1; wait_one; for sample in 0 1 2 3 4 5 6; do capture "$dir" "negative-$sample"; test "$(k -n "$NAMESPACE" get hpa hpa-target -o jsonpath='{.status.desiredReplicas}')" = 1; sleep 15; done; }
@@ -80,7 +99,7 @@ arm() {
     queue) control 4 0.2; wait_custom vllm_num_requests_waiting 4 ;;
     kv) control 0 1.0; wait_custom vllm_kv_cache_usage 1 ;;
   esac
-  wait_two; capture "$dir" scaled; printf '{"arm":"%s","provenance":"local-synthetic","owner":"%s","negative_control_seconds":90,"desired_replicas":2,"ready_replicas":2}\n' "$name" "$OWNER" > "$dir/summary.json"
+  wait_two; capture "$dir" scaled; printf '{"arm":"%s","provenance":"local-synthetic","owner":"%s","negative_control_seconds":90,"desired_replicas":2,"ready_replicas":2,"cluster_node_count":%s}\n' "$name" "$OWNER" "$KIND_NODES" > "$dir/summary.json"
 }
 
 wait_custom_api
@@ -89,4 +108,4 @@ if [ "$ONLY_ARM" = all ] || [ "$ONLY_ARM" = queue ]; then arm queue hpa-queue.ya
 if [ "$ONLY_ARM" = all ] || [ "$ONLY_ARM" = kv ]; then arm kv hpa-kv.yaml kv; fi
 k get --raw /apis/custom.metrics.k8s.io/v1beta1 > "$STATE_DIR/custom-metrics-api.json"
 k get --raw /apis/metrics.k8s.io/v1beta1 > "$STATE_DIR/resource-metrics-api.json"
-printf '{"result":"passed","cluster":"%s","context":"%s","owner":"%s","provenance":"local-synthetic"}\n' "$CLUSTER_NAME" "$CONTEXT" "$OWNER" > "$STATE_DIR/result.json"
+printf '{"result":"passed","cluster":"%s","context":"%s","owner":"%s","provenance":"local-synthetic","node_count":%s,"cluster_profile":"%s"}\n' "$CLUSTER_NAME" "$CONTEXT" "$OWNER" "$KIND_NODES" "$( [ "$KIND_NODES" = 2 ] && printf two-node-kind-compatibility || printf single-node-kind-local )" > "$STATE_DIR/result.json"

@@ -697,6 +697,12 @@ capture_pressure_snapshot() {
     kubectl -n "$NAMESPACE" get deployment vllm -o json || die "cannot capture ${phase} vLLM ready replicas"
   capture_until_deadline "$out/pressure-${phase}-pods.json" "$deadline_epoch" \
     kubectl -n "$NAMESPACE" get pods -l app=vllm -o json || die "cannot capture ${phase} vLLM pod readiness"
+  # Snapshot from the selected GPU pod rather than the control-plane host:
+  # a two-node scheduler may place vLLM on either machine.  This binds GPU
+  # utilization/memory evidence to the serving workload at each phase.
+  capture_until_deadline "$out/pressure-${phase}-gpu.csv" "$deadline_epoch" \
+    kubectl -n "$NAMESPACE" exec deployment/vllm -- nvidia-smi --query-gpu=timestamp,name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits \
+    || die "cannot capture ${phase} GPU utilization from the vLLM pod"
   query='vllm:num_requests_waiting or vllm:kv_cache_usage_perc or vllm:time_to_first_token_seconds_count or vllm:time_to_first_token_seconds_sum'
   request_timeout="$(curl_timeout_until_deadline "$deadline_epoch" 15)"
   curl --silent --show-error --fail --max-time "$request_timeout" --get \
