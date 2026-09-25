@@ -162,8 +162,9 @@ def validate_configuration(args: argparse.Namespace) -> None:
                 raise SystemExit(f"{role} Azure guard port must be from 1 to 65535")
     elif args.server_azure_guard_vm.casefold() == args.worker_azure_guard_vm.casefold():
         raise SystemExit("server and worker Azure Run Command guards require distinct managed VMs")
-    if not 1 <= args.azure_guard_timeout_seconds <= 60:
-        raise SystemExit("Azure guard timeout must be from 1 to 60 seconds")
+    maximum_guard_timeout = 300 if args.azure_guard_transport == "run-command" else 60
+    if not 1 <= args.azure_guard_timeout_seconds <= maximum_guard_timeout:
+        raise SystemExit(f"Azure guard timeout must be from 1 to {maximum_guard_timeout} seconds")
     if not 30 <= args.azure_guard_absence_timeout_seconds <= 600:
         raise SystemExit("Azure guard absence timeout must be from 30 to 600 seconds")
     if not 30 <= args.heartbeat_seconds <= 600:

@@ -98,8 +98,8 @@ class AzureRunCommandGuardConfig:
             raise AzureRunCommandTransportError("Azure guard resource group is invalid")
         if not isinstance(self.vm_name, str) or not _VM_NAME.fullmatch(self.vm_name):
             raise AzureRunCommandTransportError("Azure guard VM name is invalid")
-        if isinstance(self.timeout_seconds, bool) or not isinstance(self.timeout_seconds, int) or not 1 <= self.timeout_seconds <= 60:
-            raise AzureRunCommandTransportError("Azure Run Command timeout must be 1-60 seconds")
+        if isinstance(self.timeout_seconds, bool) or not isinstance(self.timeout_seconds, int) or not 1 <= self.timeout_seconds <= 300:
+            raise AzureRunCommandTransportError("Azure Run Command timeout must be 1-300 seconds")
         if (
             isinstance(self.heartbeat_timeout_seconds, bool)
             or not isinstance(self.heartbeat_timeout_seconds, int)

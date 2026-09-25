@@ -59,7 +59,7 @@ def _transport(runner, **kwargs) -> AzureRunCommandGuardTransport:
         {"vm_name": "bad/vm"},
         {"az_path": Path("/missing/az")},
         {"timeout_seconds": 0},
-        {"timeout_seconds": 61},
+        {"timeout_seconds": 301},
     ],
 )
 def test_config_rejects_untrusted_azure_endpoint_values(updates: dict[str, object]) -> None:

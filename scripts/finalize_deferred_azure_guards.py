@@ -62,7 +62,7 @@ def _transport_for_endpoint(
             vm_name=str(endpoint.get("vm_name", "")),
             az_path=Path(str(endpoint.get("az_path", ""))),
             timeout_seconds=_integer(
-                endpoint.get("timeout_seconds"), f"{role} Azure Run Command timeout", minimum=1, maximum=60,
+                endpoint.get("timeout_seconds"), f"{role} Azure Run Command timeout", minimum=1, maximum=300,
             ),
             heartbeat_timeout_seconds=heartbeat_timeout_seconds,
         ).validated()
