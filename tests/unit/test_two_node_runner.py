@@ -5,11 +5,13 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
 
 from scripts.run_two_node_metric_path import (
+    PairedGuardHeartbeat,
     build_guards,
     finalize_azure_guard_channels,
     parse_args,
@@ -18,6 +20,7 @@ from scripts.run_two_node_metric_path import (
     workload_config,
 )
 from srecon26_poc.live_factory import DynamicAzureGuard
+from srecon26_poc.types import RunIdentity
 
 
 def base_arguments(tmp_path: Path) -> list[str]:
@@ -127,6 +130,65 @@ def test_heartbeat_cadence_is_bounded_by_guard_timer_and_wired_to_ssh(tmp_path: 
     args = parse_args([*base_arguments(tmp_path), "--heartbeat-seconds", "90"])
     validate_configuration(args)
     assert workload_config(args).heartbeat_seconds == 90
+
+
+class RecordingHeartbeatGuard:
+    def __init__(self, *, barrier: Barrier | None = None, fail_once: bool = False) -> None:
+        self.barrier = barrier
+        self.fail_once = fail_once
+        self.calls: list[tuple[str, int]] = []
+
+    def record_heartbeat(self, identity: RunIdentity, tick: int) -> None:
+        self.calls.append((identity.label, tick))
+        if self.barrier is not None:
+            self.barrier.wait(timeout=1)
+        if self.fail_once:
+            self.fail_once = False
+            raise RuntimeError("guard unavailable")
+
+
+def test_paired_guard_heartbeat_runs_concurrently_and_coalesces() -> None:
+    barrier = Barrier(2)
+    server = RecordingHeartbeatGuard(barrier=barrier)
+    worker = RecordingHeartbeatGuard(barrier=barrier)
+    ticks = iter((0.0, 30.0, 121.0))
+    heartbeat = PairedGuardHeartbeat(
+        server_guard=server,  # type: ignore[arg-type]
+        worker_guard=worker,  # type: ignore[arg-type]
+        server_identity=lambda: RunIdentity("server-run", "server--nonce-12345678", datetime.now(UTC)),
+        worker_identity=lambda: RunIdentity("worker-run", "worker--nonce-12345678", datetime.now(UTC)),
+        coalesce_seconds=120,
+        monotonic=lambda: next(ticks),
+        monotonic_ns=lambda: 42,
+    )
+
+    heartbeat()
+    heartbeat()
+    heartbeat()
+
+    assert server.calls == [("server--nonce-12345678", 42)] * 2
+    assert worker.calls == [("worker--nonce-12345678", 42)] * 2
+
+
+def test_failed_paired_guard_heartbeat_is_not_cached() -> None:
+    server = RecordingHeartbeatGuard(fail_once=True)
+    worker = RecordingHeartbeatGuard()
+    heartbeat = PairedGuardHeartbeat(
+        server_guard=server,  # type: ignore[arg-type]
+        worker_guard=worker,  # type: ignore[arg-type]
+        server_identity=lambda: RunIdentity("server-run", "server--nonce-12345678", datetime.now(UTC)),
+        worker_identity=lambda: RunIdentity("worker-run", "worker--nonce-12345678", datetime.now(UTC)),
+        coalesce_seconds=120,
+        monotonic=lambda: 0.0,
+        monotonic_ns=lambda: 42,
+    )
+
+    with pytest.raises(Exception, match="paired Azure guard heartbeat failed"):
+        heartbeat()
+    heartbeat()
+
+    assert len(server.calls) == 2
+    assert len(worker.calls) == 2
 
 
 class FakeArmedGuard:

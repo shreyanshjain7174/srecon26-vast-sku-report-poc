@@ -17,8 +17,10 @@ import sys
 import tempfile
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock
 from typing import Callable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,7 +48,7 @@ from srecon26_poc.live_factory import (
 )
 from srecon26_poc.reporting import FaultRecord
 from srecon26_poc.two_node import NodeLease, TwoNodeLease
-from srecon26_poc.types import FaultClass
+from srecon26_poc.types import FaultClass, RunIdentity
 from srecon26_poc.vast_provider import (
     OFFICIAL_KVM_IMAGE,
     OFFICIAL_UBUNTU_2204_TEMPLATE_HASH,
@@ -75,6 +77,59 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+class PairedGuardHeartbeat:
+    """Coalesce frequent pulses while updating independent guards in parallel."""
+
+    def __init__(
+        self,
+        *,
+        server_guard: DynamicAzureGuard,
+        worker_guard: DynamicAzureGuard,
+        server_identity: Callable[[], RunIdentity],
+        worker_identity: Callable[[], RunIdentity],
+        coalesce_seconds: float,
+        monotonic: Callable[[], float] = time.monotonic,
+        monotonic_ns: Callable[[], int] = time.monotonic_ns,
+    ) -> None:
+        if coalesce_seconds <= 0:
+            raise ValueError("guard heartbeat coalescing window must be positive")
+        self.server_guard = server_guard
+        self.worker_guard = worker_guard
+        self.server_identity = server_identity
+        self.worker_identity = worker_identity
+        self.coalesce_seconds = coalesce_seconds
+        self.monotonic = monotonic
+        self.monotonic_ns = monotonic_ns
+        self._last_successful_dispatch: float | None = None
+        self._lock = Lock()
+
+    def __call__(self) -> None:
+        with self._lock:
+            dispatch_started = self.monotonic()
+            if (
+                self._last_successful_dispatch is not None
+                and dispatch_started - self._last_successful_dispatch < self.coalesce_seconds
+            ):
+                return
+            tick = self.monotonic_ns()
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="srecon26-guard-heartbeat") as pool:
+                futures = (
+                    pool.submit(self.server_guard.record_heartbeat, self.server_identity(), tick),
+                    pool.submit(self.worker_guard.record_heartbeat, self.worker_identity(), tick),
+                )
+                failures: list[BaseException] = []
+                for future in futures:
+                    try:
+                        future.result()
+                    except BaseException as error:
+                        failures.append(error)
+            if failures:
+                raise LiveFactoryError("paired Azure guard heartbeat failed") from failures[0]
+            # Cache dispatch start, not completion. Guard mutation happens
+            # during each RPC, so completion time would overstate freshness.
+            self._last_successful_dispatch = dispatch_started
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -542,11 +597,16 @@ def main() -> int:
         now=lambda: datetime.now(UTC),
     )
 
-    def heartbeat() -> None:
-        tick = time.monotonic_ns()
-        from srecon26_poc.types import RunIdentity
-        server_guard.record_heartbeat(RunIdentity(controller.server.run_id, server_label, datetime.now(UTC)), tick)
-        worker_guard.record_heartbeat(RunIdentity(controller.worker.run_id, worker_label, datetime.now(UTC)), tick)
+    heartbeat = PairedGuardHeartbeat(
+        server_guard=server_guard,
+        worker_guard=worker_guard,
+        server_identity=lambda: RunIdentity(controller.server.run_id, server_label, datetime.now(UTC)),
+        worker_identity=lambda: RunIdentity(controller.worker.run_id, worker_label, datetime.now(UTC)),
+        # SSH wrappers offer pulse opportunities every half interval. A
+        # conservative half-timeout ceiling keeps repeated local calls cheap
+        # without treating an old heartbeat as fresh.
+        coalesce_seconds=min(args.heartbeat_seconds, args.guard_heartbeat_timeout_seconds / 2),
+    )
 
     def remote(endpoint, command: list[str], log: str) -> str:
         return work._remote(endpoint, command, hard_deadline=deadline, heartbeat=heartbeat, log=args.output / log)
