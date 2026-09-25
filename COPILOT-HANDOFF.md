@@ -1,6 +1,6 @@
 # Copilot handoff: SRECon26 Vast GPU autoscaling PoC
 
-Last verified: **2026-09-25 06:21 UTC**
+Last verified: **2026-09-25 11:40 UTC**
 
 This file is the continuation brief. Treat the repository and live provider state as authoritative. Do not launch another paid instance until the active-controller check below is terminal and Vast inventory is still empty.
 
@@ -28,9 +28,11 @@ This is a conference PoC, not a production platform. Do not expand into multi-re
 
 - Repository: `/Users/sunny/Documents/Codex/2026-09-23/srecon26-vast-sku-report-poc`
 - Branch: `fix/two-node-metric-contract`
-- Remote branch is current through commit `ad492a9`.
+- Remote branch includes the Copilot handoff through commit `3405cc6`; check `git log` for the newest handoff update.
 - Pull request: <https://github.com/shreyanshjain7174/srecon26-vast-sku-report-poc/pull/4>
 - Recent commits:
+  - `3405cc6 docs: record terminal Vast canary failure`
+  - `32b7a1d docs: add Copilot PoC handoff`
   - `ad492a9 fix: tolerate volatile Vast offer ids`
   - `f13e194 fix: coalesce paired Azure guard heartbeats`
   - `aca33b4 fix: wait for Azure guard command stdout`
@@ -38,8 +40,14 @@ This is a conference PoC, not a production platform. Do not expand into multi-re
 - Commit rules: use a separate branch, `git commit -s -m`, signed commit, no Codex coauthor.
 - Preserve existing user-owned worktree state:
   - modified `.gitignore`
+  - modified `docs/claude-design-brief.md`
+  - modified `scripts/build_evidence_pack.py`
+  - modified `tests/unit/test_build_evidence_pack.py`
+  - untracked `.vscode/`
+  - untracked `browser/chrome_applescript_report_cli.py`
   - untracked `docs/superpowers/plans/2026-09-24-independent-azure-guard.md`
   - untracked `node_modules/`
+  - untracked `scripts/build_post_run_gpu_verdict.py`
 - Latest verification: **538 passed, 1 skipped**.
 - Latest Semgrep scan: **0 findings** across tracked `src`, `tests`, and `scripts`.
 
@@ -175,6 +183,24 @@ jq '{status,report,failure,finalization_errors,provider_finalization,azure_guard
 
 Do not launch another paid run. First capture exact-label invoice artifacts when the provider posts them, then seal this terminal failure without inventing workload output.
 
+### Terminal attempt `artifacts/live-two-node-20260925T105751Z`
+
+The controller exited terminally at `2026-09-25T11:32:09.455035Z`:
+
+- server `52579650`, machine `20126`, RTX 4060 Ti, matched the frozen `$0.2601111111/hour` contract and reached provider `running`
+- worker `52579658`, machine `29929`, RTX 4060 Ti, matched the frozen `$0.3655555556/hour` contract but remained in provider startup despite publishing SSH endpoints
+- bounded worker observations were retained in `worker-provider-status.ndjson` and `worker-transport/provider-startup-fault.json`
+- website Report was attempted against the exact worker before teardown, but the adapter rejected the target; confirmation is **false** and no support ticket may be claimed
+- exact teardown completed and Vast inventory was `[]` at `11:40 UTC`
+- both local provider absence artifacts contain three zero-match reads
+- authoritative invoices are retained: server `$0.057`, worker `$0.020`, total **$0.077**
+- the controller manifest captured worker guard `ABSENCE_CONFIRMED`; its synchronous server export was stale/failed
+- the subsequent read-only `post-run-azure-guard-status.json` proves both independently bound Azure guards reached `ABSENCE_CONFIRMED`, with three observations and final root hashes for each exact nonce
+- terminal result: `failed`; no Kubernetes, CUDA, vLLM, inference, HPA, TTFT, TPOT, queue, KV, or GPU-utilization measurement was produced
+- sealed checksum manifest: `artifacts/live-two-node-20260925T105751Z/FINAL-EVIDENCE-SHA256SUMS`
+
+Important interpretation: this run is useful provider-startup and teardown evidence only. It does not advance the two-node Kubernetes/vLLM performance claim.
+
 ## Budget state
 
 - Project exposure cap: **$5.00**.
@@ -214,7 +240,7 @@ Required for every fresh offer:
 
 Do not use known failed or excluded machines:
 
-`99239, 17545, 150513, 15881, 44906, 57783, 41599, 67809, 15326`
+`99239, 17545, 150513, 15881, 44906, 57783, 41599, 67809, 15326, 20126, 29929`
 
 Machine `15326` previously produced valid standalone GPU evidence but is now excluded from the next two-node attempt because its created contract price did not match the freshly frozen offer.
 
@@ -259,8 +285,8 @@ Official presenter guidance: <https://www.usenix.org/conference/srecon26emea/ins
 
 ## Next execution sequence
 
-1. Confirm Vast inventory remains empty; do not duplicate the terminal run.
-2. Recheck the Vast invoice API for exact instances `52541210` and `52541213`, capture exact-label invoice artifacts when available, and seal the finalization addendum. The terminal failure and both local/Azure three-read absence proofs already exist.
+1. Confirm Vast inventory remains empty; do not duplicate any terminal run.
+2. Treat `20260925T105751Z` as a sealed failed-safe provider-startup attempt. Its invoices, local absence reads, post-run dual Azure guard status, traceback, and checksums are complete.
 3. Normalize the 125 `manual-benchmark/SHA256SUMS` paths and verify every digest locally.
 4. Create a separate sealed post-run GPU verdict that binds:
    - exact run and instance identity;
