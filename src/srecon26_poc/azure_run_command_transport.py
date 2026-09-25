@@ -141,6 +141,12 @@ def _instance_view_output(raw: str) -> str | None:
     state, exit_code, output = view.get("executionState"), view.get("exitCode"), view.get("output")
     if state in _PENDING_EXECUTION_STATES:
         return None
+    # Managed Run Command can mark its resource Succeeded before the guest
+    # extension publishes stdout.  That is not a successful guard receipt and
+    # must remain pending until the bounded deadline, rather than becoming a
+    # false negative that blocks every paid run.
+    if state == "Succeeded" and type(exit_code) is int and exit_code == 0 and output in (None, ""):
+        return None
     if state != "Succeeded" or type(exit_code) is not int or exit_code != 0:
         raise AzureRunCommandTransportError("Azure Run Command refused the guard request")
     if not isinstance(output, str) or not output:

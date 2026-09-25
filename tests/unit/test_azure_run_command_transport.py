@@ -131,7 +131,7 @@ def test_polls_pending_instance_view_before_validating_and_deleting() -> None:
         instance_views += 1
         if instance_views == 1:
             pending = json.dumps({"properties": {"instanceView": {
-                "executionState": "Running", "exitCode": None, "output": "",
+                "executionState": "Succeeded", "exitCode": 0, "output": None,
             }}})
             return subprocess.CompletedProcess(arguments, 0, stdout=pending, stderr="")
         return subprocess.CompletedProcess(arguments, 0, stdout=_view(json.dumps(_receipt()) + "\n"), stderr="")
