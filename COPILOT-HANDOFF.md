@@ -1,6 +1,6 @@
 # Copilot handoff: SRECon26 Vast GPU autoscaling PoC
 
-Last verified: **2026-09-25 06:05 UTC**
+Last verified: **2026-09-25 06:21 UTC**
 
 This file is the continuation brief. Treat the repository and live provider state as authoritative. Do not launch another paid instance until the active-controller check below is terminal and Vast inventory is still empty.
 
@@ -138,12 +138,11 @@ The old `pre-anchor/run-manifest.json` remains `FAILED_SAFE` because it was writ
 - Vast inventory became empty.
 - Report was not confirmed. A later exact-target preflight could not run because teardown had already removed both rows.
 
-### Current attempt `artifacts/live-two-node-20260925T055500Z`
+### Terminal attempt `artifacts/live-two-node-20260925T055500Z`
 
-At the last handoff timestamp, the local controller was still finalizing evidence:
+The local controller exited terminally at `2026-09-25T06:10:44.975867Z`:
 
-- launchd label: `org.srecon26.vast-two-node-20260925l`
-- shell PID observed: `16874`
+- launchd label `org.srecon26.vast-two-node-20260925l` is no longer running
 - hard deadline: `2026-09-25T06:35:22.811677Z`
 - independent Azure guards were both `ARMED`
 - authenticated website Report path had passed preflight
@@ -155,21 +154,26 @@ At the last handoff timestamp, the local controller was still finalizing evidenc
 - website Report was attempted before teardown, but exact-target adapter returned `report adapter rejected exact target`
 - report confirmation: **false**; never claim a support ticket was submitted
 - both exact Vast instances were destroyed immediately
-- current Vast inventory was `[]`
-- server and worker three-read absence artifacts already exist
-- provider invoices and Azure guard finalization were still pending at `06:01 UTC`
+- Vast inventory remained `[]` at `06:21 UTC`
+- both local provider absence artifacts are `THREE_READS_CONFIRMED`
+- both independent Azure guards reached `ABSENCE_CONFIRMED` with three observations each
+- exporting the extra Azure guard evidence bundle failed with `Azure guard returned an invalid response`; the final manifest still retains both guard identities, event counts, root hashes, deadlines, and absence observations
+- authoritative invoices for instances `52541210` and `52541213` were still absent from the Vast invoice API at `06:21 UTC`; billing remains honestly `PENDING`
+- terminal result: `failed`; no workload completed and no Kubernetes, vLLM, CUDA, inference, or autoscaling measurement was produced
+- terminal traceback: `artifacts/live-two-node-20260925T055500Z/terminal-failure.json`
+- controller stderr: `artifacts/controller-logs/20260925T055500Z.stderr.log`
 
 First Copilot action must be read-only:
 
 ```bash
 cd /Users/sunny/Documents/Codex/2026-09-23/srecon26-vast-sku-report-poc
 date -u +%Y-%m-%dT%H:%M:%SZ
-launchctl print gui/$(id -u)/org.srecon26.vast-two-node-20260925l 2>&1 | rg 'state =|pid =|runs =|last exit code' || true
 jq '{status,report,failure,finalization_errors,provider_finalization,azure_guard_finalization,finished_at,workload_completed}' artifacts/live-two-node-20260925T055500Z/run-manifest.json
 /Users/sunny/.local/bin/vastai show instances --raw
+/Users/sunny/.local/bin/vastai show invoices-v1 --charges --charge-type instance --start-date 2026-09-25 --end-date 2026-09-26 --limit 100 --latest-first --format tree --verbose --raw
 ```
 
-Do not launch a duplicate while that controller exists. If it is gone and inventory remains empty, preserve the final manifest, invoices, guard evidence, and three-read absence proof.
+Do not launch another paid run. First capture exact-label invoice artifacts when the provider posts them, then seal this terminal failure without inventing workload output.
 
 ## Budget state
 
@@ -255,8 +259,8 @@ Official presenter guidance: <https://www.usenix.org/conference/srecon26emea/ins
 
 ## Next execution sequence
 
-1. Re-read the current controller and Vast inventory. Do not duplicate a live run.
-2. Wait for `20260925T055500Z` provider invoices and Azure guard absence evidence to finish. If the controller is gone but the manifest is incomplete, create an honest terminal-failure note; do not invent workload output.
+1. Confirm Vast inventory remains empty; do not duplicate the terminal run.
+2. Recheck the Vast invoice API for exact instances `52541210` and `52541213`, capture exact-label invoice artifacts when available, and seal the finalization addendum. The terminal failure and both local/Azure three-read absence proofs already exist.
 3. Normalize the 125 `manual-benchmark/SHA256SUMS` paths and verify every digest locally.
 4. Create a separate sealed post-run GPU verdict that binds:
    - exact run and instance identity;
