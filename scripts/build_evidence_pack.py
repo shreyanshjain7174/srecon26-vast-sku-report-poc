@@ -62,21 +62,21 @@ CHART_PRESENTATION_ROLES = {
 }
 # (number, headline, pill, charts, source_ids); production slides use native redraws and registered sources.
 SLIDES = (
-    (1, "Most production inference sucks.", "SYNTHESIS - talk thesis", (), ()),
-    (2, "Wrong layer. Wrong metric.", "SYNTHESIS - talk thesis", (), ()),
+    (1, "Inference has more than one knob.", "SYNTHESIS - talk thesis", (), ()),
+    (2, "Inference is a stack of layers.", "SYNTHESIS - talk thesis", (), ()),
     (3, "Start with workload math.", "SYNTHESIS - workload contract", (), ()),
     (4, "Prefill sets TTFT. Decode sets TPOT.", "PATTERN - request anatomy", (), ()),
     (5, "Capacity is a token budget.", "SYNTHESIS - worked example", (), ()),
     (6, "FP8 frees memory for more requests.", "PUBLISHED - vLLM docs and blog", (), ("vllm-fp8", "vllm-turboquant")),
     (7, "Three engine levers.", "PATTERN - serving techniques", (), ("vllm-x-omni", "vllm-x-v030")),
     (8, "Route to the cache.", "PUBLISHED - arXiv preprint, 8xA100", (), ("cache-routing-preprint",)),
-    (9, "HPA watches the wrong thing.", "PUBLISHED - Google Cloud blog, L4 GPU", (), ("google-gke-hpa",)),
+    (9, "GPU utilization is a weak scaling signal.", "PUBLISHED - Google Cloud blog, L4 GPU", (), ("google-gke-hpa",)),
     (10, "Scale on engine signals.", "PATTERN - metrics pipeline", (), ()),
     (11, "Qwen3.8-27B on 8x RTX 4090.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-bf16",)),
-    (12, "8 concurrent: first token 7x slower.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-bf16",)),
-    (13, "Empty queue. Latency still rose.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-bf16",)),
-    (14, "Control on the SLO.", "PUBLISHED - KServe and llm-d docs", (), ("kserve-wva", "llmd-slo-aware")),
-    (15, "FP8 buys memory here, not speed.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-precision",)),
+    (12, "At 8 concurrent, TTFT rose 7x.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-bf16",)),
+    (13, "Queue stayed at zero. TTFT still rose.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-bf16",)),
+    (14, "Scale against the SLO.", "PUBLISHED - KServe and llm-d docs", (), ("kserve-wva", "llmd-slo-aware")),
+    (15, "FP8: less memory, mixed throughput.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-precision",)),
     (16, "Instrument every layer.", "SYNTHESIS - bottom-up rule", (), ()),
 )
 # Sealed single-host runs; each directory holds run.json and SHA256SUMS (one subdirectory per precision arm when present).

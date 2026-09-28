@@ -506,24 +506,24 @@ def test_catalog_uses_layered_inference_story_and_registered_sources(
     catalog = json.loads(evidence_pack._catalog_json(rendered, None))
 
     assert [slide["headline"] for slide in catalog["slides"]] == [
-        "Most production inference sucks.",
-        "Wrong layer. Wrong metric.",
+        "Inference has more than one knob.",
+        "Inference is a stack of layers.",
         "Start with workload math.",
         "Prefill sets TTFT. Decode sets TPOT.",
         "Capacity is a token budget.",
         "FP8 frees memory for more requests.",
         "Three engine levers.",
         "Route to the cache.",
-        "HPA watches the wrong thing.",
+        "GPU utilization is a weak scaling signal.",
         "Scale on engine signals.",
         "Qwen3.8-27B on 8x RTX 4090.",
-        "8 concurrent: first token 7x slower.",
-        "Empty queue. Latency still rose.",
-        "Control on the SLO.",
-        "FP8 buys memory here, not speed.",
+        "At 8 concurrent, TTFT rose 7x.",
+        "Queue stayed at zero. TTFT still rose.",
+        "Scale against the SLO.",
+        "FP8: less memory, mixed throughput.",
         "Instrument every layer.",
     ]
-    banned = ("failed", "invalid", "limitation", "limited resources", "not yet", "smoke", "scale test", "not shown")
+    banned = ("sucks", "most teams", "failed", "invalid", "limitation", "limited resources", "not yet", "smoke", "scale test", "not shown")
     assert not any(word in f"{slide['headline']} {slide['pill']}".casefold() for slide in catalog["slides"] for word in banned)
     registered = set(catalog["published_sources"])
     published = [slide for slide in catalog["slides"] if slide["pill"].startswith("PUBLISHED")]

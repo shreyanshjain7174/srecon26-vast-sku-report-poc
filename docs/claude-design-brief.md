@@ -26,28 +26,28 @@ native diagrams, chart treatment, and transitions.
 - Required original comparisons: slide 6 (three pairs, each with a BF16 baseline: `1x` vs
   `0.5x` memory, `1x` vs `2x` KV, `~17 s` vs `~1.3 s` P99 TTFT); slide 8 (`500 ms` vs `80 ms`,
   to scale); slide 9 (`<~0.4 s` vs almost `<~0.3 s` TGI mean time/token); slide 12 (latency
-  multiples, throughput on its own row); slide 15 (BF16 vs FP8 at concurrency 8).
+  multiples, throughput on its own row); slide 15 (BF16 vs FP8 at concurrency 1 and 8).
 - Brief and prompt are instructions only; no PPTX/PDF is generated.
 
 ## Slides (match `artifact-catalog.json#/slides`)
 
 | # | Headline | Pill | `source_ids` | Content goal |
 | --- | --- | --- | --- | --- |
-| 1 | Most production inference sucks. | SYNTHESIS - talk thesis | - | Replica knob does not quiet queue/KV/token/SLO alarms: wrong layer |
-| 2 | Wrong layer. Wrong metric. | SYNTHESIS - talk thesis | - | Seven-layer stack; CPU % misses KV and engine pressure |
+| 1 | Inference has more than one knob. | SYNTHESIS - talk thesis | - | Replica count is one knob; queue, KV, tokens, and SLO sit below it |
+| 2 | Inference is a stack of layers. | SYNTHESIS - talk thesis | - | Seven-layer stack; CPU % misses KV and engine pressure |
 | 3 | Start with workload math. | SYNTHESIS - workload contract | - | RPS, tokens in/out, TTFT and TPOT SLOs start every number |
 | 4 | Prefill sets TTFT. Decode sets TPOT. | PATTERN - request anatomy | - | Queue, prefill, decode; `E2E ~= TTFT + (output tokens - 1) x TPOT` |
 | 5 | Capacity is a token budget. | SYNTHESIS - worked example | - | Capacity identities plus the `EXAMPLE` arithmetic |
 | 6 | FP8 frees memory for more requests. | PUBLISHED - vLLM docs and blog | `vllm-fp8`, `vllm-turboquant` | 0.5x memory, 2x KV, ~17 s -> ~1.3 s burst P99 TTFT, each with baseline |
 | 7 | Three engine levers. | PATTERN - serving techniques | `vllm-x-omni`, `vllm-x-v030` | Phase-aware scheduling, prefix reuse, speculative decoding |
 | 8 | Route to the cache. | PUBLISHED - arXiv preprint, 8xA100 | `cache-routing-preprint` | Avg TTFT ~500 ms random vs ~80 ms cache-aware |
-| 9 | HPA watches the wrong thing. | PUBLISHED - Google Cloud blog, L4 GPU | `google-gke-hpa` | GPU util overprovisions; queue 25 / batch 50 targets; `TGI mean time/token` |
+| 9 | GPU utilization is a weak scaling signal. | PUBLISHED - Google Cloud blog, L4 GPU | `google-gke-hpa` | GPU util overprovisions; queue 25 / batch 50 targets; `TGI mean time/token` |
 | 10 | Scale on engine signals. | PATTERN - metrics pipeline | - | vLLM metrics -> Prometheus -> adapter/KEDA -> HPA -> ready capacity |
 | 11 | Qwen3.8-27B on 8x RTX 4090. | MEASURED - 8x RTX 4090, one host | `tp8-bf16` | Setup card plus c1/c8 results table |
-| 12 | 8 concurrent: first token 7x slower. | MEASURED - 8x RTX 4090, one host | `tp8-bf16` | TTFT 7.3x, TPOT 1.8x; throughput 3.1x on its own row |
-| 13 | Empty queue. Latency still rose. | MEASURED - 8x RTX 4090, one host | `tp8-bf16` | Queue 0, KV ~2 %, p50 TTFT 3.9 s at 8 concurrent |
-| 14 | Control on the SLO. | PUBLISHED - KServe and llm-d docs | `kserve-wva`, `llmd-slo-aware` | Loop on queue, KV, saturation, P90 TTFT/TPOT vs SLO |
-| 15 | FP8 buys memory here, not speed. | MEASURED - 8x RTX 4090, one host | `tp8-precision` | Weights 6.69 -> 3.69 GiB/GPU; KV 499k -> 612k -> 875k tokens; c8 226 vs 204 tok/s |
+| 12 | At 8 concurrent, TTFT rose 7x. | MEASURED - 8x RTX 4090, one host | `tp8-bf16` | TTFT 7.3x, TPOT 1.8x; throughput 3.1x on its own row |
+| 13 | Queue stayed at zero. TTFT still rose. | MEASURED - 8x RTX 4090, one host | `tp8-bf16` | Queue 0, KV ~2 %, p50 TTFT 3.9 s at 8 concurrent |
+| 14 | Scale against the SLO. | PUBLISHED - KServe and llm-d docs | `kserve-wva`, `llmd-slo-aware` | Loop on queue, KV, saturation, P90 TTFT/TPOT vs SLO |
+| 15 | FP8: less memory, mixed throughput. | MEASURED - 8x RTX 4090, one host | `tp8-precision` | Weights 6.69 -> 3.69 GiB/GPU; KV 499k -> 612k -> 875k tokens; FP8 faster at c1 (72 vs 65 tok/s), slower at c8 (204 vs 226) |
 | 16 | Instrument every layer. | SYNTHESIS - bottom-up rule | - | One metric per layer; fix the lowest saturated layer first |
 
 ## Sources
