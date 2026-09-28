@@ -253,6 +253,9 @@ class ScriptedRunner:
             return "wait-ssh", ""
         if remote[:2] == ["install", "-d"]:
             return "mkdir", ""
+        if remote[0] == "curl":
+            assert remote[-1] == hpa.K3S_RELEASE_URL and remote[-2].endswith("/k3s")
+            return "fetch-k3s", ""
         if remote[0] == "sha256sum":
             return "verify-staged", self._staged_hashes(remote[1:])
         if remote[0] == "env" and remote[-3] == "bash":
@@ -311,13 +314,13 @@ class ScriptedRunner:
 
 HAPPY_CALLS = [
     "wait-ssh", "mkdir",
-    "up:remote_host_canary.sh", "up:k3s", "up:nvidia-runtime.toml", "up:device-plugin.yaml",
+    "up:remote_host_canary.sh", "fetch-k3s", "up:nvidia-runtime.toml", "up:device-plugin.yaml",
     "verify-staged", "probe", "runtime-dropin", "install",
     "gpu-smi", "gpu-containerd", "gpu-listeners", "gpu-apply", "gpu-rollout", "gpu-nodes",
     "up:manifests", "deploy", "scale-deployment", "scale-hpa", "collect", "fetch", "cleanup",
 ]
 HAPPY_STEPS = [
-    "wait-ssh", "mkdir", "stage-script", "stage-k3s", "stage-runtime", "stage-device-plugin",
+    "wait-ssh", "mkdir", "stage-script", "fetch-k3s", "stage-runtime", "stage-device-plugin",
     "verify-staged", "probe", "runtime-dropin", "install", "gpu-check", "stage-manifests",
     "deploy", "scale-observe", "collect", "fetch-evidence", "cleanup",
 ]
@@ -502,6 +505,20 @@ def test_vm_provider_create_uses_template_hash_once_and_is_ambiguous_on_error() 
         assert [name for name, _ in failing.calls] == ["create_instance"]
 
 
+def test_k3s_fetch_failure_falls_back_to_signed_upload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    provider = FakeVmProvider()
+    plan_path, confirm = _plan(monkeypatch, tmp_path, capsys, provider)
+    monkeypatch.setattr(hpa, "RUN_COMMAND_GUARD_FACTORY", lambda config, nonce, script_hash: FakeGuard(provider))
+    runner = ScriptedRunner(fail="fetch-k3s")
+    monkeypatch.setattr(hpa, "SUBPROCESS_RUNNER", runner)
+
+    assert hpa.main(_execute_args(plan_path, confirm, _identity(tmp_path), tmp_path)) == 0
+    assert runner.calls[3:5] == ["fetch-k3s", "up:k3s"]
+    assert "verify-staged" in runner.calls
+
+
 def test_execute_happy_path_exact_remote_order_destroy_and_absence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -535,7 +552,7 @@ def test_execute_happy_path_exact_remote_order_destroy_and_absence(
     assert execution["gpu_check"]["non_ssh_wildcard_listeners"] == ["*:10250"]
     assert execution["scale_observation"]["reached_two_ready_replicas"] is True
     assert (out / "server-evidence" / "collection-status.json").exists()
-    for step in ("deploy", "gpu-check", "install", "cleanup", "stage-k3s"):
+    for step in ("deploy", "gpu-check", "install", "cleanup", "fetch-k3s"):
         assert (out / f"{step}.log").exists()
     deploy_env = runner.remote_env["deploy"]
     assert f"CANARY_VLLM_IMAGE=docker.io/vllm/vllm-openai@{hpa.VLLM_IMAGE_DIGEST}" in deploy_env

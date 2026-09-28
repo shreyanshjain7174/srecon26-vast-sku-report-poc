@@ -84,6 +84,7 @@ DEFAULT_KNOWN_HOSTS = ROOT / "artifacts" / "live-known-hosts"
 DEFAULT_GUARD_WORKER = ROOT / "guard" / "guard_worker.py"
 CANARY_SCRIPT = ROOT / "scripts" / "remote_host_canary.sh"
 K3S_BINARY = ROOT / "artifacts" / "tools" / "k3s-v1.36.4+k3s1"
+K3S_RELEASE_URL = "https://github.com/k3s-io/k3s/releases/download/v1.36.4%2Bk3s1/k3s"
 NVIDIA_RUNTIME_TEMPLATE = ROOT / "infra" / "k3s" / "nvidia-runtime.toml"
 MANIFEST_DIR = ROOT / "infra" / "k3s"
 REQUIRED_MANIFESTS = (
@@ -766,7 +767,17 @@ def execute_plan(args: argparse.Namespace) -> dict[str, object]:
             stage = "stage"
             session.run("mkdir", ["install", "-d", "-m", "0700", root], timeout=SMALL_COMMAND_TIMEOUT_SECONDS)
             session.upload("stage-script", files["canary_script"], script, timeout=timeouts["stage"])
-            session.upload("stage-k3s", files["k3s_binary"], f"{root}/k3s", timeout=timeouts["stage"])
+            # Fetch the ~79 MB k3s release on the VM itself; a long upload from the
+            # controller over a home uplink proved flaky.  verify-staged below still
+            # enforces the signed sha256, so the source does not change trust.
+            try:
+                session.run(
+                    "fetch-k3s",
+                    ["curl", "-fsSL", "--retry", "3", "--max-time", str(timeouts["stage"]), "-o", f"{root}/k3s", K3S_RELEASE_URL],
+                    timeout=timeouts["stage"] + 30,
+                )
+            except SingleVmHpaError:
+                session.upload("stage-k3s", files["k3s_binary"], f"{root}/k3s", timeout=timeouts["stage"])
             session.upload("stage-runtime", files["nvidia_runtime"], f"{root}/nvidia-runtime.toml", timeout=timeouts["stage"])
             session.upload("stage-device-plugin", files["device_plugin"], f"{root}/device-plugin.yaml", timeout=timeouts["stage"])
             staged = session.run("verify-staged", ["sha256sum", *staged_sha], timeout=SMALL_COMMAND_TIMEOUT_SECONDS)
