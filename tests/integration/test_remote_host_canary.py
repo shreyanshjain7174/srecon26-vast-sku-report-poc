@@ -122,6 +122,9 @@ def test_all_waits_are_bounded_and_services_stay_cluster_or_local_only() -> None
     assert "--timeout=\"${wait_seconds}s\"" in script
     assert "--address 127.0.0.1" in script
     assert "a non-SSH wildcard listener is present; refusing deploy" in script
+    # Only listeners absent from the pre-install probe baseline are refused.
+    assert 'capture "$out/probe-public-listeners.txt" ss -H -lntu' in script
+    assert "FILENAME == ARGV[1] { seen[$1 \" \" $5] = 1; next }" in script
     assert "ufw allow" not in script
     assert "iptables -A" not in script
 
