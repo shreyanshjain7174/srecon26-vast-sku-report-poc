@@ -622,3 +622,27 @@ def test_offer_drift_or_non_empty_inventory_fail_before_create(
     monkeypatch.setattr(hpa, "RUN_COMMAND_GUARD_FACTORY", lambda config, nonce, script_hash: FakeGuard(busy))
     assert hpa.main(_execute_args(plan_path, confirm, identity, tmp_path)) == 2
     assert busy.create_kwargs == [] and busy.arm_calls == 0 and busy.destroy_calls == 0
+
+
+class AttachClient(FakeSdkClient):
+    def __init__(self, *, account_keys: list[dict[str, object]], attach_response: object) -> None:
+        super().__init__()
+        self.account_keys, self.attach_response = account_keys, attach_response
+
+    def show_ssh_keys(self) -> object:
+        self.calls.append(("show_ssh_keys", {}))
+        return json.dumps(self.account_keys)
+
+    def attach_ssh(self, **kwargs: object) -> object:
+        self.calls.append(("attach_ssh", kwargs))
+        return self.attach_response
+
+
+def test_attach_skips_keys_already_registered_on_the_account() -> None:
+    client = AttachClient(account_keys=[{"id": 1, "public_key": PUBLIC_KEY.rsplit(" ", 1)[0] + " other@host"}], attach_response={"success": False})
+    VmSdkProvider(client).attach_ssh_key(9001, LABEL, PUBLIC_KEY)  # type: ignore[arg-type]
+    assert "attach_ssh" not in [name for name, _ in client.calls]
+
+    client = AttachClient(account_keys=[], attach_response={"success": False})
+    with pytest.raises(VastSdkError, match="rejected"):
+        VmSdkProvider(client).attach_ssh_key(9001, LABEL, PUBLIC_KEY)  # type: ignore[arg-type]

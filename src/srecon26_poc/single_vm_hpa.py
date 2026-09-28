@@ -285,6 +285,9 @@ class VmSdkProvider:
         current = self._base.get_instance(instance_id)
         if current.label != expected_label:
             raise VastSdkError("instance label changed; refusing SSH key attach")
+        if self._account_has_key(public_key):
+            # Vast injects account-level keys at create; attach then reports success=false.
+            return
         try:
             response = self._client.attach_ssh(instance_id=instance_id, ssh_key=public_key.strip())
         except Exception as error:
@@ -298,6 +301,20 @@ class VmSdkProvider:
 
     def reconcile_label(self, label: str) -> SdkInstance | None:
         return self._base.reconcile_label(label)
+
+    def _account_has_key(self, public_key: str) -> bool:
+        wanted = public_key.strip().split()[:2]
+        try:
+            payload = normalize_payload(self._client.show_ssh_keys())
+        except Exception:
+            return False
+        records = payload if isinstance(payload, list) else (payload.get("keys") or []) if isinstance(payload, Mapping) else []
+        for record in records:
+            if isinstance(record, Mapping):
+                key = record.get("public_key") or record.get("key") or record.get("ssh_key")
+                if isinstance(key, str) and key.strip().split()[:2] == wanted:
+                    return True
+        return False
 
     def get_instance(self, instance_id: int) -> SdkInstance:
         return self._base.get_instance(instance_id)
