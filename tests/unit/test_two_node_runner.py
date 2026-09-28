@@ -132,6 +132,19 @@ def test_heartbeat_cadence_is_bounded_by_guard_timer_and_wired_to_ssh(tmp_path: 
     assert workload_config(args).heartbeat_seconds == 90
 
 
+def test_paid_runner_deadline_is_bounded(tmp_path: Path) -> None:
+    assert parse_args(base_arguments(tmp_path)).deadline_minutes == 42
+
+    args = parse_args([*base_arguments(tmp_path), "--deadline-minutes", "35"])
+    validate_configuration(args)
+    assert args.deadline_minutes == 35
+
+    for minutes in (19, 43):
+        args = parse_args([*base_arguments(tmp_path), "--deadline-minutes", str(minutes)])
+        with pytest.raises(SystemExit, match="deadline minutes"):
+            validate_configuration(args)
+
+
 class RecordingHeartbeatGuard:
     def __init__(self, *, barrier: Barrier | None = None, fail_once: bool = False) -> None:
         self.barrier = barrier

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 import stat
 import subprocess
@@ -44,6 +45,8 @@ Clock = Callable[[], float]
 Sleeper = Callable[[float], None]
 _PENDING_EXECUTION_STATES = frozenset({"Creating", "Pending", "Running"})
 _POLL_INTERVAL_SECONDS = 1.0
+# Synchronous run-command deletion routinely exceeds the per-call CLI timeout.
+DELETE_TIMEOUT_SECONDS = 120
 
 
 def _run(arguments: Sequence[str], request: str, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -88,6 +91,7 @@ class AzureRunCommandGuardConfig:
     az_path: Path
     timeout_seconds: int = 20
     heartbeat_timeout_seconds: int = 120
+    cli_timeout_seconds: int = 20
 
     def validated(self) -> "AzureRunCommandGuardConfig":
         try:
@@ -100,6 +104,8 @@ class AzureRunCommandGuardConfig:
             raise AzureRunCommandTransportError("Azure guard VM name is invalid")
         if isinstance(self.timeout_seconds, bool) or not isinstance(self.timeout_seconds, int) or not 1 <= self.timeout_seconds <= 300:
             raise AzureRunCommandTransportError("Azure Run Command timeout must be 1-300 seconds")
+        if isinstance(self.cli_timeout_seconds, bool) or not isinstance(self.cli_timeout_seconds, int) or not 1 <= self.cli_timeout_seconds <= 60:
+            raise AzureRunCommandTransportError("Azure CLI timeout must be 1-60 seconds")
         if (
             isinstance(self.heartbeat_timeout_seconds, bool)
             or not isinstance(self.heartbeat_timeout_seconds, int)
@@ -113,6 +119,7 @@ class AzureRunCommandGuardConfig:
             az_path=_executable(self.az_path),
             timeout_seconds=self.timeout_seconds,
             heartbeat_timeout_seconds=self.heartbeat_timeout_seconds,
+            cli_timeout_seconds=self.cli_timeout_seconds,
         )
 
 
@@ -241,9 +248,9 @@ class AzureRunCommandGuardTransport(GuardTransport):
             f"/providers/Microsoft.Compute/virtualMachines/{self.config.vm_name}"
         )
 
-    def _invoke(self, arguments: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    def _invoke(self, arguments: Sequence[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
         try:
-            completed = self.runner(arguments, "", self.config.timeout_seconds)
+            completed = self.runner(arguments, "", self.config.cli_timeout_seconds if timeout is None else timeout)
         except (OSError, subprocess.SubprocessError) as error:
             raise AzureRunCommandTransportError("Azure Run Command request failed safely") from error
         if completed.returncode != 0:
@@ -261,7 +268,13 @@ class AzureRunCommandGuardTransport(GuardTransport):
 
         deadline = self.clock() + self.config.timeout_seconds
         while True:
-            output = _instance_view_output(self._invoke(self.instance_view_command(name)).stdout)
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                raise AzureRunCommandTransportError("Azure Run Command did not complete before the pinned timeout")
+            output = _instance_view_output(self._invoke(
+                self.instance_view_command(name),
+                timeout=min(self.config.cli_timeout_seconds, max(1, math.ceil(remaining))),
+            ).stdout)
             if output is not None:
                 return output
             remaining = deadline - self.clock()
@@ -315,7 +328,7 @@ class AzureRunCommandGuardTransport(GuardTransport):
             failure = AzureRunCommandTransportError("Azure guard attested a different managed VM")
 
         try:
-            self._invoke(self.delete_command(name))
+            self._invoke(self.delete_command(name), timeout=max(self.config.cli_timeout_seconds, DELETE_TIMEOUT_SECONDS))
         except AzureRunCommandTransportError as error:
             # Do not return a receipt when Azure has not confirmed removal of
             # the per-RPC resource.  A failed RPC is already fail-closed; this

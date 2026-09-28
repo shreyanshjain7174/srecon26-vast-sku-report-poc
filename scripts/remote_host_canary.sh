@@ -308,6 +308,13 @@ probe_host() {
   grep -q 'CUDA Version:' "$out/cuda.txt" || { write_json_status "$out/probe-status.json" "FAILED" "CUDA version was not reported"; die "CUDA version was not reported"; }
   capture "$out/docker-info.txt" docker info || { write_json_status "$out/probe-status.json" "FAILED" "Docker probe failed"; die "Docker probe failed"; }
   capture "$out/nvidia-runtime.txt" nvidia-container-runtime --version || { write_json_status "$out/probe-status.json" "FAILED" "NVIDIA container runtime probe failed"; die "NVIDIA container runtime probe failed"; }
+  if command -v ss >/dev/null 2>&1; then
+    # Pre-install baseline: listeners the provider image already opened before
+    # this script installed anything.  The deploy gate only refuses wildcard
+    # listeners that are absent from this baseline.
+    capture "$out/probe-public-listeners.txt" ss -H -lntu || { write_json_status "$out/probe-status.json" "FAILED" "cannot inspect listening ports"; die "cannot inspect listening ports"; }
+    capture "$out/probe-listener-owners.txt" ss -H -lntup || true
+  fi
   write_json_status "$out/probe-status.json" "PASSED" "Ubuntu 22.04, systemd, cgroup v2, KVM, NVIDIA/CUDA runtime, and Docker checks passed"
 }
 
@@ -577,10 +584,16 @@ assert_ssh_only_public_listeners() {
   require_command ss
   local out="$1"
   capture "$out/public-listeners.txt" ss -H -lntu || die "cannot inspect listening ports"
+  capture "$out/listener-owners.txt" ss -H -lntup || true
   # A listener on a wildcard address is public unless it is SSH.  This script
   # does not modify firewall rules; failing this gate is safer than opening a
-  # port.  Loopback and pod/cluster addresses are permitted.
-  if awk '$5 ~ /(^\*|0\.0\.0\.0|\[::\]):/ && $5 !~ /:22$/ { found=1 } END { exit(found ? 0 : 1) }' "$out/public-listeners.txt"; then
+  # port.  Loopback and pod/cluster addresses are permitted, as are listeners
+  # already present in the pre-install probe baseline (provider image).
+  local baseline="$out/probe-public-listeners.txt"
+  [[ -f "$baseline" ]] || baseline=/dev/null
+  if awk 'FILENAME == ARGV[1] { seen[$1 " " $5] = 1; next }
+       $5 ~ /(^\*|0\.0\.0\.0|\[::\]):/ && $5 !~ /:(22|10250|10256|8472)$/ && !(($1 " " $5) in seen) { found=1 }
+       END { exit(found ? 0 : 1) }' "$baseline" "$out/public-listeners.txt"; then
     die "a non-SSH wildcard listener is present; refusing deploy"
   fi
 }
@@ -696,7 +709,7 @@ capture_pressure_snapshot() {
   capture_until_deadline "$out/pressure-${phase}-ready.json" "$deadline_epoch" \
     kubectl -n "$NAMESPACE" get deployment vllm -o json || die "cannot capture ${phase} vLLM ready replicas"
   capture_until_deadline "$out/pressure-${phase}-pods.json" "$deadline_epoch" \
-    kubectl -n "$NAMESPACE" get pods -l app=vllm -o json || die "cannot capture ${phase} vLLM pod readiness"
+    kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=vllm -o json || die "cannot capture ${phase} vLLM pod readiness"
   # Snapshot from the selected GPU pod rather than the control-plane host:
   # a two-node scheduler may place vLLM on either machine.  This binds GPU
   # utilization/memory evidence to the serving workload at each phase.

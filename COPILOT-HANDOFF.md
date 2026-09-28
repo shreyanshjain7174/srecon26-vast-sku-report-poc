@@ -309,6 +309,9 @@ Safe now:
 - A real Vast RTX 4090 served 36 measured vLLM completions for Qwen2.5-1.5B.
 - On that one-GPU standalone run, p50 TTFT increased 3.34x from concurrency 4 to 32 while p50 TPOT increased 1.06x.
 - Exact teardown, invoice binding, and three-read absence evidence exist for the standalone GPU run.
+- Qwen3.8-27B TP8 BF16 on one 8x RTX 4090 host (run `single-host-multigpu-20260927T132309Z-3a1e631f`): c1 62 tok/s, p50 TTFT 0.53 s, p50 TPOT 14 ms; c8 193 tok/s, p50 TTFT 3.89 s, p50 TPOT 26 ms; queue 0 and KV peak ~2 % throughout. Deck slides 11-13 (`MEASURED`) use it via `artifact-catalog.json#/measured_results`.
+
+Deck v2 review (2026-09-28): catalog and `CLAUDE-DESIGN-PROMPT.md` now follow the v2 16-slide structure; per-slide fixes are listed under "Review notes from deck v2" in the prompt. Slide 15 uses `tp8-precision` (runs `single-host-multigpu-20260928T074427Z-4050fa59` fp8/fp8-kv and `...T083252Z-04cb07e6` bf16, machine 10216): weights 6.69 -> 3.69 GiB/GPU, KV 499k -> 612k (FP8) -> 875k tokens (FP8 KV); c1 TPOT 14.1 -> 11.9 ms; c8 226 vs 204 tok/s and c32 316 vs 272 tok/s in BF16's favour.
 
 Not safe yet:
 
