@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Event, Thread
+from time import monotonic
 from typing import Callable, Protocol
 
 from .guard import Guard, validate_attestation
@@ -20,6 +21,8 @@ from .vast_sdk_adapter import SdkInstance, SdkLaunchContract, SdkOffer, VastSdkE
 ABSENCE_READS = 3
 ABSENCE_INTERVAL_SECONDS = 5.0
 CREATE_HEARTBEAT_INTERVAL_SECONDS = 45.0
+# Half the guard's 600 s heartbeat timeout: transient RPC failures inside it are retried.
+HEARTBEAT_FAILURE_BUDGET_SECONDS = 300.0
 
 _OFFER_PLAN_FIELDS = (
     ("offer_id", "offer_id"),
@@ -166,12 +169,15 @@ class SingleHostLease:
         beat_thread: Thread | None = None
         if heartbeat is not None:
             def keep_alive() -> None:
+                last_success = monotonic()
                 while not beat_stop.wait(CREATE_HEARTBEAT_INTERVAL_SECONDS):
                     try:
                         heartbeat()
+                        last_success = monotonic()
                     except BaseException as caught:
-                        beat_errors.append(caught)
-                        return
+                        if monotonic() - last_success > HEARTBEAT_FAILURE_BUDGET_SECONDS:
+                            beat_errors.append(caught)
+                            return
 
             beat_thread = Thread(target=keep_alive, name="multigpu-create-heartbeat", daemon=True)
             beat_thread.start()

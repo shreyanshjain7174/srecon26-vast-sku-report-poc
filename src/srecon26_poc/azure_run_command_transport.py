@@ -45,6 +45,8 @@ Clock = Callable[[], float]
 Sleeper = Callable[[float], None]
 _PENDING_EXECUTION_STATES = frozenset({"Creating", "Pending", "Running"})
 _POLL_INTERVAL_SECONDS = 1.0
+# Synchronous run-command deletion routinely exceeds the per-call CLI timeout.
+DELETE_TIMEOUT_SECONDS = 120
 
 
 def _run(arguments: Sequence[str], request: str, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -326,7 +328,7 @@ class AzureRunCommandGuardTransport(GuardTransport):
             failure = AzureRunCommandTransportError("Azure guard attested a different managed VM")
 
         try:
-            self._invoke(self.delete_command(name))
+            self._invoke(self.delete_command(name), timeout=max(self.config.cli_timeout_seconds, DELETE_TIMEOUT_SECONDS))
         except AzureRunCommandTransportError as error:
             # Do not return a receipt when Azure has not confirmed removal of
             # the per-RPC resource.  A failed RPC is already fail-closed; this

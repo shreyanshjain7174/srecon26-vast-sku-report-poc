@@ -42,7 +42,7 @@ from srecon26_poc.multigpu_contracts import (
     VLLM_IMAGE,
     MultiGpuPlan,
 )
-from srecon26_poc.single_host_multigpu import SingleHostError, SingleHostLease
+from srecon26_poc.single_host_multigpu import HEARTBEAT_FAILURE_BUDGET_SECONDS, SingleHostError, SingleHostLease
 from srecon26_poc.types import RunIdentity
 from srecon26_poc.vast_sdk_adapter import (
     SdkInstance,
@@ -742,12 +742,15 @@ def _run_with_heartbeats(action: Callable[[], ResultT], heartbeat: Callable[[], 
     failures: list[BaseException] = []
 
     def pump() -> None:
+        last_success = time.monotonic()
         while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
             try:
                 heartbeat()
+                last_success = time.monotonic()
             except BaseException as error:
-                failures.append(error)
-                return
+                if time.monotonic() - last_success > HEARTBEAT_FAILURE_BUDGET_SECONDS:
+                    failures.append(error)
+                    return
 
     heartbeat()
     thread = threading.Thread(target=pump, name="multigpu-guard-heartbeat", daemon=True)

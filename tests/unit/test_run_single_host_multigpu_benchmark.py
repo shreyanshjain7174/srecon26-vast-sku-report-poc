@@ -646,3 +646,21 @@ def test_execute_runs_one_remote_benchmark_per_precision_arm(
     assert exit_code == 0
     evidence = json.loads((tmp_path / "single-host-multigpu-execution.json").read_text())
     assert evidence["arms"] == {"bf16": "completed", "fp8": "failed" if failing_arm == "fp8" else "completed"}
+
+
+def test_heartbeat_pump_tolerates_transient_failures_within_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bench, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    calls = {"n": 0}
+
+    def flaky() -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("transient Azure Run Command failure")
+
+    assert bench._run_with_heartbeats(lambda: time.sleep(0.1) or "done", flaky) == "done"
+    assert calls["n"] >= 4
+
+    monkeypatch.setattr(bench, "HEARTBEAT_FAILURE_BUDGET_SECONDS", -1.0)
+    calls["n"] = 0
+    with pytest.raises(bench.BenchmarkOrchestratorError, match="heartbeat failed"):
+        bench._run_with_heartbeats(lambda: time.sleep(0.1), flaky)

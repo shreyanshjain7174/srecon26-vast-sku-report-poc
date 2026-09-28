@@ -47,7 +47,7 @@ from srecon26_poc.azure_run_command_transport import AzureRunCommandGuardConfig,
 from srecon26_poc.guard_client import GuardClientError
 from srecon26_poc.live_dispatch import FROZEN_MODEL_ID, FROZEN_MODEL_REVISION, VLLM_IMAGE_DIGEST
 from srecon26_poc.live_factory import SshRemoteWorkload
-from srecon26_poc.single_host_multigpu import SingleHostError
+from srecon26_poc.single_host_multigpu import HEARTBEAT_FAILURE_BUDGET_SECONDS, SingleHostError
 from srecon26_poc.single_vm_hpa import (
     K3S_AMD64_SHA256,
     MAX_DEADLINE_MINUTES,
@@ -430,12 +430,15 @@ def _run_with_heartbeats(action: Callable[[], ResultT], heartbeat: Callable[[], 
     failures: list[BaseException] = []
 
     def pump() -> None:
+        last_success = time.monotonic()
         while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
             try:
                 heartbeat()
+                last_success = time.monotonic()
             except BaseException as error:
-                failures.append(error)
-                return
+                if time.monotonic() - last_success > HEARTBEAT_FAILURE_BUDGET_SECONDS:
+                    failures.append(error)
+                    return
 
     heartbeat()
     thread = threading.Thread(target=pump, name="single-vm-hpa-heartbeat", daemon=True)

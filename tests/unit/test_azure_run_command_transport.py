@@ -88,7 +88,8 @@ def test_uses_fixed_run_command_and_base64_stdin_gateway() -> None:
     assert response["status"] == "ARMED"
     create, status, delete = calls
     assert create[1] == status[1] == delete[1] == ""
-    assert create[2] == status[2] == delete[2] == 20
+    assert create[2] == status[2] == 20
+    assert delete[2] == 120
     assert create[0][1:4] == ["vm", "run-command", "create"]
     assert "--command-id" not in create[0]
     assert "RunShellScript" not in create[0]
@@ -169,9 +170,9 @@ def test_long_guard_rpc_clamps_cli_polls_and_still_deletes() -> None:
     )
 
     assert transport.call("arm", {**_arm(), "heartbeat_timeout_seconds": 600})["status"] == "ARMED"
-    assert calls[0] == ("create", 30) and calls[-1] == ("delete", 30)
+    assert calls[0] == ("create", 30) and calls[-1] == ("delete", 120)
     assert len([call for call in calls if call[0] == "poll"]) >= 4
-    assert all(timeout <= 30 for _, timeout in calls)
+    assert all(timeout <= 30 for name, timeout in calls if name != "delete")
 
 
 @pytest.mark.parametrize(
