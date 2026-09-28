@@ -1,8 +1,36 @@
-# Final bounded Vast canary result
+# Live Vast results
 
-Run `gpu-smoke-distinct-20260923101734` is the single final paid distinct-machine attempt. It finished `FAILED_SAFE`; it is not GPU, vLLM, latency, or autoscaling evidence.
+## Qwen3.8-27B on 8x RTX 4090 (tensor parallel 8)
 
-## Verified lifecycle facts
+### Setup
+
+| | |
+| --- | --- |
+| Hardware | 8x NVIDIA RTX 4090 (24 GB), one host, PCIe interconnect (no NVLink) |
+| Model | Qwen/Qwen3.8-27B, BF16 |
+| Engine | vLLM, tensor parallel 8, `max_model_len` 4096, prefix caching on |
+| Workload | 1024 input tokens, 256 output tokens per request; fixed prompt; concurrency 1 and 8 |
+
+### Results
+
+| Concurrency | Output tok/s | TTFT p50 / p99 | TPOT p50 / p99 | E2E p50 |
+| --- | --- | --- | --- | --- |
+| 1 | 62.1 | 0.53 / 0.55 s | 14.2 / 14.2 ms | 4.14 s |
+| 8 | 193.1 | 3.89 / 4.29 s | 26.1 / 39.8 ms | 10.61 s |
+
+- Going from concurrency 1 to 8: throughput rises 3.1x, p50 TTFT 7.3x, and p50 TPOT 1.8x.
+  TTFT grows far faster than TPOT, so the extra load mostly lands as queueing and prefill time.
+- Each GPU holds about 21.2 GiB and runs at 100 % utilisation under load.
+- Cold start to first ready request: 475 s.
+
+Run `single-host-multigpu-20260927T132309Z-3a1e631f`; raw artifacts and `SHA256SUMS` are in
+`artifacts/live-runs/single-host-multigpu-20260927T132309Z-3a1e631f/remote-artifacts/`.
+
+## Earlier bounded canary (2026-09-23)
+
+Run `gpu-smoke-distinct-20260923101734` was the earlier final paid distinct-machine attempt. It finished `FAILED_SAFE`; it is not GPU, vLLM, latency, or autoscaling evidence.
+
+### Verified lifecycle facts
 
 - Frozen offer `52180811`: provider contract `RTX 4000Ada`, 20,475 MiB, compute capability 8.9, VM enabled, machine `147086`.
 - Created exact instance `52212017` with nonce-bound label `srecon26-gpu-smoke--nonce-distinct20260923095500`.
@@ -13,7 +41,7 @@ Run `gpu-smoke-distinct-20260923101734` is the single final paid distinct-machin
 - Final provider inventory was empty.
 - Authoritative invoice charge: `$0.025` against a `$0.25` reservation. Remaining project-ledger headroom: `$3.971`.
 
-## Integrity receipts
+### Integrity receipts
 
 - Guard-acknowledged pre-anchor root: `e41a6683538ef846f7bb579acece9751ae6339c8e2a3ec65057ccaa3b5ec5f18`.
 - Final sealed bundle root: `d8b36066acc2d616e315730d411923b41769b0845192f4138b1cd20b299f4803`.
@@ -21,11 +49,11 @@ Run `gpu-smoke-distinct-20260923101734` is the single final paid distinct-machin
 - Invoice evidence SHA-256: `21a633806656e078cf2bea9835b11390e54843b3c5c469c7f74199d606028ffb`.
 - Reconciliation absence evidence SHA-256: `1dea1ce5db8c947d85a67f9839f33f8e118f1bd7c0b20861e61c8298f4c27dc0`.
 
-## Honest presentation boundary
+### Honest presentation boundary
 
 This run proves budget enforcement, pre-armed independent teardown, exact identity binding, conservative report gating, exact teardown, provider absence verification, invoice reconciliation, and sealed evidence. It does not prove direct GPU identity, CUDA, KVM capability, vLLM behavior, TTFT, or any CPU-only versus signal-aware A/B result.
 
-## Postmortem hardening (not live-validated)
+### Postmortem hardening (not live-validated)
 
 - Future creates now require Vast's `--direct` launch flag.
 - SSH resolution prefers the exact instance record's `public_ipaddr` only when paired with its explicit `ports["22/tcp"][0].HostPort` mapping.

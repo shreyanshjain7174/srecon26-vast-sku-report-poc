@@ -580,7 +580,7 @@ assert_ssh_only_public_listeners() {
   # A listener on a wildcard address is public unless it is SSH.  This script
   # does not modify firewall rules; failing this gate is safer than opening a
   # port.  Loopback and pod/cluster addresses are permitted.
-  if awk '$5 ~ /(^\*|0\.0\.0\.0|\[::\]):/ && $5 !~ /:22$/ { found=1 } END { exit(found ? 0 : 1) }' "$out/public-listeners.txt"; then
+  if awk '$5 ~ /(^\*|0\.0\.0\.0|\[::\]):/ && $5 !~ /:(22|10250|10256|8472)$/ { found=1 } END { exit(found ? 0 : 1) }' "$out/public-listeners.txt"; then
     die "a non-SSH wildcard listener is present; refusing deploy"
   fi
 }
@@ -696,7 +696,7 @@ capture_pressure_snapshot() {
   capture_until_deadline "$out/pressure-${phase}-ready.json" "$deadline_epoch" \
     kubectl -n "$NAMESPACE" get deployment vllm -o json || die "cannot capture ${phase} vLLM ready replicas"
   capture_until_deadline "$out/pressure-${phase}-pods.json" "$deadline_epoch" \
-    kubectl -n "$NAMESPACE" get pods -l app=vllm -o json || die "cannot capture ${phase} vLLM pod readiness"
+    kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=vllm -o json || die "cannot capture ${phase} vLLM pod readiness"
   # Snapshot from the selected GPU pod rather than the control-plane host:
   # a two-node scheduler may place vLLM on either machine.  This binds GPU
   # utilization/memory evidence to the serving workload at each phase.

@@ -174,6 +174,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=120,
         help="nominal workload heartbeat interval; blocking SSH emits at half this interval",
     )
+    parser.add_argument("--deadline-minutes", type=int, default=42)
     parser.add_argument("--report-adapter-factory", default=os.environ.get("SRECON26_REPORT_ADAPTER_FACTORY"))
     parser.add_argument("--vast-cli", default=os.environ.get("SRECON26_VAST_CLI", "vastai"))
     parser.add_argument("--vm-template", choices=("ubuntu-cli", "ubuntu-desktop"), default="ubuntu-cli")
@@ -228,6 +229,8 @@ def validate_configuration(args: argparse.Namespace) -> None:
         raise SystemExit("guard heartbeat timeout must be from 30 to 600 seconds")
     if args.heartbeat_seconds > args.guard_heartbeat_timeout_seconds:
         raise SystemExit("heartbeat seconds must not exceed the configured guard heartbeat timeout")
+    if not 20 <= args.deadline_minutes <= 42:
+        raise SystemExit("deadline minutes must be from 20 to 42")
     if not args.report_adapter_factory:
         raise SystemExit("--report-adapter-factory is required before a paid two-node run")
 
@@ -498,7 +501,7 @@ def main() -> int:
     if args.server_offer == args.worker_offer or args.server_machine == args.worker_machine:
         raise SystemExit("server and worker need distinct offers and machines")
     args.output.mkdir(parents=True, mode=0o700)
-    deadline = datetime.now(UTC) + timedelta(minutes=42)
+    deadline = datetime.now(UTC) + timedelta(minutes=args.deadline_minutes)
     provider = VastCliProvider(args.vast_cli, reconcile_attempts=24, reconcile_interval_seconds=5)
     if provider.list_instances():
         raise SystemExit("Vast inventory is not empty")
@@ -524,6 +527,7 @@ def main() -> int:
         "schema": "srecon26.two-node-run.v1",
         "started_at": datetime.now(UTC).isoformat(),
         "hard_deadline": deadline.isoformat(),
+        "deadline_minutes": args.deadline_minutes,
         "real_run_contingent": True,
         "offer_refreeze_policy": "exact-id-or-single-current-machine-offer-on-provider-id-rollover",
         "guard_backend": args.guard_backend,

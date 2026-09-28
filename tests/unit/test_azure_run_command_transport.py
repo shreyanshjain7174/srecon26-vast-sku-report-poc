@@ -60,6 +60,8 @@ def _transport(runner, **kwargs) -> AzureRunCommandGuardTransport:
         {"az_path": Path("/missing/az")},
         {"timeout_seconds": 0},
         {"timeout_seconds": 301},
+        {"cli_timeout_seconds": 0},
+        {"cli_timeout_seconds": 61},
     ],
 )
 def test_config_rejects_untrusted_azure_endpoint_values(updates: dict[str, object]) -> None:
@@ -141,6 +143,35 @@ def test_polls_pending_instance_view_before_validating_and_deleting() -> None:
     assert response["status"] == "ARMED"
     assert sleeps == [1.0]
     assert [call[3] for call in calls] == ["create", "get", "get", "delete"]
+
+
+def test_long_guard_rpc_clamps_cli_polls_and_still_deletes() -> None:
+    clock_value = [0.0]
+    calls: list[tuple[str, int]] = []
+
+    def runner(arguments, stdin: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        action = "create" if "create" in arguments else "delete" if "delete" in arguments else "poll"
+        calls.append((action, timeout))
+        if action == "poll":
+            clock_value[0] += timeout
+            output = json.dumps({**_receipt(), "heartbeat_timeout_seconds": 600}) + "\n" if clock_value[0] >= 120 else ""
+            return subprocess.CompletedProcess(arguments, 0, stdout=_view(output, state="Succeeded"), stderr="")
+        return subprocess.CompletedProcess(arguments, 0, stdout="{}", stderr="")
+
+    config = AzureRunCommandGuardConfig(
+        subscription_id="11111111-1111-1111-1111-111111111111",
+        resource_group="guard-rg", vm_name="guard-vm", az_path=Path(sys.executable),
+        timeout_seconds=150, cli_timeout_seconds=30, heartbeat_timeout_seconds=600,
+    )
+    transport = AzureRunCommandGuardTransport(
+        config, runner=runner, clock=lambda: clock_value[0],
+        sleeper=lambda seconds: clock_value.__setitem__(0, clock_value[0] + seconds),
+    )
+
+    assert transport.call("arm", {**_arm(), "heartbeat_timeout_seconds": 600})["status"] == "ARMED"
+    assert calls[0] == ("create", 30) and calls[-1] == ("delete", 30)
+    assert len([call for call in calls if call[0] == "poll"]) >= 4
+    assert all(timeout <= 30 for _, timeout in calls)
 
 
 @pytest.mark.parametrize(
