@@ -256,6 +256,8 @@ class ScriptedRunner:
         if remote[0] == "curl":
             assert remote[-1] == hpa.K3S_RELEASE_URL and remote[-2].endswith("/k3s")
             return "fetch-k3s", ""
+        if remote[:2] == ["chmod", "0755"]:
+            return "chmod-k3s", ""
         if remote[0] == "sha256sum":
             return "verify-staged", self._staged_hashes(remote[1:])
         if remote[0] == "env" and remote[-3] == "bash":
@@ -314,13 +316,13 @@ class ScriptedRunner:
 
 HAPPY_CALLS = [
     "wait-ssh", "mkdir",
-    "up:remote_host_canary.sh", "fetch-k3s", "up:nvidia-runtime.toml", "up:device-plugin.yaml",
+    "up:remote_host_canary.sh", "fetch-k3s", "chmod-k3s", "up:nvidia-runtime.toml", "up:device-plugin.yaml",
     "verify-staged", "probe", "runtime-dropin", "install",
     "gpu-smi", "gpu-containerd", "gpu-listeners", "gpu-apply", "gpu-rollout", "gpu-nodes",
     "up:manifests", "deploy", "scale-deployment", "scale-hpa", "collect", "fetch", "cleanup",
 ]
 HAPPY_STEPS = [
-    "wait-ssh", "mkdir", "stage-script", "fetch-k3s", "stage-runtime", "stage-device-plugin",
+    "wait-ssh", "mkdir", "stage-script", "fetch-k3s", "chmod-k3s", "stage-runtime", "stage-device-plugin",
     "verify-staged", "probe", "runtime-dropin", "install", "gpu-check", "stage-manifests",
     "deploy", "scale-observe", "collect", "fetch-evidence", "cleanup",
 ]

@@ -776,6 +776,7 @@ def execute_plan(args: argparse.Namespace) -> dict[str, object]:
                     ["curl", "-fsSL", "--retry", "3", "--max-time", str(timeouts["stage"]), "-o", f"{root}/k3s", K3S_RELEASE_URL],
                     timeout=timeouts["stage"] + 30,
                 )
+                session.run("chmod-k3s", ["chmod", "0755", f"{root}/k3s"], timeout=SMALL_COMMAND_TIMEOUT_SECONDS)
             except SingleVmHpaError:
                 session.upload("stage-k3s", files["k3s_binary"], f"{root}/k3s", timeout=timeouts["stage"])
             session.upload("stage-runtime", files["nvidia_runtime"], f"{root}/nvidia-runtime.toml", timeout=timeouts["stage"])
