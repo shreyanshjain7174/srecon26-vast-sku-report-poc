@@ -26,6 +26,34 @@
 Run `single-host-multigpu-20260927T132309Z-3a1e631f`; raw artifacts and `SHA256SUMS` are in
 `artifacts/live-runs/single-host-multigpu-20260927T132309Z-3a1e631f/remote-artifacts/`.
 
+## BF16 vs FP8 on the same 8x RTX 4090 host (machine 10216)
+
+Same model, image, TP8 and `max_model_len` 4096. FP8 is dynamic W8A8 (`--quantization fp8`);
+FP8 KV adds `--kv-cache-dtype fp8`. Short cells use 1024 input / 256 output tokens; `long-c8`
+uses 3072 / 512.
+
+| Per GPU | BF16 | FP8 | FP8 + FP8 KV |
+| --- | --- | --- | --- |
+| Model weights | 6.69 GiB | 3.69 GiB | 3.69 GiB |
+| KV cache (whole engine) | 499,230 tokens | 611,508 tokens | 874,837 tokens |
+
+| Cell | BF16 tok/s, TTFT p50, TPOT p50 | FP8 | FP8 + FP8 KV |
+| --- | --- | --- | --- |
+| c1 | 65.2, 0.34 s, 14.1 ms | 72.5, 0.53 s, 11.9 ms | 69.0, 0.56 s, 12.5 ms |
+| c8 | 226.1, 2.62 s, 25.0 ms | 203.8, 3.92 s, 24.0 ms | 199.4, 4.05 s, 24.4 ms |
+| c32 | 316.2, 5.76 s, 77.8 ms | 271.6, 8.71 s, 87.3 ms | 257.5, 8.40 s, 91.2 ms |
+| long-c8 | 254.6, 3.22 s, 25.2 ms | 245.1, 4.58 s, 24.0 ms | 164.3, 6.28 s, 37.0 ms |
+
+- FP8 weights cut model memory per GPU 0.55x; FP8 KV grows KV capacity 1.75x over BF16.
+- One request at a time, FP8 decodes faster (TPOT 14.1 -> 11.9 ms, throughput +11 %).
+- Under 8 and 32 concurrent requests, BF16 keeps higher throughput and lower TTFT on this
+  PCIe-only host; KV capacity was never the limit at 4096-token contexts (KV usage peaked at
+  10 % in BF16).
+
+Runs `single-host-multigpu-20260928T074427Z-4050fa59` (fp8, fp8-kv) and
+`single-host-multigpu-20260928T083252Z-04cb07e6` (bf16); artifacts under each run's
+`remote-artifacts/<precision>/`.
+
 ## Earlier bounded canary (2026-09-23)
 
 Run `gpu-smoke-distinct-20260923101734` was the earlier final paid distinct-machine attempt. It finished `FAILED_SAFE`; it is not GPU, vLLM, latency, or autoscaling evidence.

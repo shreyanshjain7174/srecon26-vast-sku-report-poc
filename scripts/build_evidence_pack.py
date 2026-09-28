@@ -76,14 +76,20 @@ SLIDES = (
     (12, "8 concurrent: first token 7x slower.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-bf16",)),
     (13, "Empty queue. Latency still rose.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-bf16",)),
     (14, "Control on the SLO.", "PUBLISHED - KServe and llm-d docs", (), ("kserve-wva", "llmd-slo-aware")),
-    (15, "BF16 vs FP8, same host.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-precision",)),
+    (15, "FP8 buys memory here, not speed.", "MEASURED - 8x RTX 4090, one host", (), ("tp8-precision",)),
     (16, "Instrument every layer.", "SYNTHESIS - bottom-up rule", (), ()),
 )
 # Sealed single-host runs; each directory holds run.json and SHA256SUMS (one subdirectory per precision arm when present).
-MEASURED_RUNS: dict[str, str | None] = {
-    "tp8-bf16": "artifacts/live-runs/single-host-multigpu-20260927T132309Z-3a1e631f/remote-artifacts",
-    "tp8-precision": None,
+MEASURED_RUNS: dict[str, tuple[str, ...]] = {
+    "tp8-bf16": ("artifacts/live-runs/single-host-multigpu-20260927T132309Z-3a1e631f/remote-artifacts",),
+    "tp8-precision": (
+        "artifacts/live-runs/single-host-multigpu-20260928T074427Z-4050fa59/remote-artifacts",
+        "artifacts/live-runs/single-host-multigpu-20260928T083252Z-04cb07e6/remote-artifacts",
+    ),
 }
+_WEIGHT_LOG = re.compile(r"Model loading took ([0-9.]+) ?GiB")
+_KV_TOKENS_LOG = re.compile(r"GPU KV cache size: ([0-9,]+) tokens")
+_KV_MEMORY_LOG = re.compile(r"Available KV cache memory: ([0-9.]+) GiB")
 PUBLISHED_ACCESSED = "2026-09-25"
 PUBLISHED_SOURCES = {
     "vllm-fp8": {
@@ -1262,7 +1268,7 @@ def _latest_live_attempt() -> dict[str, object] | None:
     }
 
 
-def _measured_arm(arm_dir: Path) -> dict[str, object]:
+def _measured_arm(arm_dir: Path) -> dict[str, object] | None:
     sums = arm_dir / "SHA256SUMS"
     for line in sums.read_text(encoding="utf-8").splitlines():
         digest, _, name = line.partition("  ")
@@ -1270,8 +1276,11 @@ def _measured_arm(arm_dir: Path) -> dict[str, object]:
             raise SystemExit(f"measured run checksum mismatch: {arm_dir / name}")
     run = json.loads((arm_dir / "run.json").read_text(encoding="utf-8"))
     if run.get("status") != "completed":
-        raise SystemExit(f"measured run is not completed: {arm_dir}")
+        return None
     samples = [json.loads(line) for line in (arm_dir / "metrics.ndjson").read_text(encoding="utf-8").splitlines() if line.strip()]
+    log_path = arm_dir / "vllm.log"
+    log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+    weights, kv_tokens, kv_memory = (pattern.search(log) for pattern in (_WEIGHT_LOG, _KV_TOKENS_LOG, _KV_MEMORY_LOG))
     keys = ("concurrency", "input_tokens", "output_tokens", "output_tok_per_s", "ttft_p50_s", "ttft_p99_s", "tpot_p50_s", "tpot_p99_s", "e2e_p50_s")
     return {
         "run_json_sha256": hashlib.sha256((arm_dir / "run.json").read_bytes()).hexdigest(),
@@ -1279,22 +1288,34 @@ def _measured_arm(arm_dir: Path) -> dict[str, object]:
         "model_id": run["model_id"],
         "tensor_parallel": run["tensor_parallel"],
         "readiness_s": run["readiness_s"],
-        "cells": [{key: cell[key] for key in keys} for cell in run["cells"]],
+        "cells": [{"cell": cell["cell"], **{key: cell[key] for key in keys}} for cell in run["cells"]],
         "max_waiting": max((s["waiting"] for s in samples if s.get("waiting") is not None), default=None),
         "max_kv_cache_usage": max((s["kv_cache_usage"] for s in samples if s.get("kv_cache_usage") is not None), default=None),
+        "weights_gib_per_gpu": float(weights.group(1)) if weights else None,
+        "kv_cache_tokens": int(kv_tokens.group(1).replace(",", "")) if kv_tokens else None,
+        "kv_cache_memory_gib_per_gpu": float(kv_memory.group(1)) if kv_memory else None,
     }
 
 
 def _measured_results() -> dict[str, object]:
     results: dict[str, object] = {}
-    for source_id, relative in MEASURED_RUNS.items():
-        run_dir = ROOT / relative if relative else None
-        if run_dir is None or not run_dir.is_dir():
-            results[source_id] = {"status": "unavailable", "path": relative, "arms": {}}
-            continue
-        arm_dirs = [run_dir] if (run_dir / "run.json").exists() else sorted(p for p in run_dir.iterdir() if (p / "run.json").exists())
-        arms = {arm["precision"]: arm for arm in map(_measured_arm, arm_dirs)}
-        results[source_id] = {"status": "available" if arms else "unavailable", "path": relative, "arms": arms}
+    for source_id, relatives in MEASURED_RUNS.items():
+        arms: dict[str, object] = {}
+        skipped: list[str] = []
+        for relative in relatives:
+            run_dir = ROOT / relative
+            if not run_dir.is_dir():
+                continue
+            arm_dirs = [run_dir] if (run_dir / "run.json").exists() else sorted(p for p in run_dir.iterdir() if (p / "run.json").exists())
+            for arm_dir in arm_dirs:
+                arm = _measured_arm(arm_dir)
+                if arm is None:
+                    skipped.append(str(arm_dir.relative_to(ROOT)))
+                elif arm["precision"] in arms:
+                    raise SystemExit(f"duplicate measured precision arm {arm['precision']} for {source_id}")
+                else:
+                    arms[str(arm["precision"])] = arm
+        results[source_id] = {"status": "available" if arms else "unavailable", "paths": list(relatives), "arms": arms, "skipped_incomplete_arms": skipped}
     return results
 
 

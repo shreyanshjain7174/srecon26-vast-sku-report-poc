@@ -47,7 +47,7 @@ native diagrams, chart treatment, and transitions.
 | 12 | 8 concurrent: first token 7x slower. | MEASURED - 8x RTX 4090, one host | `tp8-bf16` | TTFT 7.3x, TPOT 1.8x; throughput 3.1x on its own row |
 | 13 | Empty queue. Latency still rose. | MEASURED - 8x RTX 4090, one host | `tp8-bf16` | Queue 0, KV ~2 %, p50 TTFT 3.9 s at 8 concurrent |
 | 14 | Control on the SLO. | PUBLISHED - KServe and llm-d docs | `kserve-wva`, `llmd-slo-aware` | Loop on queue, KV, saturation, P90 TTFT/TPOT vs SLO |
-| 15 | BF16 vs FP8, same host. | MEASURED - 8x RTX 4090, one host | `tp8-precision` | BF16 vs FP8 (and FP8 KV) at concurrency 8 |
+| 15 | FP8 buys memory here, not speed. | MEASURED - 8x RTX 4090, one host | `tp8-precision` | Weights 6.69 -> 3.69 GiB/GPU; KV 499k -> 612k -> 875k tokens; c8 226 vs 204 tok/s |
 | 16 | Instrument every layer. | SYNTHESIS - bottom-up rule | - | One metric per layer; fix the lowest saturated layer first |
 
 ## Sources

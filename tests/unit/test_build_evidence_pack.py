@@ -520,7 +520,7 @@ def test_catalog_uses_layered_inference_story_and_registered_sources(
         "8 concurrent: first token 7x slower.",
         "Empty queue. Latency still rose.",
         "Control on the SLO.",
-        "BF16 vs FP8, same host.",
+        "FP8 buys memory here, not speed.",
         "Instrument every layer.",
     ]
     banned = ("failed", "invalid", "limitation", "limited resources", "not yet", "smoke", "scale test", "not shown")
@@ -1229,17 +1229,18 @@ def test_two_node_startup_counts_attempts_not_instances_and_labels_subset(
     assert "Instances created" not in svg
 
 
-def _write_measured_arm(arm_dir: Path, precision: str) -> None:
+def _write_measured_arm(arm_dir: Path, precision: str, status: str = "completed") -> None:
     arm_dir.mkdir(parents=True)
     cell = {
-        "concurrency": 8, "input_tokens": 1024, "output_tokens": 256, "output_tok_per_s": 193.1,
+        "cell": "short-c8", "concurrency": 8, "input_tokens": 1024, "output_tokens": 256, "output_tok_per_s": 193.1,
         "ttft_p50_s": 3.89, "ttft_p99_s": 4.29, "tpot_p50_s": 0.026, "tpot_p99_s": 0.040, "e2e_p50_s": 10.6,
         "successes": 64,
     }
-    run = {"status": "completed", "precision": precision, "model_id": "Qwen/Qwen3.8-27B", "tensor_parallel": 8, "readiness_s": 475.0, "cells": [cell]}
+    run = {"status": status, "precision": precision, "model_id": "Qwen/Qwen3.8-27B", "tensor_parallel": 8, "readiness_s": 475.0, "cells": [cell]}
     (arm_dir / "run.json").write_text(json.dumps(run), encoding="utf-8")
     (arm_dir / "metrics.ndjson").write_text('{"waiting": 0.0, "kv_cache_usage": 0.02}\n{"error": "http 503"}\n', encoding="utf-8")
-    lines = [f"{hashlib.sha256((arm_dir / name).read_bytes()).hexdigest()}  {name}\n" for name in ("metrics.ndjson", "run.json")]
+    (arm_dir / "vllm.log").write_text("Model loading took 6.69 GiB memory\nAvailable KV cache memory: 12.65 GiB\nGPU KV cache size: 499,230 tokens\n", encoding="utf-8")
+    lines = [f"{hashlib.sha256((arm_dir / name).read_bytes()).hexdigest()}  {name}\n" for name in ("metrics.ndjson", "run.json", "vllm.log")]
     (arm_dir / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
 
 
@@ -1248,23 +1249,26 @@ def test_measured_results_read_verified_precision_arms(tmp_path: Path, monkeypat
     _write_measured_arm(tmp_path / "single", "bf16")
     _write_measured_arm(tmp_path / "arms/bf16", "bf16")
     _write_measured_arm(tmp_path / "arms/fp8", "fp8")
-    monkeypatch.setattr(evidence_pack, "MEASURED_RUNS", {"single": "single", "arms": "arms", "missing": None})
+    _write_measured_arm(tmp_path / "arms/fp8-kv", "fp8-kv", status="failed")
+    monkeypatch.setattr(evidence_pack, "MEASURED_RUNS", {"single": ("single",), "arms": ("arms",), "missing": ("nope",)})
 
     results = evidence_pack._measured_results()
 
-    assert results["missing"] == {"status": "unavailable", "path": None, "arms": {}}
+    assert results["missing"] == {"status": "unavailable", "paths": ["nope"], "arms": {}, "skipped_incomplete_arms": []}
+    assert results["arms"]["skipped_incomplete_arms"] == ["arms/fp8-kv"]
     assert list(results["single"]["arms"]) == ["bf16"]
     assert sorted(results["arms"]["arms"]) == ["bf16", "fp8"]
     arm = results["arms"]["arms"]["fp8"]
     assert arm["max_waiting"] == 0.0 and arm["max_kv_cache_usage"] == 0.02
-    assert "successes" not in arm["cells"][0]
+    assert "successes" not in arm["cells"][0] and arm["cells"][0]["cell"] == "short-c8"
+    assert (arm["weights_gib_per_gpu"], arm["kv_cache_tokens"], arm["kv_cache_memory_gib_per_gpu"]) == (6.69, 499230, 12.65)
 
 
 def test_measured_results_reject_tampered_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(evidence_pack, "ROOT", tmp_path)
     _write_measured_arm(tmp_path / "run", "bf16")
     (tmp_path / "run/run.json").write_text('{"status": "completed"}', encoding="utf-8")
-    monkeypatch.setattr(evidence_pack, "MEASURED_RUNS", {"run": "run"})
+    monkeypatch.setattr(evidence_pack, "MEASURED_RUNS", {"run": ("run",)})
 
     with pytest.raises(SystemExit, match="checksum mismatch"):
         evidence_pack._measured_results()
