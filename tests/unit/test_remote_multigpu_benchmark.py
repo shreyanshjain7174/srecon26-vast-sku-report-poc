@@ -125,7 +125,7 @@ def test_serve_command_rejects_unknown_precision() -> None:
     with pytest.raises(ValueError, match="unknown precision"):
         bench.serve_command(SECRET, "int4")
 
-@pytest.mark.parametrize("bad", ["", "has space", "tab\tkey", "new\nline"])
+@pytest.mark.parametrize("bad", ["", "has space", "tab\tkey", "new\nline", "-leading-dash"])
 def test_serve_command_rejects_bad_api_key(bad: str) -> None:
     with pytest.raises(ValueError):
         bench.serve_command(bad)

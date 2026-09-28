@@ -89,8 +89,8 @@ def benchmark_cells(matrix: str) -> tuple[Cell, ...]:
 
 
 def serve_command(api_key: str, precision: str = "bf16") -> list[str]:
-    if not api_key or any(ch.isspace() for ch in api_key):
-        raise ValueError("api_key must be a non-empty token without whitespace")
+    if not api_key or any(ch.isspace() for ch in api_key) or api_key.startswith("-"):
+        raise ValueError("api_key must be a non-empty token without whitespace or a leading '-'")
     if precision not in PRECISION_FLAGS:
         raise ValueError(f"unknown precision {precision!r}")
     return [
@@ -555,7 +555,7 @@ class Runtime:
     wall: Callable[[], float] = time.time
     sleep: Callable[[float], None] = time.sleep
     killpg: Callable[[int, int], None] = os.killpg
-    token_factory: Callable[[], str] = lambda: secrets.token_urlsafe(32)
+    token_factory: Callable[[], str] = lambda: secrets.token_hex(32)
 
 
 def run_benchmark(args: argparse.Namespace, rt: Optional[Runtime] = None) -> int:
